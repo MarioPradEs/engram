@@ -812,14 +812,17 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	token := strings.TrimSpace(cc.Token)
 	serverURL := strings.TrimSpace(cc.ServerURL)
 
-	// REQ-211: token required.
+	// REQ-211: token required. The token is resolved from cloud.json first and
+	// overridden by ENGRAM_CLOUD_TOKEN when set, so both sources are tried.
+	// On Windows (Task Scheduler), the env var is often absent — the file path
+	// is the expected source (issue #421).
 	if token == "" {
-		log.Printf("[autosync] ERROR: ENGRAM_CLOUD_TOKEN is required when ENGRAM_CLOUD_AUTOSYNC=1; autosync disabled")
+		log.Printf("[autosync] ERROR: cloud token is not configured (set ENGRAM_CLOUD_TOKEN or store token in cloud.json via `engram cloud config`); autosync disabled")
 		return nil, nil
 	}
-	// REQ-211: server URL required.
+	// REQ-211: server URL required. Resolved from cloud.json or ENGRAM_CLOUD_SERVER.
 	if serverURL == "" {
-		log.Printf("[autosync] ERROR: ENGRAM_CLOUD_SERVER is required when ENGRAM_CLOUD_AUTOSYNC=1; autosync disabled")
+		log.Printf("[autosync] ERROR: cloud server URL is not configured (set ENGRAM_CLOUD_SERVER or run `engram cloud config --server <url>`); autosync disabled")
 		return nil, nil
 	}
 

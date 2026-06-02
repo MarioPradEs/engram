@@ -39,7 +39,11 @@ func openTestDB(t *testing.T) (*sql.DB, *CloudStore, func()) {
 		t.Fatalf("create schema: %v", err)
 	}
 
-	schemaDSN := dsn + "?search_path=" + schema
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	schemaDSN := dsn + sep + "search_path=" + schema
 	cs, err := New(cloud.Config{DSN: schemaDSN})
 	if err != nil {
 		adminDB.Exec(fmt.Sprintf("DROP SCHEMA %s CASCADE", schema))
@@ -178,5 +182,26 @@ func TestMigrateBackfillAttributionDualJSONBSet(t *testing.T) {
 	}
 	if _, ok := mutMap["user_email"]; !ok {
 		t.Errorf("cloud_mutations.payload missing user_email key after backfill; payload=%s", mutPayload)
+	}
+
+	// R2 (decision #817): the dual jsonb_set MUST also update cloud_chunks.payload.observations[].
+	var chunkPayloadOut []byte
+	err = cs.db.QueryRowContext(ctx, `
+		SELECT payload FROM cloud_chunks WHERE chunk_id = 'chunk-001'
+	`).Scan(&chunkPayloadOut)
+	if err != nil {
+		t.Fatalf("read chunk payload: %v", err)
+	}
+	var chunkMap map[string]interface{}
+	if err := json.Unmarshal(chunkPayloadOut, &chunkMap); err != nil {
+		t.Fatalf("unmarshal chunk payload: %v", err)
+	}
+	obs, _ := chunkMap["observations"].([]interface{})
+	if len(obs) == 0 {
+		t.Fatal("cloud_chunks.payload.observations[] is empty after backfill")
+	}
+	obsEntry, _ := obs[0].(map[string]interface{})
+	if _, ok := obsEntry["user_email"]; !ok {
+		t.Errorf("cloud_chunks.payload.observations[0] missing user_email key after dual jsonb_set backfill; payload=%s", chunkPayloadOut)
 	}
 }

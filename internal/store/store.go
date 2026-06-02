@@ -5170,6 +5170,18 @@ func (s *Store) backfillPromptSyncMutationsTx(tx *sql.Tx, project string) error 
 }
 
 func (s *Store) enqueueSyncMutationTx(tx *sql.Tx, entity, entityKey, op string, payload any) error {
+	// Gate A (spec: scope-enforcement S11 / design Q4): personal-scope observations
+	// MUST NOT be enqueued for cloud sync. Personal data stays local-only
+	// unconditionally — no flag, config, or user action overrides this.
+	// This is the PRIMARY defense; the server's Gate B is defense-in-depth only.
+	if entity == SyncEntityObservation {
+		if obsPayload, ok := payload.(syncObservationPayload); ok {
+			if strings.EqualFold(strings.TrimSpace(obsPayload.Scope), "personal") {
+				return nil // silently skip — personal stays local
+			}
+		}
+	}
+
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err

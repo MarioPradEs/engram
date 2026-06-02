@@ -676,6 +676,18 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_occurred_at ON cloud_sync_audit_log (occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_contributor_project ON cloud_sync_audit_log (contributor, project)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_log_outcome ON cloud_sync_audit_log (outcome)`,
+
+		// ── Phase: OAuth & user attribution — denorm columns on cloud_mutations ──
+		// These columns denormalize attribution data extracted from the JSONB payload
+		// for efficient querying (scope filter, audit queries).
+		`ALTER TABLE cloud_mutations ADD COLUMN IF NOT EXISTS user_email  TEXT`,
+		`ALTER TABLE cloud_mutations ADD COLUMN IF NOT EXISTS user_name   TEXT`,
+		`ALTER TABLE cloud_mutations ADD COLUMN IF NOT EXISTS department  TEXT`,
+		`ALTER TABLE cloud_mutations ADD COLUMN IF NOT EXISTS user_deleted BOOLEAN NOT NULL DEFAULT FALSE`,
+
+		// Indices for scope-filter and audit queries on attribution columns.
+		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_user_email ON cloud_mutations(user_email)`,
+		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_department  ON cloud_mutations(department)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {
@@ -685,6 +697,79 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 	if err := cs.backfillProjectSessionsFromChunks(ctx); err != nil {
 		return err
 	}
+
+	// ── Mario pre-OAuth attribution backfill (R2: dual jsonb_set) ──────────────
+	// For rows with entity='observation' and user_email IS NULL, stamp the denorm
+	// column with '' (empty) so the row is no longer NULL (making it easy to
+	// identify "no attribution yet" vs "attribution explicitly set").
+	// Simultaneously apply jsonb_set to cloud_mutations.payload to embed user_email.
+	// A separate pass updates cloud_chunks.payload.observations[] (dual jsonb_set).
+	if err := cs.backfillAttributionDenorm(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// backfillAttributionDenorm populates the denorm columns and patches JSONB
+// payload for legacy cloud_mutations rows that were inserted before OAuth.
+// Only runs on rows WHERE entity = 'observation' AND user_email IS NULL.
+// Safe to re-run (idempotent via the NULL check).
+func (cs *CloudStore) backfillAttributionDenorm(ctx context.Context) error {
+	// 1. Stamp denorm columns with empty string (marks row as "backfill applied").
+	if _, err := cs.db.ExecContext(ctx, `
+		UPDATE cloud_mutations
+		SET
+			user_email  = COALESCE(payload->>'user_email',  ''),
+			user_name   = COALESCE(payload->>'user_name',   ''),
+			department  = COALESCE(payload->>'department',  ''),
+			user_deleted = COALESCE((payload->>'user_deleted')::boolean, FALSE)
+		WHERE entity = 'observation' AND user_email IS NULL
+	`); err != nil {
+		return fmt.Errorf("cloudstore: backfill attribution denorm: %w", err)
+	}
+
+	// 2. Dual jsonb_set — patch cloud_mutations.payload with user_email key.
+	if _, err := cs.db.ExecContext(ctx, `
+		UPDATE cloud_mutations
+		SET payload = jsonb_set(payload, '{user_email}', to_jsonb(COALESCE(user_email, '')), true)
+		WHERE entity = 'observation'
+		  AND NOT (payload ? 'user_email')
+	`); err != nil {
+		return fmt.Errorf("cloudstore: backfill attribution payload (mutations): %w", err)
+	}
+
+	// 3. Dual jsonb_set — patch cloud_chunks.payload.observations[] entries.
+	// For each observation element in the array that lacks a user_email key,
+	// inject an empty user_email.  This is done per-row via a scalar update.
+	if _, err := cs.db.ExecContext(ctx, `
+		UPDATE cloud_chunks
+		SET payload = jsonb_set(
+			payload,
+			'{observations}',
+			(
+				SELECT jsonb_agg(
+					CASE
+						WHEN elem ? 'user_email' THEN elem
+						ELSE jsonb_set(elem, '{user_email}', '""'::jsonb, true)
+					END
+				)
+				FROM jsonb_array_elements(
+					COALESCE(payload->'observations', '[]'::jsonb)
+				) AS elem
+			),
+			true
+		)
+		WHERE payload ? 'observations'
+		  AND EXISTS (
+			SELECT 1
+			FROM jsonb_array_elements(COALESCE(payload->'observations', '[]'::jsonb)) AS elem
+			WHERE NOT (elem ? 'user_email')
+		  )
+	`); err != nil {
+		return fmt.Errorf("cloudstore: backfill attribution payload (chunks): %w", err)
+	}
+
 	return nil
 }
 

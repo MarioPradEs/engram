@@ -92,6 +92,12 @@ type LocalStore interface {
 	// a mutation. Used by the pull loop to advance the cursor on all-filtered pages
 	// (design Q3: LatestSeq = max scanned seq, prevents stall on scope-filtered pages).
 	UpdatePulledSeq(targetKey string, seq int64) error
+	// IsReclassifyComplete reports whether the local observation backlog has been
+	// classified by the v2 rules (design Q2). Push is gated until this returns true.
+	IsReclassifyComplete(targetKey string) (bool, error)
+	// MarkReclassifyComplete marks the reclassify pass as done for targetKey.
+	// Called by Phase 3 engram reclassify after classification finishes.
+	MarkReclassifyComplete(targetKey string) error
 	// Phase E: deferred relation retry.
 	ReplayDeferred() (store.ReplayDeferredResult, error)
 	CountDeferredAndDead() (deferred, dead int, err error)
@@ -103,6 +109,16 @@ type nonEnrolledPendingError struct {
 
 func (e *nonEnrolledPendingError) Error() string {
 	return nonEnrolledPendingMessage(e.counts)
+}
+
+// reclassifyPendingError is returned by push() when IsReclassifyComplete is false.
+// It mirrors nonEnrolledPendingError — both cause recordBlocked with a distinct
+// reason_code so the UI can surface the right remediation message.
+type reclassifyPendingError struct{}
+
+func (e *reclassifyPendingError) Error() string {
+	return "push blocked: local observations have not been classified by v2 rules. " +
+		"Run `engram reclassify` to classify your observation backlog before syncing."
 }
 
 // CloudTransport is the subset of remote.MutationTransport methods the manager needs.
@@ -415,9 +431,14 @@ func (m *Manager) cycle(ctx context.Context) {
 
 	// Push, then pull.
 	if err := m.push(ctx); err != nil {
-		var blocked *nonEnrolledPendingError
-		if errors.As(err, &blocked) {
+		var nonEnrolled *nonEnrolledPendingError
+		if errors.As(err, &nonEnrolled) {
 			m.recordBlocked(err.Error(), constants.ReasonNonEnrolledPendingMutations)
+			return
+		}
+		var reclassify *reclassifyPendingError
+		if errors.As(err, &reclassify) {
+			m.recordBlocked(err.Error(), constants.ReasonReclassifyRequired)
 			return
 		}
 		reasonCode := classifyTransportError(err)
@@ -484,6 +505,20 @@ func (m *Manager) push(ctx context.Context) error {
 	}
 
 	m.setPhase(PhasePushing)
+
+	// Design Q2: reclassify gate — block push until local observations have been
+	// classified by v2 rules. This ensures personal scope never reaches the server
+	// (classified_by_v2 marker gates which observations are eligible for upload).
+	// Default = complete (1) so existing installs are not blocked; Phase 3 login
+	// hook sets it to 0 for new users, then engram reclassify sets it back to 1.
+	complete, err := m.store.IsReclassifyComplete(m.cfg.TargetKey)
+	if err != nil {
+		log.Printf("[autosync] IsReclassifyComplete: %v (treating as incomplete to be safe)", err)
+		complete = false
+	}
+	if !complete {
+		return &reclassifyPendingError{}
+	}
 
 	pending, err := m.store.ListPendingSyncMutations(m.cfg.TargetKey, m.cfg.PushBatchSize)
 	if err != nil {

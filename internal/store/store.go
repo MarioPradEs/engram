@@ -1082,7 +1082,72 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// Phase: OAuth — reclassify gate column on sync_state (design Q2).
+	// DEFAULT 1 (complete) so existing installs are not blocked by the gate.
+	// Phase 3 login hook sets it to 0; engram reclassify sets it back to 1.
+	if err := s.addColumnIfNotExists("sync_state", "reclassify_complete", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// IsReclassifyComplete reports whether the reclassification pass has been completed
+// for the given sync target. Returns (true, nil) when the flag is set or the row does
+// not exist (safe default: existing installs are treated as complete per spec S10).
+func (s *Store) IsReclassifyComplete(targetKey string) (bool, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	row := s.db.QueryRow(
+		`SELECT COALESCE(reclassify_complete, 1) FROM sync_state WHERE target_key = ?`,
+		targetKey,
+	)
+	var complete int
+	if err := row.Scan(&complete); err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return true, nil // no row → default complete (existing install)
+		}
+		return false, fmt.Errorf("store: IsReclassifyComplete: %w", err)
+	}
+	return complete != 0, nil
+}
+
+// MarkReclassifyComplete marks the reclassification pass as complete for targetKey.
+// Called by the engram reclassify command (Phase 3) after classification finishes.
+func (s *Store) MarkReclassifyComplete(targetKey string) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
+			targetKey, SyncLifecycleIdle,
+		); err != nil {
+			return err
+		}
+		_, err := s.execHook(tx,
+			`UPDATE sync_state SET reclassify_complete = 1, updated_at = datetime('now') WHERE target_key = ?`,
+			targetKey,
+		)
+		return err
+	})
+}
+
+// MarkReclassifyIncomplete marks the reclassification pass as NOT complete for targetKey.
+// Called by the engram login hook (Phase 3) on first OAuth login to trigger
+// the user to run engram reclassify before syncing.
+func (s *Store) MarkReclassifyIncomplete(targetKey string) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at) VALUES (?, ?, datetime('now'))`,
+			targetKey, SyncLifecycleIdle,
+		); err != nil {
+			return err
+		}
+		_, err := s.execHook(tx,
+			`UPDATE sync_state SET reclassify_complete = 0, updated_at = datetime('now') WHERE target_key = ?`,
+			targetKey,
+		)
+		return err
+	})
 }
 
 func (s *Store) SaveCloudUpgradeState(state CloudUpgradeState) error {

@@ -7,6 +7,7 @@ const (
 
 	ReasonBlockedUnenrolled           = "blocked_unenrolled"
 	ReasonNonEnrolledPendingMutations = "non_enrolled_pending_mutations"
+	ReasonReclassifyRequired          = "reclassify_required"
 	ReasonPaused                      = "paused"
 	ReasonAuthRequired                = "auth_required"
 	ReasonPolicyForbidden             = "policy_forbidden"
@@ -41,6 +42,7 @@ const (
 var DeterministicReasons = []string{
 	ReasonBlockedUnenrolled,
 	ReasonNonEnrolledPendingMutations,
+	ReasonReclassifyRequired,
 	ReasonPaused,
 	ReasonAuthRequired,
 	ReasonPolicyForbidden,

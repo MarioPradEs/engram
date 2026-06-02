@@ -349,6 +349,13 @@ func (s *autosyncFakeStore) ReplayDeferred() (store.ReplayDeferredResult, error)
 
 func (s *autosyncFakeStore) CountDeferredAndDead() (int, int, error) { return 0, 0, nil }
 
+// Design Q3: cursor advance — no-op for E2E fake (state lives in GetSyncState).
+func (s *autosyncFakeStore) UpdatePulledSeq(_ string, _ int64) error { return nil }
+
+// Design Q2: reclassify gate — always complete in E2E tests (existing behavior preserved).
+func (s *autosyncFakeStore) IsReclassifyComplete(_ string) (bool, error) { return true, nil }
+func (s *autosyncFakeStore) MarkReclassifyComplete(_ string) error       { return nil }
+
 // httpPushMutations is a helper to push mutations directly to a test server.
 func httpPushMutations(t *testing.T, serverURL, token string, entries []map[string]any) *http.Response {
 	t.Helper()

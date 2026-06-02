@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud"
@@ -19,6 +21,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/dashboard"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
+	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
@@ -69,12 +72,28 @@ type cloudServerRuntime interface {
 }
 
 type defaultCloudRuntime struct {
-	server *cloudserver.CloudServer
-	store  *cloudstore.CloudStore
+	server       *cloudserver.CloudServer
+	store        *cloudstore.CloudStore
+	onSIGHUP     func() // called when SIGHUP is received (e.g. users.Loader.Reload)
 }
 
 func (r *defaultCloudRuntime) Start() error {
 	defer r.store.Close()
+	// Wire SIGHUP → onSIGHUP (e.g. users.YAMLLoader.Reload) when registered.
+	if r.onSIGHUP != nil {
+		sighupCh := make(chan os.Signal, 1)
+		signal.Notify(sighupCh, syscall.SIGHUP)
+		go func() {
+			for range sighupCh {
+				log.Printf("[engram-cloud] SIGHUP received — reloading user directory")
+				r.onSIGHUP()
+			}
+		}()
+		defer func() {
+			signal.Stop(sighupCh)
+			close(sighupCh)
+		}()
+	}
 	return r.server.Start()
 }
 
@@ -88,9 +107,46 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		_ = cs.Close()
 		return nil, err
 	}
+	cs.SetDashboardAllowedProjects(allowedProjects)
+
+	runtime := &defaultCloudRuntime{store: cs}
+
+	// When ENGRAM_USERS_FILE is set, use HeaderAuthenticator (X-Forwarded-Email +
+	// YAMLLoader) instead of static bearer-token auth. This is the OAuth-era auth
+	// seam: an upstream proxy (oauth2-proxy) sets X-Forwarded-Email and we resolve
+	// the identity from the user directory for per-request authorization.
+	usersFile := strings.TrimSpace(cfg.UsersFile)
+	if usersFile != "" {
+		loader, err := users.NewYAMLLoader(usersFile)
+		if err != nil {
+			_ = cs.Close()
+			return nil, fmt.Errorf("newCloudRuntime: load users file %q: %w", usersFile, err)
+		}
+		headerAuth := auth.NewHeaderAuthenticator(loader)
+		// SIGHUP → reload user directory so operator changes take effect without restart.
+		runtime.onSIGHUP = func() {
+			if err := loader.Reload(); err != nil {
+				log.Printf("[engram-cloud] users.Reload: %v (retaining last-good directory)", err)
+			} else {
+				log.Printf("[engram-cloud] user directory reloaded from %s", usersFile)
+			}
+		}
+		runtime.server = cloudserver.New(
+			cs,
+			headerAuth,
+			cfg.Port,
+			cloudserver.WithHost(cfg.BindHost),
+			cloudserver.WithProjectAuthorizer(headerAuth),
+			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
+			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
+			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+		)
+		return runtime, nil
+	}
+
+	// Legacy path: bearer-token auth (ENGRAM_CLOUD_TOKEN).
 	projectAuth := auth.NewProjectScopeAuthorizer(allowedProjects)
 	token := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
-	cs.SetDashboardAllowedProjects(allowedProjects)
 	insecureNoAuth := token == "" && envBool("ENGRAM_CLOUD_INSECURE_NO_AUTH")
 	var authenticator cloudserver.Authenticator
 	if !insecureNoAuth {
@@ -104,19 +160,17 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		authSvc.SetDashboardSessionTokens([]string{cfg.AdminToken})
 		authenticator = authSvc
 	}
-	return &defaultCloudRuntime{
-		server: cloudserver.New(
-			cs,
-			authenticator,
-			cfg.Port,
-			cloudserver.WithHost(cfg.BindHost),
-			cloudserver.WithProjectAuthorizer(projectAuth),
-			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
-			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
-			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
-		),
-		store: cs,
-	}, nil
+	runtime.server = cloudserver.New(
+		cs,
+		authenticator,
+		cfg.Port,
+		cloudserver.WithHost(cfg.BindHost),
+		cloudserver.WithProjectAuthorizer(projectAuth),
+		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
+		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
+		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+	)
+	return runtime, nil
 }
 
 func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.CloudStore, projects []string) error {

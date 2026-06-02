@@ -102,6 +102,12 @@ type Observation struct {
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
+	// Attribution + classification fields (Phase 1 — OAuth & user attribution).
+	UserEmail      string `json:"user_email,omitempty"`
+	UserName       string `json:"user_name,omitempty"`
+	Department     string `json:"department,omitempty"`
+	UserDeleted    bool   `json:"user_deleted,omitempty"`
+	ClassifiedByV2 bool   `json:"classified_by_v2,omitempty"`
 }
 
 type SearchResult struct {
@@ -368,6 +374,12 @@ type syncObservationPayload struct {
 	Deleted        bool    `json:"deleted,omitempty"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
 	HardDelete     bool    `json:"hard_delete,omitempty"`
+	// Attribution + classification fields (Phase 1 — OAuth & user attribution).
+	UserEmail      string `json:"user_email,omitempty"`
+	UserName       string `json:"user_name,omitempty"`
+	Department     string `json:"department,omitempty"`
+	UserDeleted    bool   `json:"user_deleted,omitempty"`
+	ClassifiedByV2 bool   `json:"classified_by_v2,omitempty"`
 }
 
 type syncPromptPayload struct {
@@ -1061,6 +1073,12 @@ func (s *Store) migrate() error {
 		CREATE INDEX IF NOT EXISTS idx_memrel_status_created
 			ON memory_relations(judgment_status, created_at DESC);
 	`); err != nil {
+		return err
+	}
+
+	// Phase: OAuth & user attribution — classified_by_v2 marker column.
+	// INTEGER NOT NULL DEFAULT 0 so legacy rows are treated as unclassified.
+	if err := s.addColumnIfNotExists("observations", "classified_by_v2", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -5470,6 +5488,11 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		LastSeenAt:     obs.LastSeenAt,
 		CreatedAt:      obs.CreatedAt,
 		UpdatedAt:      obs.UpdatedAt,
+		UserEmail:      obs.UserEmail,
+		UserName:       obs.UserName,
+		Department:     obs.Department,
+		UserDeleted:    obs.UserDeleted,
+		ClassifiedByV2: obs.ClassifiedByV2,
 	}
 }
 

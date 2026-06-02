@@ -76,7 +76,7 @@ func (s *fakeMutationStore) WriteChunk(ctx context.Context, project string, chun
 		body, _ := json.Marshal(prompt)
 		batch = append(batch, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: strings.TrimSpace(prompt.SyncID), Op: store.SyncOpUpsert, Payload: body})
 	}
-	_, err := s.InsertMutationBatch(ctx, batch)
+	_, err := s.InsertMutationBatch(ctx, batch, cloudstore.Attribution{})
 	return err
 }
 
@@ -171,7 +171,7 @@ func TestMalformedChunkRejectsBeforeMaterialization(t *testing.T) {
 	}
 }
 
-func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry) ([]int64, error) {
+func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry, _ cloudstore.Attribution) ([]int64, error) {
 	if s.errInsert != nil {
 		return nil, s.errInsert
 	}
@@ -381,7 +381,7 @@ func TestMutationPullEndpointSinceSeq(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("k%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
@@ -419,7 +419,7 @@ func TestMutationPullEndpointHasMore(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("k%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
@@ -469,7 +469,7 @@ func TestMutationPullEndpointBeyondLatest(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("k%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
@@ -506,10 +506,10 @@ func TestMutationPullEnrollmentFilter(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("ka%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-b", Entity: "obs", EntityKey: fmt.Sprintf("kb%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	// Caller only enrolled in proj-a
@@ -540,10 +540,10 @@ func TestMutationPullCrossTenantLeak(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("ka%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-b", Entity: "obs", EntityKey: fmt.Sprintf("kb%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	srvA := newMutationTestServer(ms, "token-a", []string{"proj-a"})
@@ -590,7 +590,7 @@ func TestMutationPullNoEnrollments(t *testing.T) {
 	ms := newFakeMutationStore()
 	_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
-	})
+	}, cloudstore.Attribution{})
 
 	srv := newMutationTestServer(ms, "secret", []string{}) // no enrollments
 
@@ -788,7 +788,7 @@ func TestMutationPullFailsClosedWithoutEnrolledProjectsProvider(t *testing.T) {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "proj-a", Entity: "obs", EntityKey: fmt.Sprintf("ka%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
 			{Project: "proj-b", Entity: "obs", EntityKey: fmt.Sprintf("kb%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	// Use a ProjectAuthorizer that does NOT implement EnrolledProjectsProvider
@@ -862,7 +862,7 @@ func TestMutationPullUsesEnrollmentProviderWhenImplemented(t *testing.T) {
 		_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 			{Project: "engram", Entity: "obs", EntityKey: fmt.Sprintf("ka%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
 			{Project: "other-tenant", Entity: "obs", EntityKey: fmt.Sprintf("kb%d", i), Op: "upsert", Payload: json.RawMessage(`{}`)},
-		})
+		}, cloudstore.Attribution{})
 	}
 
 	authz := &projectAuthWithEnrollment{token: "secret", enrolled: []string{"engram"}}
@@ -1573,7 +1573,7 @@ func TestMutationPullResponseEnvelopeHasProjectFields(t *testing.T) {
 	ms := newFakeMutationStore()
 	_, _ = ms.InsertMutationBatch(context.Background(), []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
-	})
+	}, cloudstore.Attribution{})
 
 	srv := newMutationTestServer(ms, "secret", []string{"proj-a"})
 

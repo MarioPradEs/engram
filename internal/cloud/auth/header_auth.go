@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
 
@@ -95,6 +96,26 @@ func (ha *HeaderAuthenticator) EnrolledProjects() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Attribution returns a cloudstore.Attribution populated from the most recently
+// authenticated principal. Returns a zero Attribution if Authorize has not yet
+// been called. This satisfies the optional AttributionProvider interface checked
+// by the mutation push handler.
+func (ha *HeaderAuthenticator) Attribution() cloudstore.Attribution {
+	ha.mu.RLock()
+	p := ha.principal
+	ha.mu.RUnlock()
+
+	if p == nil {
+		return cloudstore.Attribution{}
+	}
+	return cloudstore.Attribution{
+		UserEmail:   p.Email,
+		UserName:    p.Name,
+		Department:  p.Department,
+		UserDeleted: strings.EqualFold(p.Status, "removed"),
+	}
 }
 
 // AuthorizeProject returns nil if project is in the caller's enrolled set

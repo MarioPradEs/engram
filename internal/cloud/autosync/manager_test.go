@@ -16,24 +16,26 @@ import (
 // ─── Fakes ───────────────────────────────────────────────────────────────────
 
 type fakeLocalStore struct {
-	mu                sync.Mutex
-	mutations         []store.SyncMutation
-	syncState         *store.SyncState
-	leaseOwner        string
-	pushErr           error
-	pullErr           error
-	failureMessage    string
-	blockedReason     string
-	blockedMessage    string
-	appliedMuts       []store.SyncMutation
-	acquireGranted    bool
-	ackedSeqs         []int64
-	nonEnrolledCounts []store.PendingSyncMutationProjectCount
+	mu                 sync.Mutex
+	mutations          []store.SyncMutation
+	syncState          *store.SyncState
+	leaseOwner         string
+	pushErr            error
+	pullErr            error
+	failureMessage     string
+	blockedReason      string
+	blockedMessage     string
+	appliedMuts        []store.SyncMutation
+	acquireGranted     bool
+	ackedSeqs          []int64
+	nonEnrolledCounts  []store.PendingSyncMutationProjectCount
+	reclassifyComplete bool // default true so existing tests are unaffected
 }
 
 func newFakeLocalStore() *fakeLocalStore {
 	return &fakeLocalStore{
-		acquireGranted: true,
+		acquireGranted:     true,
+		reclassifyComplete: true, // existing installs treated as complete
 		syncState: &store.SyncState{
 			TargetKey:     "cloud",
 			Lifecycle:     "idle",
@@ -134,6 +136,22 @@ func (s *fakeLocalStore) UpdatePulledSeq(_ string, seq int64) error {
 	if s.syncState != nil && seq > s.syncState.LastPulledSeq {
 		s.syncState.LastPulledSeq = seq
 	}
+	return nil
+}
+
+// IsReclassifyComplete returns true by default so existing tests are unaffected.
+// Tests that need the gate to block set reclassifyComplete = false.
+func (s *fakeLocalStore) IsReclassifyComplete(_ string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reclassifyComplete, nil
+}
+
+// MarkReclassifyComplete sets the reclassify flag to true.
+func (s *fakeLocalStore) MarkReclassifyComplete(_ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reclassifyComplete = true
 	return nil
 }
 
@@ -1139,6 +1157,78 @@ func (t *errTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, er
 		return nil, t.pullErr
 	}
 	return &PullMutationsResponse{Mutations: []PulledMutation{}}, nil
+}
+
+// ─── Design Q2: Reclassify gate ──────────────────────────────────────────────
+
+// TestPushBlockedWhenReclassifyNotComplete verifies design Q2: when
+// IsReclassifyComplete returns false, push() must return a reclassifyPendingError
+// and the manager records a BLOCKED state with reason reclassify_required.
+// This mirrors the nonEnrolledPendingError / MarkSyncBlocked pattern.
+func TestPushBlockedWhenReclassifyNotComplete(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mu.Lock()
+	ls.reclassifyComplete = false // simulate new user before engram reclassify
+	ls.mu.Unlock()
+
+	// Pre-load a pending mutation so the push would normally proceed.
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "observation", EntityKey: "obs-1", Project: "proj-a", Payload: `{"sync_id":"obs-1","scope":"project","classified_by_v2":true}`},
+	}
+
+	tr := newFakeTransport()
+	tr.pushResult = &PushMutationsResult{AcceptedSeqs: []int64{101}}
+	mgr := New(ls, tr, DefaultConfig())
+
+	// push() must return an error when reclassify is not complete.
+	err := mgr.push(context.Background())
+	if err == nil {
+		t.Fatal("expected push to return error when reclassify not complete, got nil")
+	}
+
+	var reclassifyErr *reclassifyPendingError
+	if !errors.As(err, &reclassifyErr) {
+		t.Errorf("expected reclassifyPendingError, got %T: %v", err, err)
+	}
+
+	// Transport must NOT have been called (push blocked before any network I/O).
+	if got := atomic.LoadInt32(&tr.pushCalls); got != 0 {
+		t.Errorf("expected 0 transport push calls when reclassify blocked, got %d", got)
+	}
+}
+
+// TestManagerBlockedByReclassifyReasonCode verifies that the manager surfaces
+// ReasonReclassifyRequired in its Status when push is blocked by the reclassify gate.
+func TestManagerBlockedByReclassifyReasonCode(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.mu.Lock()
+	ls.reclassifyComplete = false
+	ls.mu.Unlock()
+
+	ls.mutations = []store.SyncMutation{
+		{Seq: 1, Entity: "observation", EntityKey: "obs-1", Project: "proj-a", Payload: `{}`},
+	}
+
+	tr := newFakeTransport()
+	cfg := DefaultConfig()
+	cfg.DebounceDuration = 10 * time.Millisecond
+	cfg.PollInterval = 10 * time.Millisecond
+
+	mgr := New(ls, tr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	go mgr.Run(ctx)
+	mgr.NotifyDirty()
+
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		status := mgr.Status()
+		if status.ReasonCode == "reclassify_required" {
+			return // success
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected reason_code=reclassify_required in Status, got %q", mgr.Status().ReasonCode)
 }
 
 // ─── Design Q3: Pull cursor advance on all-filtered pages ────────────────────

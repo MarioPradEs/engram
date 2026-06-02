@@ -6020,10 +6020,14 @@ func truncate(s string, max int) string {
 	return string(runes[:max]) + "..."
 }
 
+// normalizeScope enforces the 4-tier scope ladder.
+// Valid values — personal, department, project, team — pass through unchanged.
+// Any other value (including the legacy "global") is coerced to the default tier "project".
+// This is the default-narrower path: unknown scopes are never widened to a broader tier.
 func normalizeScope(scope string) string {
 	v := strings.TrimSpace(strings.ToLower(scope))
 	switch v {
-	case "personal", "global":
+	case "personal", "department", "project", "team":
 		return v
 	default:
 		return "project"

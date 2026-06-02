@@ -7858,19 +7858,28 @@ func TestGetDeferred_NotFound(t *testing.T) {
 	}
 }
 
+// TestNormalizeScopeHandlesGlobal was updated for the 4-tier scope ladder
+// (personal < department < project < team). The legacy "global" value is no
+// longer a valid tier and coerces to "project" (default-narrower rule).
 func TestNormalizeScopeHandlesGlobal(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
 	}{
-		{"global", "global"},
-		{"Global", "global"},
-		{"GLOBAL", "global"},
-		{"  global  ", "global"},
+		// Legacy "global" now coerces to "project" (default-narrower).
+		{"global", "project"},
+		{"Global", "project"},
+		{"GLOBAL", "project"},
+		{"  global  ", "project"},
+		// The 4 valid tiers pass through (case-insensitive).
 		{"personal", "personal"},
 		{"Personal", "personal"},
+		{"department", "department"},
 		{"project", "project"},
 		{"Project", "project"},
+		{"team", "team"},
+		{"TEAM", "team"},
+		// Empty / unknown default to "project".
 		{"", "project"},
 		{"unknown", "project"},
 	}

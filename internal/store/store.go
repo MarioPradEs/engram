@@ -3968,6 +3968,32 @@ func (s *Store) MarkSyncHealthy(targetKey string) error {
 	})
 }
 
+// UpdatePulledSeq advances the pull cursor (last_pulled_seq) for targetKey to seq
+// without applying any mutation. Used by the autosync pull loop to persist the
+// cursor watermark when a server response page contains only scope-filtered rows
+// (design Q3: cursor must advance even on all-filtered pages so the next pull
+// does not re-scan the same window).
+// No-ops when seq <= current last_pulled_seq.
+func (s *Store) UpdatePulledSeq(targetKey string, seq int64) error {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	return s.withTx(func(tx *sql.Tx) error {
+		state, err := s.getSyncStateTx(tx, targetKey)
+		if err != nil {
+			return err
+		}
+		if seq <= state.LastPulledSeq {
+			return nil // already at or past this seq
+		}
+		_, err = s.execHook(tx,
+			`UPDATE sync_state
+			 SET last_pulled_seq = ?, updated_at = datetime('now')
+			 WHERE target_key = ?`,
+			seq, targetKey,
+		)
+		return err
+	})
+}
+
 func (s *Store) MarkSyncPending(targetKey string) error {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	return s.withTx(func(tx *sql.Tx) error {

@@ -38,7 +38,7 @@ type StoredMutation = cloudstore.StoredMutation
 // s.store.(MutationStore) succeeds at runtime with a real *cloudstore.CloudStore.
 type MutationStore interface {
 	InsertMutationBatch(ctx context.Context, batch []cloudstore.MutationEntry, attr cloudstore.Attribution) ([]int64, error)
-	ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]cloudstore.StoredMutation, bool, int64, error)
+	ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string, scopeFilter *cloudstore.MutationScopeFilter) ([]cloudstore.StoredMutation, bool, int64, error)
 	IsProjectSyncEnabled(project string) (bool, error)
 }
 
@@ -282,7 +282,23 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	mutations, hasMore, latestSeq, err := ms.ListMutationsSince(r.Context(), sinceSeq, limit, allowedProjects)
+	// Resolve scope filter from the authenticated identity (design Q3).
+	// When the auth implements AttributionProvider, use the caller's identity
+	// to filter observations by scope tier. nil means no scope filter (legacy).
+	var scopeFilter *cloudstore.MutationScopeFilter
+	if ap, ok := s.auth.(interface {
+		Attribution() cloudstore.Attribution
+	}); ok {
+		attr := ap.Attribution()
+		if attr.UserEmail != "" {
+			scopeFilter = &cloudstore.MutationScopeFilter{
+				CallerEmail:      attr.UserEmail,
+				CallerDepartment: attr.Department,
+			}
+		}
+	}
+
+	mutations, hasMore, latestSeq, err := ms.ListMutationsSince(r.Context(), sinceSeq, limit, allowedProjects, scopeFilter)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list mutations: %v", err), http.StatusInternalServerError)
 		return

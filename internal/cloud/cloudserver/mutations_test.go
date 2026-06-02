@@ -184,7 +184,7 @@ func (s *fakeMutationStore) InsertMutationBatch(ctx context.Context, batch []Mut
 	return seqs, nil
 }
 
-func (s *fakeMutationStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]StoredMutation, bool, int64, error) {
+func (s *fakeMutationStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string, _ *cloudstore.MutationScopeFilter) ([]StoredMutation, bool, int64, error) {
 	if s.errList != nil {
 		return nil, false, 0, s.errList
 	}

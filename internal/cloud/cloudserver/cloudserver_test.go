@@ -1400,7 +1400,7 @@ func (s *fakeAuditableStoreForE2E) InsertMutationBatch(_ context.Context, batch 
 	return seqs, nil
 }
 
-func (s *fakeAuditableStoreForE2E) ListMutationsSince(_ context.Context, _ int64, _ int, _ []string) ([]StoredMutation, bool, int64, error) {
+func (s *fakeAuditableStoreForE2E) ListMutationsSince(_ context.Context, _ int64, _ int, _ []string, _ *cloudstore.MutationScopeFilter) ([]StoredMutation, bool, int64, error) {
 	return nil, false, 0, nil
 }
 

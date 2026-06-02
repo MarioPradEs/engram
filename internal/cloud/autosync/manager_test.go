@@ -126,6 +126,17 @@ func (s *fakeLocalStore) MarkSyncBlocked(_, reasonCode, message string) error {
 
 func (s *fakeLocalStore) MarkSyncHealthy(_ string) error { return nil }
 
+// UpdatePulledSeq records the cursor advance without applying a mutation.
+// Used by the pull loop for all-filtered scope pages (design Q3).
+func (s *fakeLocalStore) UpdatePulledSeq(_ string, seq int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.syncState != nil && seq > s.syncState.LastPulledSeq {
+		s.syncState.LastPulledSeq = seq
+	}
+	return nil
+}
+
 // Phase E: deferred replay stubs — base fakeLocalStore always returns zero counts
 // and no error. Tests that need real replay behavior use fakeLocalStoreWithDeferred.
 func (s *fakeLocalStore) ReplayDeferred() (store.ReplayDeferredResult, error) {
@@ -1128,6 +1139,94 @@ func (t *errTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse, er
 		return nil, t.pullErr
 	}
 	return &PullMutationsResponse{Mutations: []PulledMutation{}}, nil
+}
+
+// ─── Design Q3: Pull cursor advance on all-filtered pages ────────────────────
+
+// TestPullCursorAdvancesOnAllFilteredPage verifies design Q3: when the server
+// returns an empty Mutations slice but a non-zero LatestSeq (all rows were
+// scope-filtered server-side), the pull loop MUST advance sinceSeq to LatestSeq
+// so the next pull call does not re-scan the same window.
+//
+// Without this fix the cursor stalls and the pull loop spins forever on a
+// page of scope-filtered observations.
+func TestPullCursorAdvancesOnAllFilteredPage(t *testing.T) {
+	ls := newFakeLocalStore()
+	ls.syncState = &store.SyncState{
+		TargetKey:     "cloud",
+		Lifecycle:     "idle",
+		LastPulledSeq: 0,
+	}
+
+	// Transport returns two pages:
+	//   page 1: empty mutations (all filtered), LatestSeq=50, HasMore=true
+	//   page 2: one visible mutation seq=51, LatestSeq=51, HasMore=false
+	callCount := 0
+	tr := &customPullTransport{
+		pullFn: func(sinceSeq int64, _ int) (*PullMutationsResponse, error) {
+			callCount++
+			switch callCount {
+			case 1:
+				// Page 1: server scanned up to seq=50 but all filtered.
+				if sinceSeq != 0 {
+					return nil, fmt.Errorf("page 1: expected sinceSeq=0, got %d", sinceSeq)
+				}
+				return &PullMutationsResponse{
+					Mutations: []PulledMutation{},
+					HasMore:   true,
+					LatestSeq: 50,
+				}, nil
+			case 2:
+				// Page 2: cursor must have advanced past 50.
+				if sinceSeq != 50 {
+					return nil, fmt.Errorf("page 2: expected sinceSeq=50 (cursor advanced past all-filtered page), got %d", sinceSeq)
+				}
+				return &PullMutationsResponse{
+					Mutations: []PulledMutation{
+						{Seq: 51, Entity: "observation", EntityKey: "obs-q3", Op: "upsert", Payload: []byte(`{}`)},
+					},
+					HasMore:   false,
+					LatestSeq: 51,
+				}, nil
+			default:
+				return &PullMutationsResponse{Mutations: []PulledMutation{}, HasMore: false, LatestSeq: 51}, nil
+			}
+		},
+	}
+
+	mgr := New(ls, tr, DefaultConfig())
+	if err := mgr.pull(context.Background()); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+
+	if callCount != 2 {
+		t.Errorf("expected 2 transport.PullMutations calls, got %d", callCount)
+	}
+
+	// The visible mutation must have been applied.
+	ls.mu.Lock()
+	applied := append([]store.SyncMutation(nil), ls.appliedMuts...)
+	ls.mu.Unlock()
+	if len(applied) != 1 || applied[0].EntityKey != "obs-q3" {
+		t.Errorf("expected obs-q3 applied, got %v", applied)
+	}
+}
+
+// customPullTransport allows injecting a custom pull function for unit tests.
+type customPullTransport struct {
+	pushResult *PushMutationsResult
+	pullFn     func(sinceSeq int64, limit int) (*PullMutationsResponse, error)
+}
+
+func (t *customPullTransport) PushMutations(_ []MutationEntry) (*PushMutationsResult, error) {
+	if t.pushResult != nil {
+		return t.pushResult, nil
+	}
+	return &PushMutationsResult{AcceptedSeqs: []int64{}}, nil
+}
+
+func (t *customPullTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error) {
+	return t.pullFn(sinceSeq, limit)
 }
 
 // ─── Phase E: Autosync resilience tests (REQ-007, REQ-008) ──────────────────

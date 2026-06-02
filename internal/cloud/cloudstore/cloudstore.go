@@ -1373,11 +1373,33 @@ func canonicalMutationPayload(payload []byte) (string, error) {
 	return string(payload), nil
 }
 
+// MutationScopeFilter carries the authenticated caller's identity for
+// server-side scope filtering in ListMutationsSince (design Q3, spec S1-S4).
+// When nil, no scope filter is applied (all observations are returned).
+type MutationScopeFilter struct {
+	CallerEmail      string // for personal-scope ownership check
+	CallerDepartment string // for department-scope visibility
+}
+
 // ListMutationsSince returns mutations with seq > sinceSeq, filtered to allowedProjects.
 // If allowedProjects is nil, no project filter is applied (returns all).
 // If allowedProjects is non-nil (even empty), only those projects are returned.
+//
+// scopeFilter optionally restricts observation visibility to the authenticated
+// caller's entitlement (design Q3):
+//   - nil → no scope filter, all observations returned (legacy behaviour)
+//   - non-nil → observation rows are filtered by scope tier:
+//     team/project → visible to all enrolled users
+//     department   → visible only if row.department == caller.CallerDepartment
+//     personal     → visible only if row.user_email == caller.CallerEmail
+//     other entity → always visible
+//
+// Cursor invariant (design Q3): latestSeq is the max seq scanned in the query
+// window, including rows that were filtered out. This ensures the client pull
+// loop advances past all-filtered pages and never stalls.
+//
 // Returns (mutations, hasMore, latestSeq, error).
-func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]StoredMutation, bool, int64, error) {
+func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string, scopeFilter *MutationScopeFilter) ([]StoredMutation, bool, int64, error) {
 	if cs == nil || cs.db == nil {
 		return nil, false, 0, fmt.Errorf("cloudstore: not initialized")
 	}
@@ -1390,6 +1412,26 @@ func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, li
 		return []StoredMutation{}, false, 0, nil
 	}
 
+	// Build query: when scopeFilter is nil we use the legacy path (no scope WHERE).
+	// When scopeFilter is non-nil we use a CTE that:
+	//   1. scans up to scanLimit rows (raw, no scope filter) to compute windowMaxSeq
+	//   2. applies scope visibility filter on the scanned window
+	//   3. returns up to limit+1 filtered rows + windowMaxSeq
+	//
+	// scanLimit = max(100*limit, 5000) so all-filtered pages still advance the cursor.
+	// The hasMore check compares filtered result count vs limit (not scanLimit).
+	//
+	// Design Q3: latestSeq = max(windowMaxSeq, max_returned_seq) so the cursor
+	// always advances by at least the window scanned, preventing pull-loop stalls.
+
+	if scopeFilter == nil {
+		return cs.listMutationsSinceUnfiltered(ctx, sinceSeq, limit, allowedProjects)
+	}
+	return cs.listMutationsSinceScoped(ctx, sinceSeq, limit, allowedProjects, scopeFilter)
+}
+
+// listMutationsSinceUnfiltered is the original implementation (no scope filter).
+func (cs *CloudStore) listMutationsSinceUnfiltered(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]StoredMutation, bool, int64, error) {
 	// Fetch limit+1 to detect hasMore.
 	fetchLimit := limit + 1
 
@@ -1397,7 +1439,6 @@ func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, li
 	var err error
 
 	if allowedProjects == nil {
-		// No enrollment filter.
 		rows, err = cs.db.QueryContext(ctx, `
 			SELECT seq, project, entity, entity_key, op, payload::text, occurred_at
 			FROM cloud_mutations
@@ -1407,7 +1448,6 @@ func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, li
 			sinceSeq, fetchLimit,
 		)
 	} else {
-		// Filter by allowed projects.
 		rows, err = cs.db.QueryContext(ctx, `
 			SELECT seq, project, entity, entity_key, op, payload::text, occurred_at
 			FROM cloud_mutations
@@ -1449,6 +1489,143 @@ func (cs *CloudStore) ListMutationsSince(ctx context.Context, sinceSeq int64, li
 	}
 
 	return all, hasMore, latestSeq, nil
+}
+
+// listMutationsSinceScoped applies server-side scope visibility filtering (design Q3).
+// It scans a window of rows, applies the scope predicate in Go (post-scan), and
+// returns the windowMaxSeq as latestSeq so the cursor always advances.
+func (cs *CloudStore) listMutationsSinceScoped(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string, sf *MutationScopeFilter) ([]StoredMutation, bool, int64, error) {
+	// Scan a window large enough that we can fill 'limit' visible rows most of
+	// the time; we cap at 5000 to avoid full-table scans on huge datasets.
+	// If the entire window is filtered (e.g. all dept:ops), windowMaxSeq still
+	// advances the cursor so the next call doesn't re-scan the same rows.
+	const maxWindowMultiplier = 50
+	scanLimit := limit * maxWindowMultiplier
+	if scanLimit > 5000 {
+		scanLimit = 5000
+	}
+	if scanLimit < limit+1 {
+		scanLimit = limit + 1
+	}
+
+	var dbRows *sql.Rows
+	var err error
+
+	if allowedProjects == nil {
+		dbRows, err = cs.db.QueryContext(ctx, `
+			SELECT seq, project, entity, entity_key, op, payload::text, occurred_at,
+			       COALESCE(user_email, ''), COALESCE(department, '')
+			FROM cloud_mutations
+			WHERE seq > $1
+			ORDER BY seq ASC
+			LIMIT $2`,
+			sinceSeq, scanLimit,
+		)
+	} else {
+		dbRows, err = cs.db.QueryContext(ctx, `
+			SELECT seq, project, entity, entity_key, op, payload::text, occurred_at,
+			       COALESCE(user_email, ''), COALESCE(department, '')
+			FROM cloud_mutations
+			WHERE seq > $1 AND project = ANY($2)
+			ORDER BY seq ASC
+			LIMIT $3`,
+			sinceSeq, allowedProjects, scanLimit,
+		)
+	}
+	if err != nil {
+		return nil, false, 0, fmt.Errorf("cloudstore: scoped list mutations since %d: %w", sinceSeq, err)
+	}
+	defer dbRows.Close()
+
+	var visible []StoredMutation
+	windowMaxSeq := int64(0)
+	callerEmail := strings.ToLower(strings.TrimSpace(sf.CallerEmail))
+	callerDept := strings.ToLower(strings.TrimSpace(sf.CallerDepartment))
+
+	for dbRows.Next() {
+		var m StoredMutation
+		var payloadStr, rowEmail, rowDept string
+		var occurredAt time.Time
+		if err := dbRows.Scan(
+			&m.Seq, &m.Project, &m.Entity, &m.EntityKey, &m.Op,
+			&payloadStr, &occurredAt, &rowEmail, &rowDept,
+		); err != nil {
+			return nil, false, 0, fmt.Errorf("cloudstore: scan scoped mutation: %w", err)
+		}
+		m.Payload = json.RawMessage(payloadStr)
+		m.OccurredAt = occurredAt.UTC().Format(time.RFC3339)
+
+		// Advance cursor watermark regardless of visibility (Q3).
+		if m.Seq > windowMaxSeq {
+			windowMaxSeq = m.Seq
+		}
+
+		// Apply scope visibility predicate.
+		if !isMutationVisibleToScope(m.Entity, payloadStr, rowEmail, rowDept, callerEmail, callerDept) {
+			continue
+		}
+
+		// Collect visible rows up to limit+1 (hasMore detection).
+		if len(visible) <= limit {
+			visible = append(visible, m)
+		}
+	}
+	if err := dbRows.Err(); err != nil {
+		return nil, false, 0, fmt.Errorf("cloudstore: iterate scoped mutations: %w", err)
+	}
+
+	hasMore := len(visible) > limit
+	if hasMore {
+		visible = visible[:limit]
+	}
+
+	// Cursor invariant: latestSeq = max(windowMaxSeq, max visible seq).
+	// windowMaxSeq is always >= max visible seq, but be defensive.
+	latestSeq := windowMaxSeq
+	if len(visible) > 0 && visible[len(visible)-1].Seq > latestSeq {
+		latestSeq = visible[len(visible)-1].Seq
+	}
+
+	return visible, hasMore, latestSeq, nil
+}
+
+// isMutationVisibleToScope returns true if the mutation is visible to a caller
+// with the given email and department. Implements the 4-tier scope ladder (design Q7):
+//   - non-observation entities: always visible
+//   - scope=team or scope=project: visible to all enrolled callers
+//   - scope=department: visible only if row department matches caller department
+//   - scope=personal: visible only to the row owner (same email)
+//   - unknown/empty scope: treated as project (safe default)
+func isMutationVisibleToScope(entity, payloadStr, rowEmail, rowDept, callerEmail, callerDept string) bool {
+	if entity != "observation" {
+		return true
+	}
+
+	// Extract scope from payload JSON (payload->>'scope' equivalent in Go).
+	scope := extractScopeFromPayload(json.RawMessage(payloadStr))
+
+	rowEmailNorm := strings.ToLower(strings.TrimSpace(rowEmail))
+	rowDeptNorm := strings.ToLower(strings.TrimSpace(rowDept))
+
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "team", "project", "":
+		// team and project are visible to all enrolled users.
+		// Empty/unknown scope defaults to project (visible).
+		return true
+	case "department":
+		// Author always sees own observations (author-sees-own guard).
+		if callerEmail != "" && rowEmailNorm == callerEmail {
+			return true
+		}
+		return callerDept != "" && rowDeptNorm == callerDept
+	case "personal":
+		// Personal should not exist server-side (Gate B), but if it does,
+		// only the owner can see it.
+		return callerEmail != "" && rowEmailNorm == callerEmail
+	default:
+		// Unknown scope: treat as project (visible).
+		return true
+	}
 }
 
 func parseClientCreatedAt(value string) (*time.Time, error) {

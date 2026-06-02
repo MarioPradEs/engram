@@ -507,7 +507,7 @@ func TestWriteChunkMaterializesMutationsAndIsReplayIdempotent(t *testing.T) {
 		t.Fatalf("stored chunk payload mismatch")
 	}
 
-	mutations, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	mutations, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project}, nil)
 	if err != nil {
 		t.Fatalf("ListMutationsSince: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestWriteChunkMaterializesMutationsAndIsReplayIdempotent(t *testing.T) {
 	if err := cs.WriteChunk(context.Background(), project, chunkID, "tester", "2026-04-29T10:03:00Z", payload); err != nil {
 		t.Fatalf("replay WriteChunk: %v", err)
 	}
-	mutationsAfterReplay, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project})
+	mutationsAfterReplay, _, _, err := cs.ListMutationsSince(context.Background(), 0, 100, []string{project}, nil)
 	if err != nil {
 		t.Fatalf("ListMutationsSince after replay: %v", err)
 	}

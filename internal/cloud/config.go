@@ -16,6 +16,11 @@ type Config struct {
 	AdminToken       string
 	AllowedProjects  []string
 	MaxPushBodyBytes int64
+	// UsersFile is the path to the YAML user directory (users.yaml).
+	// When non-empty, HeaderAuthenticator is used instead of bearer-token auth;
+	// X-Forwarded-Email is resolved against the user directory.
+	// SIGHUP triggers a reload of the user directory at runtime.
+	UsersFile string
 }
 
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
@@ -60,6 +65,9 @@ func ConfigFromEnv() Config {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			cfg.MaxPushBodyBytes = n
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_USERS_FILE")); v != "" {
+		cfg.UsersFile = v
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_ALLOWED_PROJECTS")); v != "" {
 		parts := strings.Split(v, ",")

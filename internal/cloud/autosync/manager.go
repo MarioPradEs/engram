@@ -88,6 +88,10 @@ type LocalStore interface {
 	MarkSyncFailure(targetKey, message string, backoffUntil time.Time) error
 	MarkSyncBlocked(targetKey, reasonCode, message string) error
 	MarkSyncHealthy(targetKey string) error
+	// UpdatePulledSeq persists the pull cursor (last_pulled_seq) without applying
+	// a mutation. Used by the pull loop to advance the cursor on all-filtered pages
+	// (design Q3: LatestSeq = max scanned seq, prevents stall on scope-filtered pages).
+	UpdatePulledSeq(targetKey string, seq int64) error
 	// Phase E: deferred relation retry.
 	ReplayDeferred() (store.ReplayDeferredResult, error)
 	CountDeferredAndDead() (deferred, dead int, err error)
@@ -597,6 +601,18 @@ func (m *Manager) pull(ctx context.Context) error {
 			}
 			if rm.Seq > sinceSeq {
 				sinceSeq = rm.Seq
+			}
+		}
+
+		// Design Q3: cursor invariant — advance sinceSeq to LatestSeq even when
+		// all mutations on this page were scope-filtered server-side (empty
+		// Mutations slice but non-zero LatestSeq). Without this, the pull loop
+		// stalls on all-filtered pages and re-scans the same window forever.
+		if resp.LatestSeq > sinceSeq {
+			sinceSeq = resp.LatestSeq
+			// Persist the cursor advance so restarts don't re-scan filtered windows.
+			if err := m.store.UpdatePulledSeq(m.cfg.TargetKey, sinceSeq); err != nil {
+				log.Printf("[autosync] UpdatePulledSeq(%d): %v (non-fatal, cursor will re-advance next cycle)", sinceSeq, err)
 			}
 		}
 

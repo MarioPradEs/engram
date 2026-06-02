@@ -37,7 +37,7 @@ type StoredMutation = cloudstore.StoredMutation
 // BC1: Using cloudstore types directly (via alias) ensures the type assertion
 // s.store.(MutationStore) succeeds at runtime with a real *cloudstore.CloudStore.
 type MutationStore interface {
-	InsertMutationBatch(ctx context.Context, batch []cloudstore.MutationEntry) ([]int64, error)
+	InsertMutationBatch(ctx context.Context, batch []cloudstore.MutationEntry, attr cloudstore.Attribution) ([]int64, error)
 	ListMutationsSince(ctx context.Context, sinceSeq int64, limit int, allowedProjects []string) ([]cloudstore.StoredMutation, bool, int64, error)
 	IsProjectSyncEnabled(project string) (bool, error)
 }
@@ -199,7 +199,16 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries)
+	// Resolve server-side attribution from the authenticated identity (if any).
+	// The identity is carried by the Authenticator when it implements AttributionProvider.
+	var attr cloudstore.Attribution
+	if ap, ok := s.auth.(interface {
+		Attribution() cloudstore.Attribution
+	}); ok {
+		attr = ap.Attribution()
+	}
+
+	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries, attr)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("insert mutations: %v", err), http.StatusInternalServerError)
 		return

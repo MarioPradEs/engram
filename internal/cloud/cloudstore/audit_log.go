@@ -10,9 +10,15 @@ import (
 
 // ─── Outcome and Action Constants ─────────────────────────────────────────────
 
-// AuditOutcomeRejectedProjectPaused is the single outcome constant for v1.
-// Used as the `outcome` column value when a push is rejected because the project sync is paused.
+// AuditOutcomeRejectedProjectPaused is the outcome constant used when a push
+// is rejected because the project sync is paused.
 const AuditOutcomeRejectedProjectPaused = "rejected_project_paused"
+
+// AuditOutcomeRejectedPersonalScope is the outcome constant used when a
+// server-side Gate B drop occurs: an observation with scope=personal was
+// received in a mutation push and silently dropped (defense-in-depth).
+// A sentinel-seq is still returned so the client ack count matches (R1).
+const AuditOutcomeRejectedPersonalScope = "rejected_personal_scope"
 
 // AuditActionMutationPush discriminates mutation push rejections.
 const AuditActionMutationPush = "mutation_push"

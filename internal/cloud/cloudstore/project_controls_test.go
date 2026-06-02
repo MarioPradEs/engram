@@ -277,7 +277,7 @@ func TestInsertMutationBatchIsAtomicOnFailure(t *testing.T) {
 	}
 
 	// BW3: If the batch fails mid-way, InsertMutationBatch must return an error.
-	seqs, err := cs.InsertMutationBatch(context.Background(), batch)
+	seqs, err := cs.InsertMutationBatch(context.Background(), batch, Attribution{})
 	if err == nil {
 		t.Fatalf("expected error on partial batch failure, got nil (seqs=%v)", seqs)
 	}

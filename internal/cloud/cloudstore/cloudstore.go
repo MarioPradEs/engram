@@ -828,18 +828,72 @@ type MutationChunkBackfillReport struct {
 	ChunksInserted      int    `json:"chunks_inserted"`
 }
 
+// Attribution carries the server-resolved identity of the authenticated caller.
+// It is stamped into cloud_mutations denorm columns and the JSONB payload
+// for every observation entry in InsertMutationBatch.
+// Zero value (all empty/false) is treated as "no attribution available".
+type Attribution struct {
+	UserEmail   string
+	UserName    string
+	Department  string
+	UserDeleted bool
+}
+
 // InsertMutationBatch inserts a batch of mutations into the cloud_mutations journal.
-// Returns the sequence numbers assigned to each entry.
-// BW3: The entire batch is wrapped in a transaction — partial failures roll back
-// all prior entries so the client can retry the full batch without creating duplicates.
-func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry) ([]int64, error) {
+// Returns the sequence numbers assigned to each entry — one per input entry.
+//
+// When attr is non-zero, server-side attribution is stamped for observation entries:
+//   - denorm columns (user_email, user_name, department, user_deleted) are set
+//   - JSONB payload is updated with the same values
+//
+// Gate B (defense-in-depth, R1): observation entries with scope=personal are
+// silently dropped. A sentinel-seq value (< 0) is returned for each dropped entry
+// so the client ack count always equals len(batch). The drop is recorded in
+// cloud_sync_audit_log with outcome "rejected_personal_scope".
+//
+// BW3: The entire non-personal portion is wrapped in a transaction — partial
+// failures roll back all prior entries so the client can retry the full batch.
+func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationEntry, attr Attribution) ([]int64, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
 	if len(batch) == 0 {
 		return []int64{}, nil
 	}
-	chunks, err := materializedMutationBatchChunks(batch)
+
+	// Gate B pre-pass: identify personal-scope observation entries.
+	// We need the final seqs slice to have one entry per input entry,
+	// with sentinel values for dropped entries. Build a filtered batch
+	// for storage and record which original indices were dropped.
+	type dropInfo struct {
+		index     int
+		project   string
+		entityKey string
+	}
+	var drops []dropInfo
+	storedBatch := make([]MutationEntry, 0, len(batch))
+	droppedIdx := make(map[int]struct{}, 0) // original indices that are personal
+
+	for i, entry := range batch {
+		if strings.TrimSpace(entry.Entity) == "observation" {
+			scope := extractScopeFromPayload(entry.Payload)
+			if scope == "personal" {
+				drops = append(drops, dropInfo{
+					index:     i,
+					project:   strings.TrimSpace(entry.Project),
+					entityKey: strings.TrimSpace(entry.EntityKey),
+				})
+				droppedIdx[i] = struct{}{}
+				continue
+			}
+			// Stamp attribution into the payload + prepare denorm values for
+			// non-personal observation entries.
+			entry = stampAttributionIntoEntry(entry, attr)
+		}
+		storedBatch = append(storedBatch, entry)
+	}
+
+	chunks, err := materializedMutationBatchChunks(storedBatch)
 	if err != nil {
 		return nil, err
 	}
@@ -855,8 +909,9 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		}
 	}()
 
-	seqs := make([]int64, 0, len(batch))
-	for _, entry := range batch {
+	// Insert stored (non-personal) entries and collect their seqs.
+	storedSeqs := make([]int64, 0, len(storedBatch))
+	for _, entry := range storedBatch {
 		project := strings.TrimSpace(entry.Project)
 		entity := strings.TrimSpace(entry.Entity)
 		entityKey := strings.TrimSpace(entry.EntityKey)
@@ -865,18 +920,38 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		if len(payload) == 0 {
 			payload = json.RawMessage("{}")
 		}
-		var seq int64
-		err := tx.QueryRowContext(ctx, `
-			INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING seq`,
-			project, entity, entityKey, op, payload,
-		).Scan(&seq)
-		if err != nil {
-			return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
+
+		// Stamp denorm columns when attribution is available and entity is observation.
+		hasAttr := attr.UserEmail != ""
+		if entity == "observation" && hasAttr {
+			var seq int64
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO cloud_mutations (project, entity, entity_key, op, payload,
+					user_email, user_name, department, user_deleted)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				RETURNING seq`,
+				project, entity, entityKey, op, payload,
+				attr.UserEmail, attr.UserName, attr.Department, attr.UserDeleted,
+			).Scan(&seq)
+			if err != nil {
+				return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
+			}
+			storedSeqs = append(storedSeqs, seq)
+		} else {
+			var seq int64
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO cloud_mutations (project, entity, entity_key, op, payload)
+				VALUES ($1, $2, $3, $4, $5)
+				RETURNING seq`,
+				project, entity, entityKey, op, payload,
+			).Scan(&seq)
+			if err != nil {
+				return nil, fmt.Errorf("cloudstore: insert mutation: %w", err)
+			}
+			storedSeqs = append(storedSeqs, seq)
 		}
-		seqs = append(seqs, seq)
 	}
+
 	for _, chunk := range chunks {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
@@ -898,7 +973,78 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 	if len(chunks) > 0 {
 		cs.invalidateDashboardReadModel()
 	}
+
+	// Audit dropped personal entries (after commit — best-effort, non-fatal).
+	contributor := strings.TrimSpace(attr.UserEmail)
+	if contributor == "" {
+		contributor = "unknown"
+	}
+	for _, d := range drops {
+		_ = cs.InsertAuditEntry(ctx, AuditEntry{
+			Contributor: contributor,
+			Project:     d.project,
+			Action:      AuditActionMutationPush,
+			Outcome:     AuditOutcomeRejectedPersonalScope,
+			EntryCount:  1,
+			ReasonCode:  "gate_b_personal_scope",
+			Metadata:    map[string]any{"entity_key": d.entityKey},
+		})
+	}
+
+	// Build the final seqs slice: one value per original batch entry.
+	// Dropped entries get sentinel value -1 (negative, never a real DB seq).
+	seqs := make([]int64, len(batch))
+	storedIdx := 0
+	for origIdx := range batch {
+		if _, dropped := droppedIdx[origIdx]; dropped {
+			seqs[origIdx] = -1 // sentinel-seq (R1)
+		} else {
+			seqs[origIdx] = storedSeqs[storedIdx]
+			storedIdx++
+		}
+	}
 	return seqs, nil
+}
+
+// extractScopeFromPayload extracts the "scope" field from a JSON payload.
+// Returns empty string if not present or not a string.
+func extractScopeFromPayload(payload json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var p struct {
+		Scope string `json:"scope"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(p.Scope)
+}
+
+// stampAttributionIntoEntry returns a copy of entry with attribution fields
+// merged into the JSONB payload. Used for non-personal observation entries.
+func stampAttributionIntoEntry(entry MutationEntry, attr Attribution) MutationEntry {
+	if attr.UserEmail == "" {
+		return entry
+	}
+	payload := entry.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return entry
+	}
+	m["user_email"] = attr.UserEmail
+	m["user_name"] = attr.UserName
+	m["department"] = attr.Department
+	m["user_deleted"] = attr.UserDeleted
+	stamped, err := json.Marshal(m)
+	if err != nil {
+		return entry
+	}
+	entry.Payload = json.RawMessage(stamped)
+	return entry
 }
 
 const mutationBackfillChunkSize = 100

@@ -1390,7 +1390,7 @@ func (s *fakeAuditableStoreForE2E) IsProjectSyncEnabled(project string) (bool, e
 	return true, nil
 }
 
-func (s *fakeAuditableStoreForE2E) InsertMutationBatch(_ context.Context, batch []MutationEntry) ([]int64, error) {
+func (s *fakeAuditableStoreForE2E) InsertMutationBatch(_ context.Context, batch []MutationEntry, _ cloudstore.Attribution) ([]int64, error) {
 	seqs := make([]int64, len(batch))
 	for i := range batch {
 		seq := int64(len(s.mutations) + i + 1)

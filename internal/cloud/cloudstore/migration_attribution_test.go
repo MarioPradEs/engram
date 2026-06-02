@@ -153,6 +153,10 @@ func TestMigrateBackfillAttributionDualJSONBSet(t *testing.T) {
 		t.Fatalf("re-migrate for backfill: %v", err)
 	}
 
+	const marioEmail = "mpradas@vivastudios.com"
+	const marioName = "Mario Pradas"
+	const marioDept = "qa"
+
 	// Verify: user_email NULL count should be 0 after backfill for seeded rows.
 	// (The backfill only applies to entity='observation' rows without user_email.)
 	var nullCount int
@@ -163,12 +167,30 @@ func TestMigrateBackfillAttributionDualJSONBSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count null user_email: %v", err)
 	}
-	// After backfill, user_email should be set (to empty string '' as default).
 	if nullCount != 0 {
 		t.Errorf("expected 0 rows with user_email NULL after backfill, got %d", nullCount)
 	}
 
-	// Verify the JSONB payload on cloud_mutations now has user_email key.
+	// Verify the denorm column user_email is Mario's email (not empty string).
+	var gotEmail, gotName, gotDept string
+	err = cs.db.QueryRowContext(ctx, `
+		SELECT COALESCE(user_email,''), COALESCE(user_name,''), COALESCE(department,'')
+		FROM cloud_mutations WHERE seq = $1
+	`, seq).Scan(&gotEmail, &gotName, &gotDept)
+	if err != nil {
+		t.Fatalf("read denorm columns: %v", err)
+	}
+	if gotEmail != marioEmail {
+		t.Errorf("denorm user_email = %q, want %q", gotEmail, marioEmail)
+	}
+	if gotName != marioName {
+		t.Errorf("denorm user_name = %q, want %q", gotName, marioName)
+	}
+	if gotDept != marioDept {
+		t.Errorf("denorm department = %q, want %q", gotDept, marioDept)
+	}
+
+	// Verify the JSONB payload on cloud_mutations has user_email = Mario's email.
 	var mutPayload []byte
 	err = cs.db.QueryRowContext(ctx, `
 		SELECT payload FROM cloud_mutations WHERE seq = $1
@@ -182,6 +204,9 @@ func TestMigrateBackfillAttributionDualJSONBSet(t *testing.T) {
 	}
 	if _, ok := mutMap["user_email"]; !ok {
 		t.Errorf("cloud_mutations.payload missing user_email key after backfill; payload=%s", mutPayload)
+	}
+	if v, _ := mutMap["user_email"].(string); v != marioEmail {
+		t.Errorf("cloud_mutations.payload user_email = %q, want %q; payload=%s", v, marioEmail, mutPayload)
 	}
 
 	// R2 (decision #817): the dual jsonb_set MUST also update cloud_chunks.payload.observations[].
@@ -203,5 +228,8 @@ func TestMigrateBackfillAttributionDualJSONBSet(t *testing.T) {
 	obsEntry, _ := obs[0].(map[string]interface{})
 	if _, ok := obsEntry["user_email"]; !ok {
 		t.Errorf("cloud_chunks.payload.observations[0] missing user_email key after dual jsonb_set backfill; payload=%s", chunkPayloadOut)
+	}
+	if v, _ := obsEntry["user_email"].(string); v != marioEmail {
+		t.Errorf("cloud_chunks.payload.observations[0].user_email = %q, want %q; payload=%s", v, marioEmail, chunkPayloadOut)
 	}
 }

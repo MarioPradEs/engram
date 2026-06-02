@@ -153,17 +153,58 @@ func TestVisible(t *testing.T) {
 			visible: true,
 		},
 
-		// ── unknown scope: never visible ──────────────────────────────────────
+		// ── unknown scope: never visible via scope rules alone ────────────────
+		// The author-sees-own guard takes precedence for the author themselves.
+		// These cases use a non-matching author to isolate the scope-only path.
 		{
-			name:    "unknown scope not visible",
+			name:    "unknown scope not visible to non-author",
 			p:       alice,
-			a:       scope.Attrs{Scope: "org", UserEmail: "alice@example.com", Department: "engineering", Project: "eng-notes"},
+			a:       scope.Attrs{Scope: "org", UserEmail: "bob@example.com", Department: "engineering", Project: "eng-notes"},
 			visible: false,
 		},
 		{
-			name:    "empty scope not visible",
+			name:    "empty scope not visible to non-author",
+			p:       alice,
+			a:       scope.Attrs{Scope: "", UserEmail: "bob@example.com", Department: "engineering", Project: "eng-notes"},
+			visible: false,
+		},
+		// Author sees own obs even when scope is unknown/empty (author-sees-own takes precedence).
+		{
+			name:    "unknown scope visible to author (author-sees-own)",
+			p:       alice,
+			a:       scope.Attrs{Scope: "org", UserEmail: "alice@example.com", Department: "engineering", Project: "eng-notes"},
+			visible: true,
+		},
+		{
+			name:    "empty scope visible to author (author-sees-own)",
 			p:       alice,
 			a:       scope.Attrs{Scope: "", UserEmail: "alice@example.com", Department: "engineering", Project: "eng-notes"},
+			visible: true,
+		},
+
+		// ── author-sees-own: you always see observations you wrote ─────────────
+		// (a) personal obs — author email differs only by case from principal email
+		{
+			name: "author-sees-own/personal case-insensitive author match",
+			p:    scope.Principal{Email: "Mario@x.com", Department: "engineering", Enrolled: []string{"general"}},
+			a:    scope.Attrs{Scope: "personal", UserEmail: "mario@x.com", Department: "engineering", Project: "eng-notes"},
+			// Without the author-sees-own guard: Visible checks p.Email == a.UserEmail
+			// which is "Mario@x.com" == "mario@x.com" → false (case-sensitive). Must be true.
+			visible: true,
+		},
+		// (b) department obs — principal is NOT same department, NOT enrolled, but IS the author
+		{
+			name: "author-sees-own/department obs authored by self despite wrong dept",
+			p:    scope.Principal{Email: "alice@example.com", Department: "product", Enrolled: []string{"other-project"}},
+			a:    scope.Attrs{Scope: "department", UserEmail: "alice@example.com", Department: "engineering", Project: "eng-notes"},
+			// Without guard: department check fails (product != engineering). Must be true.
+			visible: true,
+		},
+		// (c) sanity: a non-author with mismatched email still follows tier rules (no over-grant)
+		{
+			name: "author-sees-own/non-author not enrolled in project stays hidden",
+			p:    scope.Principal{Email: "eve@example.com", Department: "engineering", Enrolled: []string{"general"}},
+			a:    scope.Attrs{Scope: "project", UserEmail: "alice@example.com", Department: "engineering", Project: "secret-project"},
 			visible: false,
 		},
 	}

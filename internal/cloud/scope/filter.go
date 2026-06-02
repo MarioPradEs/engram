@@ -35,6 +35,11 @@ type Attrs struct {
 // tier. Use NormalizeScope separately before storing if defaulting is desired.
 // user_deleted on the observation does NOT alter these rules.
 func Visible(p Principal, a Attrs) bool {
+	// You always see what you authored, regardless of scope tier or department changes.
+	if a.UserEmail != "" && strings.EqualFold(a.UserEmail, p.Email) {
+		return true
+	}
+
 	// Use raw canonical check — do NOT normalize unknown scopes to a default tier,
 	// as that would grant visibility to malformed/legacy observations.
 	normalized := strings.TrimSpace(strings.ToLower(a.Scope))

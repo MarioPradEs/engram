@@ -711,37 +711,54 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 	return nil
 }
 
+// marioEmail, marioName, marioDept are the identity constants for the sole
+// pre-OAuth contributor. All rows inserted before OAuth belong to Mario.
+const marioEmail = "mpradas@vivastudios.com"
+const marioName = "Mario Pradas"
+const marioDept = "qa"
+
 // backfillAttributionDenorm populates the denorm columns and patches JSONB
 // payload for legacy cloud_mutations rows that were inserted before OAuth.
 // Only runs on rows WHERE entity = 'observation' AND user_email IS NULL.
 // Safe to re-run (idempotent via the NULL check).
+//
+// Pre-OAuth rows belong to Mario (the only contributor before OAuth).
+// An existing payload value wins via COALESCE (e.g. a client that already
+// embedded user_email retains its value); otherwise Mario's identity is used.
 func (cs *CloudStore) backfillAttributionDenorm(ctx context.Context) error {
-	// 1. Stamp denorm columns with empty string (marks row as "backfill applied").
+	// 1. Stamp denorm columns with Mario's identity.
+	// COALESCE(payload->>'field', mario_default) so a pre-existing payload value wins.
 	if _, err := cs.db.ExecContext(ctx, `
 		UPDATE cloud_mutations
 		SET
-			user_email  = COALESCE(payload->>'user_email',  ''),
-			user_name   = COALESCE(payload->>'user_name',   ''),
-			department  = COALESCE(payload->>'department',  ''),
+			user_email   = COALESCE(NULLIF(payload->>'user_email',  ''), $1),
+			user_name    = COALESCE(NULLIF(payload->>'user_name',   ''), $2),
+			department   = COALESCE(NULLIF(payload->>'department',  ''), $3),
 			user_deleted = COALESCE((payload->>'user_deleted')::boolean, FALSE)
 		WHERE entity = 'observation' AND user_email IS NULL
-	`); err != nil {
+	`, marioEmail, marioName, marioDept); err != nil {
 		return fmt.Errorf("cloudstore: backfill attribution denorm: %w", err)
 	}
 
-	// 2. Dual jsonb_set — patch cloud_mutations.payload with user_email key.
+	// 2. Dual jsonb_set — patch cloud_mutations.payload with the (now-Mario) denorm values.
+	// Uses the denorm column values so step 1 always drives step 2.
 	if _, err := cs.db.ExecContext(ctx, `
 		UPDATE cloud_mutations
-		SET payload = jsonb_set(payload, '{user_email}', to_jsonb(COALESCE(user_email, '')), true)
+		SET payload = jsonb_set(
+			jsonb_set(
+				jsonb_set(payload, '{user_email}',  to_jsonb(COALESCE(user_email,  $1)), true),
+				'{user_name}',  to_jsonb(COALESCE(user_name,  $2)), true
+			),
+			'{department}', to_jsonb(COALESCE(department, $3)), true
+		)
 		WHERE entity = 'observation'
 		  AND NOT (payload ? 'user_email')
-	`); err != nil {
+	`, marioEmail, marioName, marioDept); err != nil {
 		return fmt.Errorf("cloudstore: backfill attribution payload (mutations): %w", err)
 	}
 
 	// 3. Dual jsonb_set — patch cloud_chunks.payload.observations[] entries.
-	// For each observation element in the array that lacks a user_email key,
-	// inject an empty user_email.  This is done per-row via a scalar update.
+	// For each observation element that lacks user_email, inject Mario's values.
 	if _, err := cs.db.ExecContext(ctx, `
 		UPDATE cloud_chunks
 		SET payload = jsonb_set(
@@ -751,7 +768,13 @@ func (cs *CloudStore) backfillAttributionDenorm(ctx context.Context) error {
 				SELECT jsonb_agg(
 					CASE
 						WHEN elem ? 'user_email' THEN elem
-						ELSE jsonb_set(elem, '{user_email}', '""'::jsonb, true)
+						ELSE jsonb_set(
+							jsonb_set(
+								jsonb_set(elem, '{user_email}',  to_jsonb($1::text), true),
+								'{user_name}',  to_jsonb($2::text), true
+							),
+							'{department}', to_jsonb($3::text), true
+						)
 					END
 				)
 				FROM jsonb_array_elements(
@@ -766,7 +789,7 @@ func (cs *CloudStore) backfillAttributionDenorm(ctx context.Context) error {
 			FROM jsonb_array_elements(COALESCE(payload->'observations', '[]'::jsonb)) AS elem
 			WHERE NOT (elem ? 'user_email')
 		  )
-	`); err != nil {
+	`, marioEmail, marioName, marioDept); err != nil {
 		return fmt.Errorf("cloudstore: backfill attribution payload (chunks): %w", err)
 	}
 

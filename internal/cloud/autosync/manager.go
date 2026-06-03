@@ -135,6 +135,13 @@ type transportStatusError interface {
 	IsPolicyFailure() bool
 }
 
+// offboardingTransportError is an optional interface transport errors may implement
+// to signal a 403 with body {"error":"account_offboarding"}.
+// Task 2.13: Detected by the pull path to trigger one-shot auto-drain.
+type offboardingTransportError interface {
+	IsOffboarding() bool
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 // Config holds tuning parameters for the background sync manager.
@@ -192,13 +199,14 @@ type Manager struct {
 	transport CloudTransport
 	cfg       Config
 
-	mu        sync.RWMutex
-	status    Status
-	dirtyCh   chan struct{}
-	leaseHeld bool
-	disabled  bool // set by StopForUpgrade, cleared by ResumeAfterUpgrade
-	wg        sync.WaitGroup
-	cancelFn  context.CancelFunc
+	mu             sync.RWMutex
+	status         Status
+	dirtyCh        chan struct{}
+	leaseHeld      bool
+	disabled       bool // set by StopForUpgrade, cleared by ResumeAfterUpgrade
+	autoDrainFired bool // Task 2.13: one-shot auto-drain guard; reset only when Manager is recreated (session-scoped)
+	wg             sync.WaitGroup
+	cancelFn       context.CancelFunc
 }
 
 // New creates a new background sync manager.
@@ -447,6 +455,17 @@ func (m *Manager) cycle(ctx context.Context) {
 	}
 
 	if err := m.pull(ctx); err != nil {
+		// Task 2.13: Detect 403 account_offboarding and trigger one-shot auto-drain.
+		// The drain pushes all pending observations so the user's data is preserved
+		// before their account is fully offboarded. Fires at most once per session.
+		if isOffboardingError(err) {
+			m.drainOnce(ctx)
+			m.recordBlocked(
+				"Your account is being offboarded. All your local data has been pushed.",
+				constants.ReasonAccountOffboarding,
+			)
+			return
+		}
 		reasonCode := classifyTransportError(err)
 		m.recordFailureWithReason(autosyncFailureMessage(m.cfg.TargetKey, fmt.Sprintf("pull: %v", err), err), reasonCode)
 		return
@@ -657,6 +676,45 @@ func (m *Manager) pull(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ─── Auto-drain ──────────────────────────────────────────────────────────────
+
+// isOffboardingError reports whether err (or any error in its chain) signals a
+// 403 account_offboarding response from the server.
+func isOffboardingError(err error) bool {
+	for err != nil {
+		if oe, ok := err.(offboardingTransportError); ok && oe.IsOffboarding() {
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return false
+}
+
+// drainOnce pushes all pending local observations exactly once per Manager lifetime
+// (session-scoped). It is called when the server signals account_offboarding so
+// the user's data is preserved before the account is fully removed.
+//
+// Spec: user-lifecycle §CLI Auto-Drain + §Auto-Drain fires at most once
+//
+// Safety contract:
+//   - guarded by autoDrainFired (set before push so a push failure does not allow re-drain)
+//   - push failure is logged and silently swallowed (must not block or panic)
+//   - does NOT call recordSuccess/recordFailure — caller sets the final blocked state
+func (m *Manager) drainOnce(ctx context.Context) {
+	m.mu.Lock()
+	if m.autoDrainFired {
+		m.mu.Unlock()
+		return
+	}
+	m.autoDrainFired = true
+	m.mu.Unlock()
+
+	log.Printf("[autosync] account_offboarding detected — draining pending local observations (once per session)")
+	if err := m.push(ctx); err != nil {
+		log.Printf("[autosync] auto-drain push failed (will not retry): %v", err)
+	}
 }
 
 // ─── State Tracking ──────────────────────────────────────────────────────────

@@ -2286,6 +2286,40 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 	return s.queryObservations(query, args...)
 }
 
+// AllObservationsFull returns ALL non-deleted observations with all fields including
+// classified_by_v2. Used by the engram reclassify command to scan the full local backlog.
+// Unlike AllObservations, this has no limit and always includes the classification marker.
+func (s *Store) AllObservationsFull() ([]Observation, error) {
+	rows, err := s.queryItHook(s.db,
+		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+		        coalesce(classified_by_v2, 0) as classified_by_v2
+		 FROM observations
+		 WHERE deleted_at IS NULL
+		 ORDER BY id ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Observation
+	for rows.Next() {
+		var o Observation
+		var classifiedByV2Int int
+		if err := rows.Scan(
+			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
+			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
+			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
+		); err != nil {
+			return nil, err
+		}
+		o.ClassifiedByV2 = classifiedByV2Int != 0
+		results = append(results, o)
+	}
+	return results, rows.Err()
+}
+
 // SessionObservations returns all observations for a specific session.
 func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation, error) {
 	if limit <= 0 {
@@ -2786,18 +2820,32 @@ func (s *Store) DeletePrompt(id int64) error {
 func (s *Store) GetObservation(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+		        coalesce(classified_by_v2, 0) as classified_by_v2
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
+	var classifiedByV2Int int
 	if err := row.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
 	); err != nil {
 		return nil, err
 	}
+	o.ClassifiedByV2 = classifiedByV2Int != 0
 	return &o, nil
+}
+
+// StampClassifiedByV2 sets the classified_by_v2 marker to 1 on the given observation.
+// Called by the engram reclassify command after classification rules are applied.
+// Idempotent: calling it again on an already-stamped observation is safe.
+func (s *Store) StampClassifiedByV2(id int64) error {
+	_, err := s.db.Exec(
+		`UPDATE observations SET classified_by_v2 = 1 WHERE id = ? AND deleted_at IS NULL`,
+		id,
+	)
+	return err
 }
 
 func (s *Store) UpdateObservation(id int64, p UpdateObservationParams) (*Observation, error) {

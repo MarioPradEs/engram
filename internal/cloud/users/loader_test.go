@@ -69,6 +69,42 @@ users:
 	}
 }
 
+// TestLoadRejectsNonVivastudiosEmail verifies that users with emails not ending
+// in @vivastudios.com are rejected at load time (task 1.10, W4).
+func TestLoadRejectsNonVivastudiosEmail(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		email string
+	}{
+		{"gmail", "alice@gmail.com"},
+		{"external company", "alice@othercorp.com"},
+		{"bare domain", "alice@vivastudios"},
+		{"subdomain", "alice@sub.vivastudios.com"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := writeYAML(t, dir, "users.yaml", `
+users:
+  - email: "`+tc.email+`"
+    name: "Alice"
+    department: "engineering"
+    role: "admin"
+    status: "active"
+`)
+			_, err := users.NewYAMLLoader(path)
+			if err == nil {
+				t.Errorf("expected error for non-vivastudios email %q, got nil", tc.email)
+			}
+		})
+	}
+}
+
 // TestLoadInvalidDepartment verifies that an invalid department enum is rejected.
 func TestLoadInvalidDepartment(t *testing.T) {
 	t.Parallel()

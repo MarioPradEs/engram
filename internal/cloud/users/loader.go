@@ -138,6 +138,9 @@ func loadAndValidate(path string) (map[string]Principal, error) {
 		if email == "" {
 			return nil, fmt.Errorf("users: entry %d: email is required", i)
 		}
+		if !strings.HasSuffix(email, "@vivastudios.com") {
+			return nil, fmt.Errorf("users: entry %d: email %q must end with @vivastudios.com", i, email)
+		}
 		if _, dup := dir[email]; dup {
 			return nil, fmt.Errorf("users: duplicate email %q", email)
 		}

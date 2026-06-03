@@ -146,6 +146,74 @@ func TestReclassifyCommandIntegration(t *testing.T) {
 	assertClassifiedByV2(t, s2, secretObsID, false, "secret obs after re-run")
 }
 
+// TestBearerSecretScanNoFalsePositives verifies W9:
+// The Bearer secret-scan pattern must NOT flag natural-language sentences that
+// happen to contain the word "bearer", and MUST flag real opaque bearer tokens.
+func TestBearerSecretScanNoFalsePositives(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantHit bool
+	}{
+		// --- natural-language false positives (must NOT match) ---
+		{
+			name:    "natural language: bearer of good news",
+			content: "bearer of good news about the project",
+			wantHit: false,
+		},
+		{
+			name:    "natural language: bearer bond",
+			content: "the bearer bond matured yesterday",
+			wantHit: false,
+		},
+		{
+			name:    "natural language: bearer token concept",
+			content: "bearer token concept explained in RFC 6750",
+			wantHit: false,
+		},
+		{
+			name:    "natural language: short words after Bearer",
+			content: "Bearer of responsibilities",
+			wantHit: false,
+		},
+		// --- real bearer tokens (must still match) ---
+		{
+			name:    "real: Authorization header with long opaque token",
+			content: "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+			wantHit: true,
+		},
+		{
+			name:    "real: long alphanumeric token (20+ chars)",
+			content: "Bearer abcdef1234567890abcdef",
+			wantHit: true,
+		},
+		{
+			name:    "real: typical API token format",
+			content: "bearer sk-ABCDEFGHIJ1234567890XYZabc",
+			wantHit: true,
+		},
+	}
+
+	// Find the bearer pattern in secretPatterns (index 4 in the current order).
+	// Rather than hardcoding the index, we test classifyObservation which runs all patterns.
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			project := "team-x"
+			obs := &store.Observation{
+				Content: tc.content,
+				Scope:   "project",
+				Project: &project,
+			}
+			outcome := classifyObservation(obs)
+			hit := outcome == "skipped_secret_scan"
+			if hit != tc.wantHit {
+				t.Errorf("content=%q: got skipped_secret_scan=%v, want %v (outcome=%q)",
+					tc.content, hit, tc.wantHit, outcome)
+			}
+		})
+	}
+}
+
 // assertClassifiedByV2 checks that the classified_by_v2 field on the given observation
 // matches the expected value.
 func assertClassifiedByV2(t *testing.T, s *store.Store, id int64, want bool, label string) {

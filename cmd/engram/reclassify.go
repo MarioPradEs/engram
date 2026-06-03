@@ -16,7 +16,7 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(PASSWORD|PASSWD|PWD)\s*[:=]\s*\S{6,}`),
 	regexp.MustCompile(`(?i)sk-[a-zA-Z0-9]{20,}`),          // OpenAI-style keys
 	regexp.MustCompile(`(?i)ghp_[a-zA-Z0-9]{36}`),           // GitHub personal access tokens
-	regexp.MustCompile(`(?i)Bearer\s+[a-zA-Z0-9\-._~+/]+=*`), // bare Bearer tokens
+	regexp.MustCompile(`(?i)Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*`), // bare Bearer tokens (≥20 char body to avoid natural-language false positives)
 }
 
 // clientNDAProjects is the set of project-name prefixes that indicate client or NDA

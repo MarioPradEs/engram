@@ -126,7 +126,11 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		// bearing it as a Bearer credential bypass header auth and authenticate
 		// as the directory's sole admin (spec: oauth-authentication §Emergency Bypass).
 		bypassToken := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
-		headerAuth, err := auth.NewHeaderAuthenticator(loader, bypassToken)
+		// Pass ENGRAM_JWT_SECRET to activate Bearer JWT verification on /sync/* routes.
+		// CLI sends Bearer <engram-JWT> on sync routes (which bypass oauth2-proxy per
+		// Caddy routing split — no X-Forwarded-Email there).
+		jwtSecretForAuth := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
+		headerAuth, err := auth.NewHeaderAuthenticatorWithJWT(loader, bypassToken, jwtSecretForAuth)
 		if err != nil {
 			_ = cs.Close()
 			return nil, fmt.Errorf("newCloudRuntime: configure header authenticator: %w", err)
@@ -139,6 +143,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 				log.Printf("[engram-cloud] user directory reloaded from %s", usersFile)
 			}
 		}
+		jwtSecret := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
 		runtime.server = cloudserver.New(
 			cs,
 			headerAuth,
@@ -148,6 +153,9 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
+			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
+			cloudserver.WithAuthEndpoint(loader, jwtSecret),
 		)
 		return runtime, nil
 	}

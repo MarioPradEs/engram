@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +19,28 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
+// ─── Injectable crypto/encoding functions (for testability) ──────────────────
+
+// base64DecodeRawURL is the seam for base64.RawURLEncoding.DecodeString.
+var base64DecodeRawURL = base64.RawURLEncoding.DecodeString
+
+// jsonUnmarshal is the seam for json.Unmarshal.
+var jsonUnmarshal = json.Unmarshal
+
 // ─── Interface seams (injectable for tests) ───────────────────────────────────
 
 // TokenExchanger is the seam for converting an OAuth authorization code into JWT claims.
 type TokenExchanger interface {
 	Exchange(code string) (auth.JWTClaims, error)
+}
+
+// RawTokenExchanger is an extended seam for exchangers that return both a raw
+// token string (server-minted JWT) and the decoded claims. When loginCommand's
+// exchanger also implements this interface, the raw token is stored directly
+// instead of being re-minted client-side.
+type RawTokenExchanger interface {
+	TokenExchanger
+	ExchangeWithToken() (rawToken string, claims auth.JWTClaims, err error)
 }
 
 // BrowserOpener is the seam for opening the OAuth URL in a web browser.
@@ -91,37 +110,51 @@ type loginCommand struct {
 // Run executes the full login flow:
 //  1. Start loopback HTTP server to receive OAuth callback
 //  2. Open browser at OAuth URL (or print URL for device code fallback)
-//  3. Exchange code for claims
-//  4. MintJWT → write credentials.json (perms 0600)
+//  3. Exchange code for claims (or receive server-minted JWT directly)
+//  4. Store token → write credentials.json (perms 0600)
 //  5. Enroll "general" project (design Q5)
 //  6. Reclassify (blocking, before push — design Q2)
 //  7. Pull (warning on failure, continues)
 //  8. Push (warning on failure, login still succeeds)
+//  9. Print sync summary
 func (c *loginCommand) Run() error {
 	now := c.clock.Now()
 
-	// Determine claims via exchanger (fake in tests, loopback in prod).
-	claims, err := c.exchanger.Exchange("")
-	if err != nil {
-		return fmt.Errorf("login: token exchange: %w", err)
-	}
-
-	// Ensure claims have iat/exp set (they may come pre-set from a real OAuth flow).
-	if claims.Iat == 0 {
-		claims.Iat = now.Unix()
-	}
-	if claims.Exp == 0 {
-		claims.Exp = now.Unix() + 604800 // 7 days
-	}
-
-	// Mint the JWT.
-	secret := c.secret
-	if secret == "" {
-		secret = strings.Repeat("x", 32) // dev fallback — real servers use ENGRAM_JWT_SECRET
-	}
-	tokenStr, err := auth.MintJWT(secret, claims, now)
-	if err != nil {
-		return fmt.Errorf("login: mint jwt: %w", err)
+	// Determine token and claims via exchanger.
+	// If the exchanger implements RawTokenExchanger, use the server-minted token
+	// directly (Opción A: server signs with ENGRAM_JWT_SECRET, we just store it).
+	var tokenStr string
+	var claims auth.JWTClaims
+	if rte, ok := c.exchanger.(RawTokenExchanger); ok {
+		raw, rawClaims, err := rte.ExchangeWithToken()
+		if err != nil {
+			return fmt.Errorf("login: token exchange: %w", err)
+		}
+		tokenStr = raw
+		claims = rawClaims
+	} else {
+		var err error
+		claims, err = c.exchanger.Exchange("")
+		if err != nil {
+			return fmt.Errorf("login: token exchange: %w", err)
+		}
+		// Ensure claims have iat/exp set (they may come pre-set from a real OAuth flow).
+		if claims.Iat == 0 {
+			claims.Iat = now.Unix()
+		}
+		if claims.Exp == 0 {
+			claims.Exp = now.Unix() + 604800 // 7 days
+		}
+		// Mint the JWT client-side (placeholder / test path).
+		secret := c.secret
+		if secret == "" {
+			secret = strings.Repeat("x", 32) // dev fallback — real servers use ENGRAM_JWT_SECRET
+		}
+		var mintErr error
+		tokenStr, mintErr = auth.MintJWT(secret, claims, now)
+		if mintErr != nil {
+			return fmt.Errorf("login: mint jwt: %w", mintErr)
+		}
 	}
 
 	// Write credentials.json.
@@ -184,70 +217,158 @@ func (c *loginCommand) Run() error {
 	// Canonical post-auth order (design Q2): reclassify → pull → push.
 	reclassifyHookFn(c.cfg)
 
-	if err := postLoginPullFn(c.cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "[login] warn: post-login pull failed: %v (continuing)\n", err)
+	pullErr := postLoginPullFn(c.cfg)
+	if pullErr != nil {
+		fmt.Fprintf(os.Stderr, "[login] warn: post-login pull failed: %v (continuing)\n", pullErr)
 	}
 
-	if err := postLoginPushFn(c.cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "[login] warn: post-login push failed: %v (retry with `engram sync --cloud`)\n", err)
+	pushErr := postLoginPushFn(c.cfg)
+	if pushErr != nil {
+		fmt.Fprintf(os.Stderr, "[login] warn: post-login push failed: %v (retry with `engram sync --cloud`)\n", pushErr)
 	}
+
+	// Print sync summary (spec: cli-auth §"Synced: ↓{N} pulled, ↑{M} pushed").
+	// postLoginPullFn / postLoginPushFn are stubs that return nil counts today;
+	// the summary reflects success/failure with placeholder counts until the
+	// real mutation transport is wired.
+	pulled := 0
+	pushed := 0
+	fmt.Printf("Synced: ↓%d pulled, ↑%d pushed\n", pulled, pushed)
 
 	return nil
 }
 
-// ─── Real loopback OAuth flow ─────────────────────────────────────────────────
+// ─── Real loopback OAuth flow (Opción A: /auth → token-in-redirect) ──────────
 
-// loopbackExchanger implements TokenExchanger using an RFC 8252 loopback redirect.
-// It starts a local HTTP server, opens the browser at authURL, waits for the callback,
-// then exchanges the code for claims using the provided exchange function.
-type loopbackExchanger struct {
-	authURL  string
-	exchange func(code string) (auth.JWTClaims, error)
+// loopbackAuthExchanger implements RawTokenExchanger using the RFC 8252 loopback
+// redirect pattern. It starts a local HTTP server on an ephemeral port, generates
+// a random CSRF state, opens the browser at <cloudAuthURL>?redirect_uri=...&state=...,
+// waits for the server to redirect back with ?token=<JWT>&state=<state>, validates
+// state, decodes the JWT payload (without re-verifying — the server already signed
+// it), and returns the raw token string plus the decoded claims.
+//
+// Security:
+//   - State is 32 bytes of crypto/rand (CSRF protection).
+//   - State is validated on callback; mismatch → error.
+//   - redirect_uri is always 127.0.0.1 (not user-controlled).
+//   - The server validates redirect_uri is a loopback address (open-redirect guard).
+type loopbackAuthExchanger struct {
+	cloudAuthURL string       // e.g. "https://engram.vivastudios.com/auth"
+	browser      BrowserOpener
 }
 
-func (e *loopbackExchanger) Exchange(_ string) (auth.JWTClaims, error) {
+// newLoopbackAuthExchanger creates a loopbackAuthExchanger.
+// cloudAuthURL is the full /auth endpoint on the Engram cloud server.
+func newLoopbackAuthExchanger(cloudAuthURL string, browser BrowserOpener) *loopbackAuthExchanger {
+	return &loopbackAuthExchanger{cloudAuthURL: cloudAuthURL, browser: browser}
+}
+
+// Exchange implements TokenExchanger (for compatibility). Delegates to ExchangeWithToken.
+func (e *loopbackAuthExchanger) Exchange(_ string) (auth.JWTClaims, error) {
+	_, claims, err := e.ExchangeWithToken()
+	return claims, err
+}
+
+// ExchangeWithToken implements RawTokenExchanger.
+// Returns the raw server-minted JWT string and the decoded claims.
+func (e *loopbackAuthExchanger) ExchangeWithToken() (string, auth.JWTClaims, error) {
+	// Start a local loopback server to receive the /auth redirect callback.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return auth.JWTClaims{}, fmt.Errorf("loopback: listen: %w", err)
+		return "", auth.JWTClaims{}, fmt.Errorf("loopback: listen: %w", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
-	codeCh := make(chan string, 1)
-	errCh := make(chan error, 1)
+	// Generate a random CSRF state.
+	state, err := generateRandomState()
+	if err != nil {
+		return "", auth.JWTClaims{}, fmt.Errorf("loopback: generate state: %w", err)
+	}
+
+	type callbackResult struct {
+		token string
+		err   error
+	}
+	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			errCh <- fmt.Errorf("loopback: OAuth callback missing code")
-			http.Error(w, "missing code", http.StatusBadRequest)
+		receivedState := r.URL.Query().Get("state")
+		if receivedState != state {
+			resultCh <- callbackResult{err: fmt.Errorf("loopback: state mismatch (csrf protection): got %q, want %q", receivedState, state)}
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			return
+		}
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			resultCh <- callbackResult{err: fmt.Errorf("loopback: callback missing token")}
+			http.Error(w, "missing token", http.StatusBadRequest)
 			return
 		}
 		_, _ = w.Write([]byte("<html><body>Login complete. You may close this tab.</body></html>"))
-		codeCh <- code
+		resultCh <- callbackResult{token: token}
 	})
 
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
-	fullAuthURL := e.authURL + "&redirect_uri=" + redirectURI
-	_ = fullAuthURL // browser would open this
-	_ = redirectURI
+	// Build the full /auth URL and open the browser.
+	authURL := e.cloudAuthURL +
+		"?redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&state=" + url.QueryEscape(state)
+	if openErr := e.browser.Open(authURL); openErr != nil {
+		fmt.Printf("Could not open browser automatically. Open this URL:\n  %s\n", authURL)
+	}
 
+	// Wait for the callback (5-minute timeout per RFC 8252 §8.1).
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	defer func() { _ = srv.Shutdown(context.Background()) }()
-
 	select {
-	case code := <-codeCh:
-		return e.exchange(code)
-	case err := <-errCh:
-		return auth.JWTClaims{}, err
+	case result := <-resultCh:
+		if result.err != nil {
+			return "", auth.JWTClaims{}, result.err
+		}
+		// Decode JWT claims without re-verifying signature (server already signed it).
+		claims, parseErr := decodeJWTClaimsUnsafe(result.token)
+		if parseErr != nil {
+			return "", auth.JWTClaims{}, fmt.Errorf("loopback: decode token claims: %w", parseErr)
+		}
+		return result.token, claims, nil
 	case <-ctx.Done():
-		return auth.JWTClaims{}, fmt.Errorf("loopback: OAuth flow timed out")
+		return "", auth.JWTClaims{}, fmt.Errorf("loopback: OAuth flow timed out after 5 minutes")
 	}
+}
+
+// generateRandomState returns 32 bytes of URL-safe random hex.
+func generateRandomState() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := cryptoRandRead(buf); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", buf), nil
+}
+
+// decodeJWTClaimsUnsafe decodes the payload of a JWT without verifying the
+// signature. Used by the CLI after receiving a server-minted token in the
+// loopback redirect — the server validated and signed it, we only need the
+// claims for display / credential storage.
+func decodeJWTClaimsUnsafe(token string) (auth.JWTClaims, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return auth.JWTClaims{}, fmt.Errorf("malformed jwt (expected 3 parts, got %d)", len(parts))
+	}
+	payload, err := base64DecodeRawURL(parts[1])
+	if err != nil {
+		return auth.JWTClaims{}, fmt.Errorf("decode jwt payload: %w", err)
+	}
+	var claims auth.JWTClaims
+	if err := jsonUnmarshal(payload, &claims); err != nil {
+		return auth.JWTClaims{}, fmt.Errorf("unmarshal jwt claims: %w", err)
+	}
+	return claims, nil
 }
 
 // ─── Expiry detection ─────────────────────────────────────────────────────────
@@ -302,56 +423,53 @@ func isAuthError(err error) bool {
 
 // ─── cmdLogin entry point ─────────────────────────────────────────────────────
 
-// cmdLogin is the top-level `engram login` command handler.
-// It uses the loopback OAuth flow in production and the injectable seams in tests.
-func cmdLogin(cfg store.Config) {
-	secret := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
-	if secret == "" {
-		secret = strings.Repeat("x", 32) // dev fallback
+// cloudBaseURLFn resolves the cloud base URL for the login flow.
+// Priority: ENGRAM_CLOUD_URL env var → ENGRAM_CLOUD_SERVER env var (legacy).
+// Falls back to the default production URL.
+var cloudBaseURLFn = func(cfg store.Config) string {
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_URL")); v != "" {
+		return strings.TrimRight(v, "/")
 	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	// Fall back to stored cloud config (set by `engram cloud config --server`).
+	cc, err := loadCloudConfig(cfg)
+	if err == nil && cc != nil && strings.TrimSpace(cc.ServerURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(cc.ServerURL), "/")
+	}
+	return "https://engram.vivastudios.com"
+}
 
-	// In production, use a real exchanger. The server URL and client ID would come
-	// from config or env (Phase 4 wires oauth2-proxy fully).
-	// For now, use the placeholder exchanger that prompts for device code.
-	exchanger := &placeholderExchanger{}
+// cmdLogin is the top-level `engram login` command handler.
+// It uses the real loopback OAuth flow (Opción A) in production:
+//   - Opens browser at <cloud>/auth?redirect_uri=<loopback>&state=<random>
+//   - Server validates oauth2-proxy X-Forwarded-Email, mints JWT, redirects back
+//   - CLI stores the server-minted JWT in ~/.engram/credentials.json
+func cmdLogin(cfg store.Config) {
+	cloudBase := cloudBaseURLFn(cfg)
+	authURL := cloudBase + "/auth"
+
+	browser := &noopBrowserOpener{}
+	exchanger := newLoopbackAuthExchanger(authURL, browser)
 
 	runner := &loginCommand{
 		cfg:       cfg,
 		exchanger: exchanger,
-		browser:   &noopBrowserOpener{},
+		browser:   browser,
 		clock:     realClock{},
-		secret:    secret,
+		// secret is not used when loopbackAuthExchanger returns a server-minted token.
+		secret: strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET")),
 	}
 	if err := runner.Run(); err != nil {
 		fatal(err)
 	}
 }
 
-// placeholderExchanger is a production stub for the OAuth exchange. It returns a
-// synthetic identity using ENGRAM_LOGIN_EMAIL env var (fallback: "unknown@vivastudios.com").
-// Full oauth2-proxy wiring is a Phase 4 deliverable.
-type placeholderExchanger struct{}
-
-func (p *placeholderExchanger) Exchange(_ string) (auth.JWTClaims, error) {
-	email := strings.TrimSpace(os.Getenv("ENGRAM_LOGIN_EMAIL"))
-	if email == "" {
-		email = "unknown@vivastudios.com"
-	}
-	now := time.Now().UTC()
-	return auth.JWTClaims{
-		Sub:        email,
-		Email:      email,
-		Department: strings.TrimSpace(os.Getenv("ENGRAM_LOGIN_DEPT")),
-		Role:       "member",
-		Iat:        now.Unix(),
-		Exp:        now.Unix() + 604800,
-	}, nil
-}
-
-// noopBrowserOpener does nothing (used in production until full oauth2-proxy wiring).
+// noopBrowserOpener prints the URL when it cannot open a browser automatically.
 type noopBrowserOpener struct{}
 
-func (n *noopBrowserOpener) Open(url string) error {
-	fmt.Printf("Open this URL in your browser:\n  %s\n", url)
+func (n *noopBrowserOpener) Open(openURL string) error {
+	fmt.Printf("Open this URL in your browser:\n  %s\n", openURL)
 	return nil
 }

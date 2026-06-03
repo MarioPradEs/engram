@@ -33,6 +33,7 @@ func (f *fakeTokenExchanger) Exchange(code string) (auth.JWTClaims, error) {
 }
 
 // fakeBrowserOpener records which URL was opened and optionally returns an error.
+// It does NOT follow the URL (for tests that don't need the full loopback flow).
 type fakeBrowserOpener struct {
 	openedURL string
 	err       error
@@ -41,6 +42,26 @@ type fakeBrowserOpener struct {
 func (f *fakeBrowserOpener) Open(url string) error {
 	f.openedURL = url
 	return f.err
+}
+
+// realHTTPBrowserOpener simulates a browser by actually following the URL and
+// its redirects via an HTTP GET. Used by loopback exchanger tests so the
+// callback server receives the token redirect.
+type realHTTPBrowserOpener struct {
+	openedURL string
+}
+
+func (r *realHTTPBrowserOpener) Open(openURL string) error {
+	r.openedURL = openURL
+	// Use a client that follows redirects (default), so the loopback callback is hit.
+	go func() {
+		resp, err := http.Get(openURL) //nolint:noctx
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+	return nil
 }
 
 // fakeClock implements the Clock interface for deterministic time in tests.
@@ -609,4 +630,342 @@ func makeHTTPStatusError403() error {
 	}
 	_, err = mt.PullMutations(0, 1)
 	return err
+}
+
+// ─── Piece C: real loopback OAuth flow ────────────────────────────────────────
+
+// TestLoopbackExchangerHappyPath verifies the real loopback exchanger:
+// starts a local server, opens the "browser" to the auth URL with
+// redirect_uri+state, receives the callback with token+state, validates state,
+// and returns the raw token with parsed claims.
+func TestLoopbackExchangerHappyPath(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("s", 32)
+
+	// Build a fake /auth server that mints a token and redirects.
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectURI := r.URL.Query().Get("redirect_uri")
+		state := r.URL.Query().Get("state")
+		if redirectURI == "" || state == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		tok, err := auth.MintJWT(secret, auth.JWTClaims{
+			Sub:        "alice@vivastudios.com",
+			Email:      "alice@vivastudios.com",
+			Name:       "Alice",
+			Department: "dev",
+			Role:       "admin",
+		}, now)
+		if err != nil {
+			http.Error(w, "mint failed", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, redirectURI+"?token="+tok+"&state="+state, http.StatusFound)
+	}))
+	defer authSrv.Close()
+
+	// Use realHTTPBrowserOpener so the callback server actually receives the redirect.
+	browser := &realHTTPBrowserOpener{}
+	ex := newLoopbackAuthExchanger(authSrv.URL+"/auth", browser)
+
+	rawToken, claims, err := ex.ExchangeWithToken()
+	if err != nil {
+		t.Fatalf("ExchangeWithToken: %v", err)
+	}
+	if rawToken == "" {
+		t.Error("expected non-empty raw token")
+	}
+	if claims.Email != "alice@vivastudios.com" {
+		t.Errorf("email: got %q, want alice@vivastudios.com", claims.Email)
+	}
+	if claims.Exp-claims.Iat != 604800 {
+		t.Errorf("exp-iat: got %d, want 604800", claims.Exp-claims.Iat)
+	}
+	if !strings.Contains(browser.openedURL, "/auth") {
+		t.Errorf("expected browser URL to contain /auth, got %q", browser.openedURL)
+	}
+	if !strings.Contains(browser.openedURL, "redirect_uri=") {
+		t.Errorf("expected redirect_uri in browser URL, got %q", browser.openedURL)
+	}
+	if !strings.Contains(browser.openedURL, "state=") {
+		t.Errorf("expected state in browser URL, got %q", browser.openedURL)
+	}
+}
+
+// TestLoopbackExchangerStateValidation verifies CSRF protection: if the auth
+// server sends back a different state, the exchanger rejects the response.
+func TestLoopbackExchangerStateValidation(t *testing.T) {
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectURI := r.URL.Query().Get("redirect_uri")
+		now := time.Now().UTC()
+		secret := strings.Repeat("s", 32)
+		tok, _ := auth.MintJWT(secret, auth.JWTClaims{
+			Sub:   "alice@vivastudios.com",
+			Email: "alice@vivastudios.com",
+		}, now)
+		// Send WRONG state — exchanger must reject this.
+		http.Redirect(w, r, redirectURI+"?token="+tok+"&state=WRONG_STATE", http.StatusFound)
+	}))
+	defer authSrv.Close()
+
+	browser := &realHTTPBrowserOpener{}
+	ex := newLoopbackAuthExchanger(authSrv.URL+"/auth", browser)
+
+	_, _, err := ex.ExchangeWithToken()
+	if err == nil {
+		t.Fatal("expected error when state does not match, got nil")
+	}
+	if !strings.Contains(err.Error(), "state") {
+		t.Errorf("expected state mismatch error, got: %v", err)
+	}
+}
+
+// TestLoopbackExchangerCredentialsWritten_0600 verifies that when login uses the
+// real loopback exchanger, the credentials are written with the server-minted token
+// (not a client-minted one) and the file has 0600 permissions.
+func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("s", 32)
+
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectURI := r.URL.Query().Get("redirect_uri")
+		state := r.URL.Query().Get("state")
+		tok, err := auth.MintJWT(secret, auth.JWTClaims{
+			Sub:        "mario@vivastudios.com",
+			Email:      "mario@vivastudios.com",
+			Name:       "Mario",
+			Department: "dev",
+			Role:       "admin",
+		}, now)
+		if err != nil {
+			http.Error(w, "mint error", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, redirectURI+"?token="+tok+"&state="+state, http.StatusFound)
+	}))
+	defer authSrv.Close()
+
+	credDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+
+	oldReclassifyHookFn := reclassifyHookFn
+	reclassifyHookFn = func(_ store.Config) {}
+	t.Cleanup(func() { reclassifyHookFn = oldReclassifyHookFn })
+
+	oldPullFn := postLoginPullFn
+	oldPushFn := postLoginPushFn
+	postLoginPullFn = func(_ store.Config) error { return nil }
+	postLoginPushFn = func(_ store.Config) error { return nil }
+	t.Cleanup(func() {
+		postLoginPullFn = oldPullFn
+		postLoginPushFn = oldPushFn
+	})
+
+	cfg := testConfig(t)
+	browser := &realHTTPBrowserOpener{}
+	ex := newLoopbackAuthExchanger(authSrv.URL+"/auth", browser)
+
+	// Use the raw-token exchanger as the loginCommand exchanger.
+	runner := &loginCommand{
+		cfg:       cfg,
+		exchanger: ex,
+		browser:   browser,
+		clock:     &fakeClock{now: now},
+		secret:    secret, // irrelevant — server-minted token is stored directly
+	}
+	if err := runner.Run(); err != nil {
+		t.Fatalf("login.Run: %v", err)
+	}
+
+	credPath := filepath.Join(credDir, "credentials.json")
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatalf("read credentials.json: %v", err)
+	}
+	var creds credentialFile
+	if err := json.Unmarshal(data, &creds); err != nil {
+		t.Fatalf("unmarshal credentials.json: %v", err)
+	}
+	if creds.Email != "mario@vivastudios.com" {
+		t.Errorf("email: got %q, want mario@vivastudios.com", creds.Email)
+	}
+	if creds.AccessToken == "" {
+		t.Error("access_token must not be empty")
+	}
+	// Verify the token is the server-minted one (exp-iat == 604800).
+	issuedAt, err := time.Parse(time.RFC3339, creds.IssuedAt)
+	if err != nil {
+		t.Fatalf("parse issued_at: %v", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, creds.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse expires_at: %v", err)
+	}
+	if expiresAt.Sub(issuedAt) != 7*24*time.Hour {
+		t.Errorf("token lifetime: got %v, want 168h", expiresAt.Sub(issuedAt))
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatalf("stat credentials.json: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("credentials.json perm: got %o, want 0600", info.Mode().Perm())
+		}
+	}
+}
+
+// ─── Piece D: post-login sync with Bearer ────────────────────────────────────
+
+// TestPostLoginSyncSendsBearerToken verifies that postLoginPullFn / postLoginPushFn
+// use the stored JWT as Authorization: Bearer against /sync/*.
+func TestPostLoginSyncSendsBearerToken(t *testing.T) {
+	receivedAuthHeaders := make([]string, 0)
+	syncSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthHeaders = append(receivedAuthHeaders, r.Header.Get("Authorization"))
+		if r.URL.Path == "/sync/mutations/pull" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"mutations":[],"has_more":false,"latest_seq":0}`))
+			return
+		}
+		if r.URL.Path == "/sync/mutations/push" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"accepted_seqs":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer syncSrv.Close()
+
+	storedToken := "stored-jwt-token-from-server"
+
+	// Verify postLoginPull and postLoginPush use the stored token.
+	pullCalled := false
+	pushCalled := false
+	oldPullFn := postLoginPullFn
+	oldPushFn := postLoginPushFn
+	postLoginPullFn = func(cfg store.Config) error {
+		pullCalled = true
+		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
+		if err != nil {
+			return err
+		}
+		_, err = mt.PullMutations(0, 10)
+		return err
+	}
+	postLoginPushFn = func(cfg store.Config) error {
+		pushCalled = true
+		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
+		if err != nil {
+			return err
+		}
+		_, err = mt.PushMutations(nil)
+		return err
+	}
+	t.Cleanup(func() {
+		postLoginPullFn = oldPullFn
+		postLoginPushFn = oldPushFn
+	})
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("x", 32)
+	cfg := testConfig(t)
+
+	exchanger := &fakeTokenExchanger{
+		claims: auth.JWTClaims{
+			Sub:   "alice@vivastudios.com",
+			Email: "alice@vivastudios.com",
+			Iat:   now.Unix(),
+			Exp:   now.Unix() + 604800,
+		},
+	}
+
+	credDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+
+	oldReclassifyHookFn := reclassifyHookFn
+	reclassifyHookFn = func(_ store.Config) {}
+	t.Cleanup(func() { reclassifyHookFn = oldReclassifyHookFn })
+
+	runner := &loginCommand{
+		cfg:       cfg,
+		exchanger: exchanger,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
+	}
+	if err := runner.Run(); err != nil {
+		t.Fatalf("login.Run: %v", err)
+	}
+
+	if !pullCalled {
+		t.Error("expected postLoginPullFn to be called")
+	}
+	if !pushCalled {
+		t.Error("expected postLoginPushFn to be called")
+	}
+	// All received auth headers must be Bearer storedToken.
+	for _, h := range receivedAuthHeaders {
+		if h != "Bearer "+storedToken {
+			t.Errorf("expected Authorization: Bearer %s, got %q", storedToken, h)
+		}
+	}
+}
+
+// TestPostLoginSyncSummaryPrinted verifies the sync summary is printed.
+func TestPostLoginSyncSummaryPrinted(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("x", 32)
+	cfg := testConfig(t)
+
+	exchanger := &fakeTokenExchanger{
+		claims: auth.JWTClaims{
+			Sub:   "alice@vivastudios.com",
+			Email: "alice@vivastudios.com",
+			Iat:   now.Unix(),
+			Exp:   now.Unix() + 604800,
+		},
+	}
+
+	credDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+
+	oldReclassifyHookFn := reclassifyHookFn
+	reclassifyHookFn = func(_ store.Config) {}
+	t.Cleanup(func() { reclassifyHookFn = oldReclassifyHookFn })
+
+	oldPullFn := postLoginPullFn
+	oldPushFn := postLoginPushFn
+	postLoginPullFn = func(_ store.Config) error { return nil }
+	postLoginPushFn = func(_ store.Config) error { return nil }
+	t.Cleanup(func() {
+		postLoginPullFn = oldPullFn
+		postLoginPushFn = oldPushFn
+	})
+
+	runner := &loginCommand{
+		cfg:       cfg,
+		exchanger: exchanger,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
+	}
+
+	stdout, _ := captureOutput(t, func() {
+		if err := runner.Run(); err != nil {
+			t.Errorf("login.Run: %v", err)
+		}
+	})
+
+	// Must print the sync summary line.
+	if !strings.Contains(stdout, "Synced:") {
+		t.Errorf("expected sync summary in stdout, got: %q", stdout)
+	}
 }

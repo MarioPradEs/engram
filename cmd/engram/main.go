@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/autosync"
+	"github.com/Gentleman-Programming/engram/internal/cloud/classrules"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
@@ -901,6 +902,17 @@ func cmdMCP(cfg store.Config) {
 	defer stopAutosync()
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
+
+	// Load operator-supplied classification rules when ENGRAM_CLASSIFICATION_RULES
+	// points to a file. Graceful absent: missing file → no injection, no fatal.
+	if rulesPath := strings.TrimSpace(os.Getenv("ENGRAM_CLASSIFICATION_RULES")); rulesPath != "" {
+		if ruleCfg, err := classrules.LoadFromFile(rulesPath); err != nil {
+			log.Printf("[mcp] classification-rules: %v (continuing without injection)", err)
+		} else if ruleCfg != nil && ruleCfg.Rules != "" {
+			mcpCfg.ClassificationRulesText = ruleCfg.Rules
+		}
+	}
+
 	allowlist := resolveMCPTools(toolsFilter)
 	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
 

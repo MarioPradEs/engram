@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/classrules"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -56,6 +57,16 @@ type MCPConfig struct {
 	// mem_save call (REQ-001). nil means "use the store default" (3).
 	// An explicit pointer value (including 0) is forwarded directly.
 	Limit *int
+
+	// ClassificationRulesText is the operator-supplied scope-classification
+	// rules text to inject into the MCP server instructions. When non-empty,
+	// it is appended to the base serverInstructions via classrules.BuildInstructions
+	// so every connected agent receives the operator's classification rules.
+	//
+	// Load this field from a classification-rules.yaml file using
+	// classrules.LoadFromFile; see internal/cloud/classrules for the schema.
+	// When empty, the base instructions are used unchanged (graceful absent).
+	ClassificationRulesText string
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -218,6 +229,22 @@ IF judgment_required IS TRUE:
     explicit direction, include their words as the evidence field. This persists
     the verdict and closes the pending conflict row.`
 
+// buildServerInstructions assembles the final MCP server instructions string
+// from the base serverInstructions and any operator-supplied classification
+// rules in cfg. When cfg.ClassificationRulesText is empty the base instructions
+// are returned unchanged (graceful absent behavior — no empty section injected).
+//
+// This is the single seam for classification-rules injection (task 4.7).
+// The classrules package owns the BuildInstructions logic; this function
+// translates MCPConfig into the classrules.Config needed by that API.
+func buildServerInstructions(cfg MCPConfig) string {
+	if cfg.ClassificationRulesText == "" {
+		return serverInstructions
+	}
+	ruleCfg := &classrules.Config{Rules: cfg.ClassificationRulesText}
+	return classrules.BuildInstructions(serverInstructions, ruleCfg)
+}
+
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.
 func NewServerWithTools(s *store.Store, allowlist map[string]bool) *server.MCPServer {
@@ -235,7 +262,7 @@ func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]b
 		"engram",
 		"0.1.0",
 		server.WithToolCapabilities(true),
-		server.WithInstructions(serverInstructions),
+		server.WithInstructions(buildServerInstructions(cfg)),
 	)
 
 	registerTools(srv, s, cfg, allowlist, activity)

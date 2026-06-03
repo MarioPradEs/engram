@@ -121,6 +121,13 @@ func (s *CloudServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 // validateLoopbackRedirectURI ensures the redirect_uri is a loopback address
 // (http://127.0.0.1:<port>/... or http://localhost:<port>/...) to prevent
 // open-redirect attacks and token exfiltration per RFC 8252 §8.3.
+//
+// Rejected cases (in addition to non-loopback hosts):
+//   - W10: userinfo present (e.g. http://user:pass@127.0.0.1:9999/) — could
+//     smuggle credentials into the redirect or confuse downstream parsers.
+//   - W11: port 0 (e.g. http://127.0.0.1:0/) — anomalous input; the CLI
+//     always uses a real assigned port.  Port 0 would redirect the token to an
+//     OS-assigned ephemeral socket that is very unlikely to be the CLI listener.
 func validateLoopbackRedirectURI(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("redirect_uri is required")
@@ -132,6 +139,10 @@ func validateLoopbackRedirectURI(raw string) error {
 	if !strings.EqualFold(parsed.Scheme, "http") {
 		return fmt.Errorf("redirect_uri scheme must be http (loopback only)")
 	}
+	// W10: reject userinfo (e.g. user:pass@ or user@ prefix).
+	if parsed.User != nil {
+		return fmt.Errorf("redirect_uri must not contain userinfo")
+	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host != "127.0.0.1" && host != "localhost" {
 		return fmt.Errorf("redirect_uri host must be 127.0.0.1 or localhost (loopback only, got %q)", host)
@@ -140,6 +151,10 @@ func validateLoopbackRedirectURI(raw string) error {
 	port := strings.TrimSpace(parsed.Port())
 	if port == "" {
 		return fmt.Errorf("redirect_uri must include an explicit port (e.g. http://127.0.0.1:PORT/...)")
+	}
+	// W11: reject port 0 (OS-assigned ephemeral port — the CLI never sends this).
+	if port == "0" {
+		return fmt.Errorf("redirect_uri port must be a non-zero TCP port (got 0)")
 	}
 	return nil
 }

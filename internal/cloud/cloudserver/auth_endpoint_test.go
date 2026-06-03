@@ -232,3 +232,69 @@ func TestAuthEndpointOffboardingUser_canMint(t *testing.T) {
 		t.Fatalf("expected 302 for offboarding user, got %d body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAuthEndpointUserinfoInRedirectURI_returns400 verifies W10 fix:
+// redirect_uri containing userinfo (e.g. user:pass@host) must be rejected.
+// An attacker could exploit userinfo to smuggle credentials or confuse parsers.
+func TestAuthEndpointUserinfoInRedirectURI_returns400(t *testing.T) {
+	t.Parallel()
+	loader := buildAuthTestLoader(t, authEndpointTestYAML)
+	srv := buildAuthEndpointServer(loader, strings.Repeat("s", 32))
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{"user and password", "http://user:pass@127.0.0.1:9999/callback"},
+		{"user only", "http://user@127.0.0.1:9999/callback"},
+		{"user and password localhost", "http://user:pass@localhost:9999/callback"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet,
+				"/auth?redirect_uri="+tc.uri+"&state=csrf", nil)
+			req.Header.Set("X-Forwarded-Email", "alice@vivastudios.com")
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("W10: expected 400 for redirect_uri with userinfo %q, got %d body=%q",
+					tc.uri, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAuthEndpointPort0InRedirectURI_returns400 verifies W11 fix:
+// redirect_uri with port 0 must be rejected (anomalous input — no listener).
+func TestAuthEndpointPort0InRedirectURI_returns400(t *testing.T) {
+	t.Parallel()
+	loader := buildAuthTestLoader(t, authEndpointTestYAML)
+	srv := buildAuthEndpointServer(loader, strings.Repeat("s", 32))
+
+	cases := []struct {
+		name string
+		uri  string
+	}{
+		{"127.0.0.1 port 0", "http://127.0.0.1:0/callback"},
+		{"localhost port 0", "http://localhost:0/callback"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet,
+				"/auth?redirect_uri="+tc.uri+"&state=csrf", nil)
+			req.Header.Set("X-Forwarded-Email", "alice@vivastudios.com")
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("W11: expected 400 for redirect_uri with port 0 %q, got %d body=%q",
+					tc.uri, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

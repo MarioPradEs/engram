@@ -13,6 +13,9 @@ const (
 	ReasonPolicyForbidden             = "policy_forbidden"
 	ReasonTransportFailed             = "transport_failed"
 	ReasonCloudConfigError            = "cloud_config_error"
+	// ReasonAccountOffboarding signals that the server returned 403 account_offboarding.
+	// The CLI auto-drain fires once per session when this is detected.
+	ReasonAccountOffboarding = "account_offboarding"
 
 	UpgradeStatusReady   = "ready"
 	UpgradeStatusBlocked = "blocked"
@@ -48,4 +51,5 @@ var DeterministicReasons = []string{
 	ReasonPolicyForbidden,
 	ReasonTransportFailed,
 	ReasonCloudConfigError,
+	ReasonAccountOffboarding,
 }

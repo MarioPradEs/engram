@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
@@ -398,4 +400,210 @@ func TestHeaderAuthConcurrentRequestsDoNotCrossContaminate(t *testing.T) {
 		go runAs("bob@vivastudios.com", "Bob")
 	}
 	wg.Wait()
+}
+
+// ─── Piece B: Bearer JWT auth on /sync/* ────────────────────────────────────
+
+const bearerTestSecret = "a-test-secret-that-is-at-least-32chars-long"
+
+// mintTestJWT is a helper that mints a JWT for tests.
+func mintTestJWT(t *testing.T, email, name, dept, role string, offset int64) string {
+	t.Helper()
+	now := time.Now().UTC()
+	claims := JWTClaims{
+		Sub:        email,
+		Email:      email,
+		Name:       name,
+		Department: dept,
+		Role:       role,
+	}
+	if offset != 0 {
+		// Expired: shift the issuance time into the past so exp is in the past too.
+		now = now.Add(time.Duration(offset) * time.Second)
+	}
+	token, err := MintJWT(bearerTestSecret, claims, now)
+	if err != nil {
+		t.Fatalf("mintTestJWT: %v", err)
+	}
+	return token
+}
+
+// newTestHAWithBearer builds a HeaderAuthenticator with bearer JWT auth enabled.
+func newTestHAWithBearer(t *testing.T) *HeaderAuthenticator {
+	t.Helper()
+	loader := buildTestLoader(t, testYAML)
+	ha, err := NewHeaderAuthenticatorWithJWT(loader, "", bearerTestSecret)
+	if err != nil {
+		t.Fatalf("NewHeaderAuthenticatorWithJWT: %v", err)
+	}
+	return ha
+}
+
+// TestBearerJWT_ValidToken_ActiveUser verifies that a valid Bearer JWT for an
+// active user is authorized and the principal is resolved from the directory.
+func TestBearerJWT_ValidToken_ActiveUser(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	token := mintTestJWT(t, "alice@vivastudios.com", "Alice", "dev", "admin", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	enriched, err := ha.Authorize(req)
+	if err != nil {
+		t.Fatalf("expected success for valid Bearer JWT, got: %v", err)
+	}
+	attr := ha.Attribution(enriched.Context())
+	if attr.UserEmail != "alice@vivastudios.com" {
+		t.Errorf("expected UserEmail=alice@vivastudios.com, got %q", attr.UserEmail)
+	}
+	if attr.UserName != "Alice" {
+		t.Errorf("expected UserName=Alice, got %q", attr.UserName)
+	}
+}
+
+// TestBearerJWT_ExpiredToken_returns401 verifies expired JWT → 401.
+func TestBearerJWT_ExpiredToken_returns401(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	// Mint a token issued 8 days ago (exp = iat + 7d, so already expired).
+	expiredToken := mintTestJWT(t, "alice@vivastudios.com", "Alice", "dev", "admin", -(8*24*3600))
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+expiredToken)
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for expired JWT, got nil")
+	}
+}
+
+// TestBearerJWT_TamperedToken_returns401 verifies that a tampered JWT fails verification.
+func TestBearerJWT_TamperedToken_returns401(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	token := mintTestJWT(t, "alice@vivastudios.com", "Alice", "dev", "admin", 0)
+
+	// Tamper the payload segment.
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatal("expected 3-part JWT")
+	}
+	parts[1] = parts[1] + "TAMPERED"
+	tampered := strings.Join(parts, ".")
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+tampered)
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for tampered JWT, got nil")
+	}
+}
+
+// TestBearerJWT_ValidToken_RemovedUser_returns403 verifies that a valid JWT for
+// a user who has since been removed from the directory returns 403 account_removed.
+func TestBearerJWT_ValidToken_RemovedUser_returns403(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	// "removed" user is in testYAML with status=removed.
+	token := mintTestJWT(t, "removed@vivastudios.com", "Removed User", "qa", "member", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for removed user JWT, got nil")
+	}
+	var ae *AuthError
+	if !asAuthError(err, &ae) {
+		t.Fatalf("expected AuthError, got: %v", err)
+	}
+	if ae.Code != "account_removed" {
+		t.Errorf("expected code=account_removed, got %q", ae.Code)
+	}
+}
+
+// TestBearerJWT_Offboarding_GET_returns403 verifies that an offboarding user
+// cannot perform GET requests (read-only blocked per lifecycle matrix).
+func TestBearerJWT_Offboarding_GET_returns403(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	token := mintTestJWT(t, "offboarding@vivastudios.com", "Offboarding User", "qa", "member", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for offboarding user GET via JWT, got nil")
+	}
+	var ae *AuthError
+	if !asAuthError(err, &ae) {
+		t.Fatalf("expected AuthError, got: %v", err)
+	}
+	if ae.Code != "account_offboarding" {
+		t.Errorf("expected code=account_offboarding, got %q", ae.Code)
+	}
+}
+
+// TestBearerJWT_EmergencyBypassStillWorks verifies the ENGRAM_CLOUD_TOKEN bypass
+// continues to work when JWT auth is configured alongside it.
+func TestBearerJWT_EmergencyBypassStillWorks(t *testing.T) {
+	t.Parallel()
+	loader := buildTestLoader(t, testYAML)
+	ha, err := NewHeaderAuthenticatorWithJWT(loader, "super-secret-bypass", bearerTestSecret)
+	if err != nil {
+		t.Fatalf("NewHeaderAuthenticatorWithJWT with bypass: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer super-secret-bypass")
+
+	enriched, err := ha.Authorize(req)
+	if err != nil {
+		t.Fatalf("expected bypass to succeed, got: %v", err)
+	}
+	attr := ha.Attribution(enriched.Context())
+	// Sole admin in testYAML is alice@vivastudios.com.
+	if attr.UserEmail != "alice@vivastudios.com" {
+		t.Errorf("bypass should authenticate as sole admin alice, got %q", attr.UserEmail)
+	}
+}
+
+// TestBearerJWT_NoCreds_returns401 verifies that a request with no credentials
+// (no X-Forwarded-Email and no Authorization header) returns 401.
+func TestBearerJWT_NoCreds_returns401(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error with no credentials, got nil")
+	}
+}
+
+// TestBearerJWT_HeaderPrecedence verifies that X-Forwarded-Email takes precedence
+// over a Bearer JWT when both are present.
+func TestBearerJWT_HeaderPrecedence(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t)
+	// Mint a JWT for bob, but also set X-Forwarded-Email for alice.
+	token := mintTestJWT(t, "bob@vivastudios.com", "Bob", "dev", "member", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Forwarded-Email", "alice@vivastudios.com")
+
+	enriched, err := ha.Authorize(req)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	attr := ha.Attribution(enriched.Context())
+	// X-Forwarded-Email (alice) should win.
+	if attr.UserEmail != "alice@vivastudios.com" {
+		t.Errorf("expected X-Forwarded-Email to win, got %q", attr.UserEmail)
+	}
 }

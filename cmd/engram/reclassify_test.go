@@ -226,3 +226,77 @@ func assertClassifiedByV2(t *testing.T, s *store.Store, id int64, want bool, lab
 		t.Errorf("[%s] obs#%d: classified_by_v2=%v, want %v", label, id, obs.ClassifiedByV2, want)
 	}
 }
+
+// TestSecretScanChecksTitle verifies S7: the secret scan must flag observations
+// whose TITLE contains a secret pattern, not just the content. The W9 Bearer
+// minimum-length behavior (≥20 chars) must still apply.
+func TestSecretScanChecksTitle(t *testing.T) {
+	project := "team-x"
+	tests := []struct {
+		name     string
+		title    string
+		content  string
+		wantHit  bool
+		wantDesc string
+	}{
+		{
+			name:     "secret in title only (API key)",
+			title:    "API_KEY=sk-abc1234567890abcdefghijklm",
+			content:  "Nothing sensitive here.",
+			wantHit:  true,
+			wantDesc: "title with API_KEY pattern must trigger skipped_secret_scan",
+		},
+		{
+			name:     "secret in content only (existing behavior preserved)",
+			title:    "Normal title",
+			content:  "API_KEY=sk-abc1234567890abcdefghijklm",
+			wantHit:  true,
+			wantDesc: "content with API_KEY pattern must trigger skipped_secret_scan",
+		},
+		{
+			name:     "secret in both title and content",
+			title:    "API_KEY=sk-abc1234567890abcdefghijklm",
+			content:  "API_KEY=sk-abc1234567890abcdefghijklm",
+			wantHit:  true,
+			wantDesc: "secret in both title and content must trigger skipped_secret_scan",
+		},
+		{
+			name:     "clean title and content",
+			title:    "Normal project observation",
+			content:  "This is a normal project observation without secrets.",
+			wantHit:  false,
+			wantDesc: "clean title+content must NOT trigger skipped_secret_scan",
+		},
+		{
+			name:     "W9 preserved: short word after Bearer in title is NOT secret",
+			title:    "Bearer of good news",
+			content:  "Normal content.",
+			wantHit:  false,
+			wantDesc: "Bearer + short natural-language words in title must NOT trigger (W9 preserved)",
+		},
+		{
+			name:     "Bearer token ≥20 chars in title IS a secret",
+			title:    "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.xyz",
+			content:  "Normal content.",
+			wantHit:  true,
+			wantDesc: "Bearer token ≥20 chars in title must trigger skipped_secret_scan",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := &store.Observation{
+				Title:   tc.title,
+				Content: tc.content,
+				Scope:   "project",
+				Project: &project,
+			}
+			outcome := classifyObservation(obs)
+			hit := outcome == "skipped_secret_scan"
+			if hit != tc.wantHit {
+				t.Errorf("%s: got skipped_secret_scan=%v, want %v (outcome=%q)",
+					tc.wantDesc, hit, tc.wantHit, outcome)
+			}
+		})
+	}
+}

@@ -4245,14 +4245,21 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+		        coalesce(classified_by_v2, 0) as classified_by_v2
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt); err != nil {
+	var classifiedByV2Int int
+	if err := row.Scan(
+		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount,
+		&o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
+	); err != nil {
 		return nil, err
 	}
+	o.ClassifiedByV2 = classifiedByV2Int != 0
 	return &o, nil
 }
 

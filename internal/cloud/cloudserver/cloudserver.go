@@ -534,12 +534,36 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.store.WriteChunk(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData); err != nil {
-		if errors.Is(err, cloudstore.ErrChunkConflict) {
-			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodeChunkConflict, fmt.Sprintf("write chunk: %v", err))
+	// Resolve server-side attribution from the authenticated identity (if any).
+	// Uses the same AttributionProvider pattern as handleMutationPush so that
+	// Gate B (personal-drop) and attribution stamping are applied on the chunk path.
+	// ctx carries the principal placed there by withAuth → Authorize.
+	var attr cloudstore.Attribution
+	if ap, ok := s.auth.(interface {
+		Attribution(ctx context.Context) cloudstore.Attribution
+	}); ok {
+		attr = ap.Attribution(r.Context())
+	}
+
+	// Use WriteChunkWithAttribution when the store implements it (structural assertion
+	// keeps the ChunkStore interface stable — same pattern as the pause guard above).
+	// Falls back to WriteChunk (zero Attribution = no Gate B, no stamping) for stores
+	// that do not yet implement the method (e.g. test fakes).
+	type chunkStoreWithAttribution interface {
+		WriteChunkWithAttribution(ctx context.Context, project, chunkID, createdBy, clientCreatedAt string, payload []byte, attr cloudstore.Attribution) error
+	}
+	var writeErr error
+	if storeWithAttr, ok := s.store.(chunkStoreWithAttribution); ok {
+		writeErr = storeWithAttr.WriteChunkWithAttribution(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData, attr)
+	} else {
+		writeErr = s.store.WriteChunk(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData)
+	}
+	if writeErr != nil {
+		if errors.Is(writeErr, cloudstore.ErrChunkConflict) {
+			writeActionableError(w, http.StatusConflict, constants.UpgradeErrorClassRepairable, constants.UpgradeErrorCodeChunkConflict, fmt.Sprintf("write chunk: %v", writeErr))
 			return
 		}
-		writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, fmt.Sprintf("write chunk: %v", err))
+		writeActionableError(w, http.StatusInternalServerError, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeInternal, fmt.Sprintf("write chunk: %v", writeErr))
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "chunk_id": computedChunkID})

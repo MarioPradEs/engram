@@ -122,7 +122,15 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			_ = cs.Close()
 			return nil, fmt.Errorf("newCloudRuntime: load users file %q: %w", usersFile, err)
 		}
-		headerAuth := auth.NewHeaderAuthenticator(loader)
+		// Pass ENGRAM_CLOUD_TOKEN as emergency bypass token. When set, requests
+		// bearing it as a Bearer credential bypass header auth and authenticate
+		// as the directory's sole admin (spec: oauth-authentication §Emergency Bypass).
+		bypassToken := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN"))
+		headerAuth, err := auth.NewHeaderAuthenticator(loader, bypassToken)
+		if err != nil {
+			_ = cs.Close()
+			return nil, fmt.Errorf("newCloudRuntime: configure header authenticator: %w", err)
+		}
 		// SIGHUP → reload user directory so operator changes take effect without restart.
 		runtime.onSIGHUP = func() {
 			if err := loader.Reload(); err != nil {

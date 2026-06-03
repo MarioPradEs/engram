@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -170,7 +171,7 @@ func (s *Service) SetAllowedProjects(projects []string) {
 	}
 }
 
-func (s *Service) AuthorizeProject(project string) error {
+func (s *Service) AuthorizeProject(_ context.Context, project string) error {
 	if s.allowedAll {
 		normalized, _ := store.NormalizeProject(project)
 		normalized = strings.TrimSpace(normalized)
@@ -184,15 +185,14 @@ func (s *Service) AuthorizeProject(project string) error {
 
 // EnrolledProjects returns the sorted list of projects that this Service is
 // authorized to serve. Used by cloudserver's mutation pull to filter mutations
-// to the caller's enrolled projects (REQ-202).
+// to the caller's enrolled projects (REQ-202). ctx is accepted to satisfy the
+// cloudserver.EnrolledProjectsProvider interface; Service ignores it since
+// enrollment is statically configured (not request-scoped).
 //
 // When the wildcard "*" is configured, nil is returned to signal "no project
 // filter" — callers must treat nil as "allow all" (matching the ListMutationsSince
 // nil-means-all contract).
-//
-// The interface is cloudserver.EnrolledProjectsProvider; this method makes
-// *Service satisfy it without importing cloudserver (structural assertion).
-func (s *Service) EnrolledProjects() []string {
+func (s *Service) EnrolledProjects(_ context.Context) []string {
 	if s.allowedAll {
 		return nil
 	}
@@ -216,7 +216,7 @@ func (a *ProjectScopeAuthorizer) SetAllowedProjects(projects []string) {
 	}
 }
 
-func (a *ProjectScopeAuthorizer) AuthorizeProject(project string) error {
+func (a *ProjectScopeAuthorizer) AuthorizeProject(_ context.Context, project string) error {
 	if a.allowedAll {
 		normalized, _ := store.NormalizeProject(project)
 		normalized = strings.TrimSpace(normalized)
@@ -229,13 +229,12 @@ func (a *ProjectScopeAuthorizer) AuthorizeProject(project string) error {
 }
 
 // EnrolledProjects returns the sorted list of projects this authorizer allows.
-// Matches the cloudserver.EnrolledProjectsProvider contract so mutation pull
-// can filter server-side by the caller's enrolled projects (REQ-202) rather
-// than fail-closing to an empty result set.
+// ctx is accepted to satisfy the cloudserver.EnrolledProjectsProvider interface;
+// ProjectScopeAuthorizer ignores it since enrollment is statically configured.
 //
 // When the wildcard "*" is configured, nil is returned to signal "no project
 // filter" (matching the ListMutationsSince nil-means-all contract).
-func (a *ProjectScopeAuthorizer) EnrolledProjects() []string {
+func (a *ProjectScopeAuthorizer) EnrolledProjects(_ context.Context) []string {
 	if a.allowedAll {
 		return nil
 	}
@@ -272,27 +271,27 @@ func authorizeProjectAgainstAllowlist(project string, allowed map[string]struct{
 	return fmt.Errorf("%w", ErrProjectNotAllowed)
 }
 
-func (s *Service) Authorize(r *http.Request) error {
+func (s *Service) Authorize(r *http.Request) (*http.Request, error) {
 	if strings.TrimSpace(s.expectedToken) == "" {
-		return ErrBearerTokenNotConfigured
+		return r, ErrBearerTokenNotConfigured
 	}
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {
-		return fmt.Errorf("missing authorization header")
+		return r, fmt.Errorf("missing authorization header")
 	}
 	parts := strings.Fields(header)
 	if len(parts) != 2 {
-		return fmt.Errorf("authorization must use Bearer token")
+		return r, fmt.Errorf("authorization must use Bearer token")
 	}
 	if !strings.EqualFold(parts[0], "Bearer") {
-		return fmt.Errorf("authorization must use Bearer token")
+		return r, fmt.Errorf("authorization must use Bearer token")
 	}
 	token := strings.TrimSpace(parts[1])
 	if token == "" {
-		return fmt.Errorf("bearer token is required")
+		return r, fmt.Errorf("bearer token is required")
 	}
 	if !hmac.Equal([]byte(token), []byte(s.expectedToken)) {
-		return fmt.Errorf("invalid bearer token")
+		return r, fmt.Errorf("invalid bearer token")
 	}
-	return nil
+	return r, nil
 }

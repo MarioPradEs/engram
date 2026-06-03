@@ -103,6 +103,27 @@ func (l *YAMLLoader) Lookup(email string) (Principal, bool) {
 	return p, ok
 }
 
+// SoleAdmin returns the single admin Principal and true when the directory
+// contains exactly one user with role "admin". Returns the zero value and false
+// when the count is 0 or >1 — callers must treat those cases as errors for
+// bypass-token configuration.
+func (l *YAMLLoader) SoleAdmin() (Principal, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var admin Principal
+	count := 0
+	for _, p := range l.current {
+		if strings.EqualFold(p.Role, "admin") {
+			admin = p
+			count++
+		}
+	}
+	if count == 1 {
+		return admin, true
+	}
+	return Principal{}, false
+}
+
 // Reload re-reads and validates the YAML file. On success the directory is
 // atomically replaced. On failure the last valid directory is retained and the
 // error is returned.

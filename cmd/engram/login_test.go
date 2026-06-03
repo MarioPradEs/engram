@@ -491,6 +491,104 @@ func makeHTTPStatusError401() error {
 	return err
 }
 
+// TestLoginMarksPushGateIncompleteBeforeReclassify verifies W7:
+// login must call MarkReclassifyIncomplete BEFORE the reclassify hook so the
+// push gate is ACTIVE (incomplete) throughout reclassify, then the gate is
+// lifted (complete) once reclassify finishes normally.
+//
+// Scenario: fresh store (no sync_state row) → IsReclassifyComplete defaults true.
+// After MarkReclassifyIncomplete is called, it must return false.
+// After reclassifyHookFn completes (with MarkReclassifyComplete), it returns true.
+func TestLoginMarksPushGateIncompleteBeforeReclassify(t *testing.T) {
+	cfg := testConfig(t)
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	secret := strings.Repeat("x", 32)
+
+	exchanger := &fakeTokenExchanger{
+		claims: auth.JWTClaims{
+			Sub:   "gate-test@vivastudios.com",
+			Email: "gate-test@vivastudios.com",
+			Iat:   now.Unix(),
+			Exp:   now.Unix() + 604800,
+		},
+	}
+
+	credDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+
+	// Open a store once to observe gate state across the login lifecycle.
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	// Confirm fresh store has IsReclassifyComplete=true (safe default for existing installs).
+	initialComplete, err := s.IsReclassifyComplete(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("IsReclassifyComplete (initial): %v", err)
+	}
+	if !initialComplete {
+		t.Fatal("expected fresh store to report reclassify complete by default (safe default for existing installs)")
+	}
+
+	// Inject a reclassify hook that:
+	//   a) captures gate state at hook entry (must be INCOMPLETE — gate active)
+	//   b) calls MarkReclassifyComplete to simulate real reclassify finishing
+	var gateStateAtHookEntry bool
+	var gateReadErr error
+	oldReclassifyHookFn := reclassifyHookFn
+	reclassifyHookFn = func(hookCfg store.Config) {
+		gateStateAtHookEntry, gateReadErr = s.IsReclassifyComplete(store.DefaultSyncTargetKey)
+		// Simulate reclassify completing normally.
+		_ = s.MarkReclassifyComplete(store.DefaultSyncTargetKey)
+	}
+	t.Cleanup(func() { reclassifyHookFn = oldReclassifyHookFn })
+
+	oldPullFn := postLoginPullFn
+	oldPushFn := postLoginPushFn
+	postLoginPullFn = func(cfg store.Config) error { return nil }
+	postLoginPushFn = func(cfg store.Config) error { return nil }
+	t.Cleanup(func() {
+		postLoginPullFn = oldPullFn
+		postLoginPushFn = oldPushFn
+	})
+
+	loginRunner := &loginCommand{
+		cfg:      cfg,
+		exchanger: exchanger,
+		browser:  &fakeBrowserOpener{},
+		clock:    &fakeClock{now: now},
+		secret:   secret,
+	}
+	if err := loginRunner.Run(); err != nil {
+		t.Fatalf("login.Run: %v", err)
+	}
+
+	// The hook must have been invoked.
+	if gateReadErr != nil {
+		t.Fatalf("IsReclassifyComplete inside hook: %v", gateReadErr)
+	}
+
+	// Gate must have been ACTIVE (incomplete=false) when the hook was called.
+	if gateStateAtHookEntry {
+		t.Error("push gate must be INACTIVE (IsReclassifyComplete=false) when reclassify hook starts — MarkReclassifyIncomplete must be called before the hook")
+	}
+
+	// After full login flow: gate must be LIFTED (complete=true) because the
+	// injected hook called MarkReclassifyComplete.
+	finalComplete, err := s.IsReclassifyComplete(store.DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("IsReclassifyComplete (final): %v", err)
+	}
+	if !finalComplete {
+		t.Error("push gate must be ACTIVE (IsReclassifyComplete=true) after login + reclassify complete")
+	}
+}
+
 // makeHTTPStatusError403 creates a real *remote.HTTPStatusError with status 403.
 func makeHTTPStatusError403() error {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

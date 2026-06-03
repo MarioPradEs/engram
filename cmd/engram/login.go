@@ -163,6 +163,24 @@ func (c *loginCommand) Run() error {
 		_ = s.Close()
 	}
 
+	// Activate the push gate before reclassify runs (W7).
+	// On a fresh install, IsReclassifyComplete defaults true (no sync_state row),
+	// which would leave the push gate inactive if login is interrupted between
+	// token write and reclassify completion. Mark incomplete first so the gate is
+	// ACTIVE throughout the reclassify pass; MarkReclassifyComplete (called by
+	// cmdReclassify) lifts the gate only once classification genuinely finishes.
+	{
+		gs, err := storeNew(c.cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[login] warn: open store for push gate: %v\n", err)
+		} else {
+			if err := gs.MarkReclassifyIncomplete(store.DefaultSyncTargetKey); err != nil {
+				fmt.Fprintf(os.Stderr, "[login] warn: mark reclassify incomplete: %v\n", err)
+			}
+			_ = gs.Close()
+		}
+	}
+
 	// Canonical post-auth order (design Q2): reclassify → pull → push.
 	reclassifyHookFn(c.cfg)
 

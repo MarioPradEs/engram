@@ -52,9 +52,21 @@ type AdminResolver interface {
 	SoleAdmin() (users.Principal, bool)
 }
 
-// HeaderAuthenticator resolves a caller's identity from X-Forwarded-Email,
-// enforces user lifecycle status (active / offboarding / removed), and provides
-// per-request project enrollment.
+// HeaderAuthenticator resolves a caller's identity, enforces user lifecycle
+// status (active / offboarding / removed), and provides per-request project
+// enrollment.  It operates in two modes depending on whether jwtSecret is set:
+//
+// JWT mode (NewHeaderAuthenticatorWithJWT with non-empty jwtSecret):
+//   Used on /sync/* routes that Caddy routes directly to the cloud server,
+//   bypassing oauth2-proxy.  On this path X-Forwarded-Email is
+//   attacker-controlled and is COMPLETELY IGNORED.  Only a valid Bearer JWT
+//   (or the emergency bypass token) is accepted.
+//   Precedence: bypass → Bearer JWT → 401.
+//
+// Header mode (NewHeaderAuthenticator / NewHeaderAuthenticatorWithJWT with ""):
+//   Used on oauth2-proxy-protected routes where X-Forwarded-Email is
+//   trustworthy (injected by the proxy).  Bearer JWT is NOT checked.
+//   Precedence: bypass → X-Forwarded-Email → 401.
 //
 // Design decisions implemented:
 //   - Principal is REQUEST-SCOPED via context (no shared mutable state — safe
@@ -67,10 +79,6 @@ type AdminResolver interface {
 //   - Three-State Access Matrix: offboarding+read → 403 account_offboarding;
 //     offboarding+write → allowed; removed → 403 account_removed.
 //   - "general" is always injected into EnrolledProjects (design Q5).
-//   - Bearer JWT path: if jwtSecret is set and the request carries a Bearer
-//     token that is NOT the bypassToken, it is verified via VerifyJWT and the
-//     email from the claims is used to resolve the principal from the directory.
-//     Precedence: X-Forwarded-Email → bypass → JWT Bearer → 401.
 type HeaderAuthenticator struct {
 	loader      UserLoader
 	bypassToken string // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
@@ -90,12 +98,20 @@ func NewHeaderAuthenticator(loader UserLoader, bypassToken string) (*HeaderAuthe
 // signing secret used by MintJWT / VerifyJWT (minimum 32 bytes); empty string
 // disables JWT Bearer verification (falls back to X-Forwarded-Email only).
 //
-// Precedence when jwtSecret is non-empty:
+// Precedence when jwtSecret is non-empty (JWT mode — used on /sync/* direct routes):
 //
 //  1. Emergency bypass (Bearer == bypassToken)  → admin identity
-//  2. X-Forwarded-Email present                → header auth (oauth2-proxy path)
-//  3. Bearer JWT present                       → verify + re-resolve principal
-//  4. No credentials                           → 401
+//  2. Bearer JWT present                       → verify + re-resolve principal
+//  3. No valid credentials                     → 401
+//
+// SECURITY NOTE: When jwtSecret is set the X-Forwarded-Email header is NOT
+// trusted and is completely ignored.  On the /sync/* path Caddy routes requests
+// DIRECTLY to the cloud server (bypassing oauth2-proxy), so X-Forwarded-Email
+// is attacker-controlled.  Trusting it would allow any caller to impersonate
+// any @vivastudios.com user without a valid JWT (C1 auth bypass).
+//
+// The /auth endpoint handler reads X-Forwarded-Email directly (it is behind
+// oauth2-proxy) and does NOT use Authorize — it is unaffected by this change.
 func NewHeaderAuthenticatorWithJWT(loader UserLoader, bypassToken, jwtSecret string) (*HeaderAuthenticator, error) {
 	if bypassToken != "" {
 		ar, ok := loader.(AdminResolver)
@@ -117,22 +133,31 @@ func NewHeaderAuthenticatorWithJWT(loader UserLoader, bypassToken, jwtSecret str
 // pointer, we need the approach of returning the principal via a context
 // carried through withAuth.
 //
-// HTTP status semantics:
-//   - Missing X-Forwarded-Email                   → 401 (plain error, not AuthError)
-//   - Email not ending in @vivastudios.com         → 401 (plain error)
+// HTTP status semantics depend on which mode the authenticator is in.
+//
+// JWT mode (jwtSecret set — used on /sync/* direct routes):
+//   - Emergency bypass (Bearer == bypassToken)     → 200 as sole admin
+//   - Valid Bearer JWT                             → 200 (principal from directory)
+//   - Expired/tampered JWT                         → 401 (plain error)
 //   - Valid domain, not in directory               → 403 user_not_provisioned
 //   - status=removed                               → 403 account_removed
 //   - status=offboarding + write (POST)            → 200 (allowed; returns principal)
 //   - status=offboarding + read (GET)              → 403 account_offboarding
 //   - status=active                                → 200 (allowed)
+//   - X-Forwarded-Email header present             → IGNORED (attacker-controlled on direct path)
+//   - No valid credentials                         → 401
+//
+// Header mode (no jwtSecret — legacy/oauth2-proxy routes):
 //   - Emergency bypass (Bearer == bypassToken)     → 200 as sole admin
+//   - X-Forwarded-Email present + valid domain     → resolved from directory
+//   - Missing X-Forwarded-Email                    → 401 (plain error, not AuthError)
+//   - Email not ending in @vivastudios.com         → 401 (plain error)
 //
 // The principal is stored in r.Context() so downstream methods
 // (AuthorizeProject, Attribution, EnrolledProjects) are concurrency-safe.
 func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error) {
 	// Emergency bypass takes precedence over all other auth paths.
-	// (Design: header → bypass → JWT Bearer → 401, but bypass is checked first
-	//  because it must work even when X-Forwarded-Email is absent on /sync/* routes.)
+	// Works in both JWT mode and header mode.
 	if ha.bypassToken != "" {
 		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 		parts := strings.Fields(authHeader)
@@ -147,13 +172,10 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 		}
 	}
 
-	// X-Forwarded-Email path (oauth2-proxy route — /auth, /dashboard etc.).
-	email := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Email")))
-	if email != "" {
-		return ha.resolveByEmail(r, email)
-	}
-
-	// Bearer JWT path (direct /sync/* route, no oauth2-proxy header).
+	// JWT mode: jwtSecret is set — this authenticator is used on /sync/* routes
+	// that Caddy routes DIRECTLY to the cloud server (bypassing oauth2-proxy).
+	// On this path, X-Forwarded-Email is attacker-controlled and MUST be ignored.
+	// Only a valid Bearer JWT is accepted as proof of identity.
 	if ha.jwtSecret != "" {
 		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 		parts := strings.Fields(authHeader)
@@ -168,6 +190,15 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 			}
 			return ha.resolveByEmail(r, jwtEmail)
 		}
+		// No valid Bearer JWT — reject.  Do NOT fall through to X-Forwarded-Email.
+		return r, fmt.Errorf("auth: bearer jwt required on direct sync routes")
+	}
+
+	// Header mode (legacy / oauth2-proxy path): trust X-Forwarded-Email because
+	// the request has passed through oauth2-proxy which injected it.
+	email := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Email")))
+	if email != "" {
+		return ha.resolveByEmail(r, email)
 	}
 
 	// No credentials present.

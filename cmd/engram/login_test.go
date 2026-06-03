@@ -130,8 +130,8 @@ func TestLoginHappyPath(t *testing.T) {
 	// Suppress pull/push during test.
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { return nil }
-	postLoginPushFn = func(cfg store.Config) error { return nil }
+	postLoginPullFn = func(cfg store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(cfg store.Config) (int, error) { return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -233,8 +233,8 @@ func TestLoginPullFailureDoesNotBlockPush(t *testing.T) {
 	pushCalled := false
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { return fmt.Errorf("pull: network error") }
-	postLoginPushFn = func(cfg store.Config) error { pushCalled = true; return nil }
+	postLoginPullFn = func(cfg store.Config) (int, error) { return 0, fmt.Errorf("pull: network error") }
+	postLoginPushFn = func(cfg store.Config) (int, error) { pushCalled = true; return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -294,8 +294,8 @@ func TestLoginPushFailureIsWarningNotError(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { return nil }
-	postLoginPushFn = func(cfg store.Config) error { return fmt.Errorf("push: server error") }
+	postLoginPullFn = func(cfg store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(cfg store.Config) (int, error) { return 0, fmt.Errorf("push: server error") }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -356,8 +356,8 @@ func TestLoginReclassifyCalledBeforePush(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { order = append(order, "pull"); return nil }
-	postLoginPushFn = func(cfg store.Config) error { order = append(order, "push"); return nil }
+	postLoginPullFn = func(cfg store.Config) (int, error) { order = append(order, "pull"); return 0, nil }
+	postLoginPushFn = func(cfg store.Config) (int, error) { order = append(order, "push"); return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -414,8 +414,8 @@ func TestLoginGeneralEnrollment(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { return nil }
-	postLoginPushFn = func(cfg store.Config) error { return nil }
+	postLoginPullFn = func(cfg store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(cfg store.Config) (int, error) { return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -577,8 +577,8 @@ func TestLoginMarksPushGateIncompleteBeforeReclassify(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error { return nil }
-	postLoginPushFn = func(cfg store.Config) error { return nil }
+	postLoginPullFn = func(cfg store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(cfg store.Config) (int, error) { return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -757,8 +757,8 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(_ store.Config) error { return nil }
-	postLoginPushFn = func(_ store.Config) error { return nil }
+	postLoginPullFn = func(_ store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(_ store.Config) (int, error) { return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn
@@ -847,23 +847,29 @@ func TestPostLoginSyncSendsBearerToken(t *testing.T) {
 	pushCalled := false
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(cfg store.Config) error {
+	postLoginPullFn = func(cfg store.Config) (int, error) {
 		pullCalled = true
 		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		_, err = mt.PullMutations(0, 10)
-		return err
+		resp, err := mt.PullMutations(0, 10)
+		if err != nil {
+			return 0, err
+		}
+		return len(resp.Mutations), nil
 	}
-	postLoginPushFn = func(cfg store.Config) error {
+	postLoginPushFn = func(cfg store.Config) (int, error) {
 		pushCalled = true
 		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
 		if err != nil {
-			return err
+			return 0, err
 		}
-		_, err = mt.PushMutations(nil)
-		return err
+		accepted, err := mt.PushMutations(nil)
+		if err != nil {
+			return 0, err
+		}
+		return len(accepted), nil
 	}
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
@@ -943,8 +949,8 @@ func TestPostLoginSyncSummaryPrinted(t *testing.T) {
 
 	oldPullFn := postLoginPullFn
 	oldPushFn := postLoginPushFn
-	postLoginPullFn = func(_ store.Config) error { return nil }
-	postLoginPushFn = func(_ store.Config) error { return nil }
+	postLoginPullFn = func(_ store.Config) (int, error) { return 0, nil }
+	postLoginPushFn = func(_ store.Config) (int, error) { return 0, nil }
 	t.Cleanup(func() {
 		postLoginPullFn = oldPullFn
 		postLoginPushFn = oldPushFn

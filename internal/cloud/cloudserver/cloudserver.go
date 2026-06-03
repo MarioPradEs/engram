@@ -30,11 +30,18 @@ type ChunkStore interface {
 }
 
 type Authenticator interface {
-	Authorize(r *http.Request) error
+	// Authorize validates the request and returns an enriched *http.Request whose
+	// context carries the resolved principal. The returned request MUST be used for
+	// all downstream calls so that AuthorizeProject, Attribution, and EnrolledProjects
+	// can read the principal from the context (concurrency-safe shared instance).
+	Authorize(r *http.Request) (*http.Request, error)
 }
 
 type ProjectAuthorizer interface {
-	AuthorizeProject(project string) error
+	// AuthorizeProject returns nil when the project is allowed for the caller
+	// identified by the principal in ctx (placed there by Authorize). ctx is
+	// required so implementations can read request-scoped principal state.
+	AuthorizeProject(ctx context.Context, project string) error
 }
 
 type dashboardSessionCodec interface {
@@ -166,7 +173,8 @@ func (s *CloudServer) routes() {
 		}
 		req, _ := http.NewRequest(http.MethodGet, "/dashboard/login", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
-		return s.auth.Authorize(req)
+		_, err := s.auth.Authorize(req)
+		return err
 	}
 	createSessionCookie := func(w http.ResponseWriter, r *http.Request, token string) error {
 		sessionToken, err := s.dashboardSessionToken(token)
@@ -223,10 +231,12 @@ func (s *CloudServer) routes() {
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.auth != nil {
-			if err := s.auth.Authorize(r); err != nil {
-				http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
+			enriched, err := s.auth.Authorize(r)
+			if err != nil {
+				writeAuthError(w, err)
 				return
 			}
+			r = enriched
 		}
 		next(w, r)
 	}
@@ -235,13 +245,41 @@ func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *CloudServer) withAuthHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.auth != nil {
-			if err := s.auth.Authorize(r); err != nil {
-				http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
+			enriched, err := s.auth.Authorize(r)
+			if err != nil {
+				writeAuthError(w, err)
 				return
 			}
+			r = enriched
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// structuredAuthError is satisfied by typed auth errors that carry HTTP status
+// and structured error codes (e.g. auth.AuthError). Using an interface avoids
+// an import cycle: cloudserver does not import auth; auth defines its error type
+// independently and cloudserver checks the interface via errors.As.
+type structuredAuthError interface {
+	error
+	HTTPStatus() int
+	ErrorCode() string
+	ErrorMessage() string
+}
+
+// writeAuthError writes the appropriate HTTP response for an auth error.
+// If err satisfies structuredAuthError, the typed status and JSON body are used.
+// A plain (untyped) error results in HTTP 401 (backward-compatible default).
+func writeAuthError(w http.ResponseWriter, err error) {
+	var se structuredAuthError
+	if errors.As(err, &se) {
+		jsonResponse(w, se.HTTPStatus(), map[string]any{
+			"error":   se.ErrorCode(),
+			"message": se.ErrorMessage(),
+		})
+		return
+	}
+	http.Error(w, fmt.Sprintf("unauthorized: %v", err), http.StatusUnauthorized)
 }
 
 func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
@@ -264,7 +302,8 @@ func (s *CloudServer) authorizeDashboardRequest(r *http.Request) error {
 	}
 	req, _ := http.NewRequest(http.MethodGet, "/dashboard", nil)
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
-	return s.auth.Authorize(req)
+	_, err = s.auth.Authorize(req)
+	return err
 }
 
 func (s *CloudServer) dashboardSessionToken(bearerToken string) (string, error) {
@@ -326,7 +365,7 @@ func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !s.authorizeProjectScope(w, project) {
+	if !s.authorizeProjectScope(w, r, project) {
 		return
 	}
 	manifest, err := s.store.ReadManifest(r.Context(), project)
@@ -342,7 +381,7 @@ func (s *CloudServer) handlePullChunk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.authorizeProjectScope(w, project) {
+	if !s.authorizeProjectScope(w, r, project) {
 		return
 	}
 	chunkID := strings.TrimSpace(r.PathValue("chunkID"))
@@ -400,7 +439,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 		writeActionableError(w, http.StatusBadRequest, constants.UpgradeErrorClassBlocked, constants.UpgradeErrorCodeProjectRequired, "project is required")
 		return
 	}
-	if !s.authorizeProjectScope(w, project) {
+	if !s.authorizeProjectScope(w, r, project) {
 		return
 	}
 
@@ -517,11 +556,11 @@ func projectFromRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return project, true
 }
 
-func (s *CloudServer) authorizeProjectScope(w http.ResponseWriter, project string) bool {
+func (s *CloudServer) authorizeProjectScope(w http.ResponseWriter, r *http.Request, project string) bool {
 	if s.projectAuth == nil {
 		return true
 	}
-	if err := s.projectAuth.AuthorizeProject(project); err != nil {
+	if err := s.projectAuth.AuthorizeProject(r.Context(), project); err != nil {
 		writeActionableError(w, http.StatusForbidden, constants.UpgradeErrorClassPolicy, constants.ReasonPolicyForbidden, "forbidden: project is not allowed")
 		return false
 	}

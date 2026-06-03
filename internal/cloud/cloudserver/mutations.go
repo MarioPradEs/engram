@@ -48,8 +48,9 @@ var _ MutationStore = (*cloudstore.CloudStore)(nil)
 
 // EnrolledProjectsProvider is an optional extension of ProjectAuthorizer
 // that returns the list of enrolled projects for the authenticated caller.
+// ctx must carry the principal placed there by Authenticator.Authorize.
 type EnrolledProjectsProvider interface {
-	EnrolledProjects() []string
+	EnrolledProjects(ctx context.Context) []string
 }
 
 const maxMutationBatchSize = 100
@@ -120,7 +121,7 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		seen[project] = struct{}{}
-		if !s.authorizeProjectScope(w, project) {
+		if !s.authorizeProjectScope(w, r, project) {
 			// authorizeProjectScope already wrote the 403 response.
 			return
 		}
@@ -201,11 +202,12 @@ func (s *CloudServer) handleMutationPush(w http.ResponseWriter, r *http.Request)
 
 	// Resolve server-side attribution from the authenticated identity (if any).
 	// The identity is carried by the Authenticator when it implements AttributionProvider.
+	// ctx carries the principal placed there by Authorize (request-scoped).
 	var attr cloudstore.Attribution
 	if ap, ok := s.auth.(interface {
-		Attribution() cloudstore.Attribution
+		Attribution(ctx context.Context) cloudstore.Attribution
 	}); ok {
-		attr = ap.Attribution()
+		attr = ap.Attribution(r.Context())
 	}
 
 	acceptedSeqs, err := ms.InsertMutationBatch(r.Context(), req.Entries, attr)
@@ -253,7 +255,7 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 	var allowedProjects []string
 	if s.projectAuth != nil {
 		if ep, ok := s.projectAuth.(EnrolledProjectsProvider); ok {
-			allowedProjects = ep.EnrolledProjects()
+			allowedProjects = ep.EnrolledProjects(r.Context())
 		} else {
 			// EnrolledProjectsProvider not implemented: fail closed with empty list.
 			// Log a warning so operators know the contract is violated.
@@ -287,9 +289,9 @@ func (s *CloudServer) handleMutationPull(w http.ResponseWriter, r *http.Request)
 	// to filter observations by scope tier. nil means no scope filter (legacy).
 	var scopeFilter *cloudstore.MutationScopeFilter
 	if ap, ok := s.auth.(interface {
-		Attribution() cloudstore.Attribution
+		Attribution(ctx context.Context) cloudstore.Attribution
 	}); ok {
-		attr := ap.Attribution()
+		attr := ap.Attribution(r.Context())
 		if attr.UserEmail != "" {
 			scopeFilter = &cloudstore.MutationScopeFilter{
 				CallerEmail:      attr.UserEmail,

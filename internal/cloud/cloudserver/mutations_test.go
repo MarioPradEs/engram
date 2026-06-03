@@ -234,15 +234,15 @@ type multiProjectAuth struct {
 	projects []string // projects this token is enrolled in
 }
 
-func (a multiProjectAuth) Authorize(r *http.Request) error {
+func (a multiProjectAuth) Authorize(r *http.Request) (*http.Request, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != a.token {
-		return fmt.Errorf("unauthorized")
+		return r, fmt.Errorf("unauthorized")
 	}
-	return nil
+	return r, nil
 }
 
-func (a multiProjectAuth) AuthorizeProject(project string) error {
+func (a multiProjectAuth) AuthorizeProject(_ context.Context, project string) error {
 	for _, p := range a.projects {
 		if p == project {
 			return nil
@@ -251,7 +251,7 @@ func (a multiProjectAuth) AuthorizeProject(project string) error {
 	return fmt.Errorf("project %q not enrolled", project)
 }
 
-func (a multiProjectAuth) EnrolledProjects() []string {
+func (a multiProjectAuth) EnrolledProjects(_ context.Context) []string {
 	return a.projects
 }
 
@@ -824,15 +824,15 @@ type projectAuthWithEnrollment struct {
 	enrolled []string
 }
 
-func (p *projectAuthWithEnrollment) Authorize(r *http.Request) error {
+func (p *projectAuthWithEnrollment) Authorize(r *http.Request) (*http.Request, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != p.token {
-		return fmt.Errorf("unauthorized")
+		return r, fmt.Errorf("unauthorized")
 	}
-	return nil
+	return r, nil
 }
 
-func (p *projectAuthWithEnrollment) AuthorizeProject(project string) error {
+func (p *projectAuthWithEnrollment) AuthorizeProject(_ context.Context, project string) error {
 	for _, enrolled := range p.enrolled {
 		if enrolled == project {
 			return nil
@@ -841,7 +841,7 @@ func (p *projectAuthWithEnrollment) AuthorizeProject(project string) error {
 	return fmt.Errorf("project %q not allowed", project)
 }
 
-func (p *projectAuthWithEnrollment) EnrolledProjects() []string {
+func (p *projectAuthWithEnrollment) EnrolledProjects(_ context.Context) []string {
 	out := make([]string, len(p.enrolled))
 	copy(out, p.enrolled)
 	return out
@@ -1001,15 +1001,15 @@ type simpleProjectAuth struct {
 	token string
 }
 
-func (a *simpleProjectAuth) Authorize(r *http.Request) error {
+func (a *simpleProjectAuth) Authorize(r *http.Request) (*http.Request, error) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != a.token {
-		return fmt.Errorf("unauthorized")
+		return r, fmt.Errorf("unauthorized")
 	}
-	return nil
+	return r, nil
 }
 
-func (a *simpleProjectAuth) AuthorizeProject(_ string) error {
+func (a *simpleProjectAuth) AuthorizeProject(_ context.Context, _ string) error {
 	return nil // allow all projects for this auth
 }
 

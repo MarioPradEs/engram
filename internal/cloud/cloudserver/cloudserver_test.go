@@ -101,20 +101,22 @@ type fakeAuth struct {
 	projectErr error
 }
 
-func (a fakeAuth) Authorize(*http.Request) error { return a.err }
-func (a fakeAuth) AuthorizeProject(string) error { return a.projectErr }
+func (a fakeAuth) Authorize(r *http.Request) (*http.Request, error) { return r, a.err }
+func (a fakeAuth) AuthorizeProject(_ context.Context, _ string) error {
+	return a.projectErr
+}
 
 type strictBearerAuth struct{ token string }
 
-func (a strictBearerAuth) Authorize(r *http.Request) error {
+func (a strictBearerAuth) Authorize(r *http.Request) (*http.Request, error) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	if header == "" {
-		return fmt.Errorf("missing authorization header")
+		return r, fmt.Errorf("missing authorization header")
 	}
 	if header != "Bearer "+a.token {
-		return fmt.Errorf("invalid bearer token")
+		return r, fmt.Errorf("invalid bearer token")
 	}
-	return nil
+	return r, nil
 }
 
 type staticStatus struct{ status dashboard.SyncStatus }

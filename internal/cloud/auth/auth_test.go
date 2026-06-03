@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -52,7 +53,7 @@ func TestAuthorizeBearerToken(t *testing.T) {
 			if tt.header != "" {
 				req.Header.Set("Authorization", tt.header)
 			}
-			err := svc.Authorize(req)
+			_, err := svc.Authorize(req)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Authorize() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -65,16 +66,17 @@ func TestAuthorizeProjectScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	ctx := context.Background()
 
-	if err := svc.AuthorizeProject("proj-a"); err == nil {
+	if err := svc.AuthorizeProject(ctx, "proj-a"); err == nil {
 		t.Fatal("expected failure when allowlist is not configured")
 	}
 
 	svc.SetAllowedProjects([]string{"proj-a", "proj-b"})
-	if err := svc.AuthorizeProject("PROJ-A"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "PROJ-A"); err != nil {
 		t.Fatalf("expected normalized project to be allowed, got %v", err)
 	}
-	if err := svc.AuthorizeProject("proj-c"); err == nil {
+	if err := svc.AuthorizeProject(ctx, "proj-c"); err == nil {
 		t.Fatal("expected disallowed project to be rejected")
 	} else {
 		if !errors.Is(err, ErrProjectNotAllowed) {
@@ -88,16 +90,17 @@ func TestAuthorizeProjectScope(t *testing.T) {
 
 func TestProjectScopeAuthorizerEnforcesAllowlistWithoutJWT(t *testing.T) {
 	authorizer := NewProjectScopeAuthorizer([]string{"proj-a"})
+	ctx := context.Background()
 
-	if err := authorizer.AuthorizeProject("PROJ-A"); err != nil {
+	if err := authorizer.AuthorizeProject(ctx, "PROJ-A"); err != nil {
 		t.Fatalf("expected normalized project to be allowed, got %v", err)
 	}
-	if err := authorizer.AuthorizeProject("proj-b"); !errors.Is(err, ErrProjectNotAllowed) {
+	if err := authorizer.AuthorizeProject(ctx, "proj-b"); !errors.Is(err, ErrProjectNotAllowed) {
 		t.Fatalf("expected ErrProjectNotAllowed for out-of-scope project, got %v", err)
 	}
 
 	authorizer = NewProjectScopeAuthorizer(nil)
-	if err := authorizer.AuthorizeProject("proj-a"); err == nil {
+	if err := authorizer.AuthorizeProject(ctx, "proj-a"); err == nil {
 		t.Fatal("expected empty allowlist to be rejected")
 	}
 }
@@ -124,8 +127,8 @@ func TestProjectScopeAuthorizerEnrolledProjects(t *testing.T) {
 			authorizer := NewProjectScopeAuthorizer(tc.input)
 
 			// Structural assertion matching cloudserver.EnrolledProjectsProvider.
-			var ep interface{ EnrolledProjects() []string } = authorizer
-			got := ep.EnrolledProjects()
+			var ep interface{ EnrolledProjects(context.Context) []string } = authorizer
+			got := ep.EnrolledProjects(context.Background())
 			if got == nil {
 				t.Fatal("EnrolledProjects() returned nil; expected empty slice for fail-open-safe callers")
 			}
@@ -150,8 +153,8 @@ func TestServiceEnrolledProjects(t *testing.T) {
 	}
 	svc.SetAllowedProjects([]string{"engram", "GENTLE-AI", "engram"})
 
-	var ep interface{ EnrolledProjects() []string } = svc
-	got := ep.EnrolledProjects()
+	var ep interface{ EnrolledProjects(context.Context) []string } = svc
+	got := ep.EnrolledProjects(context.Background())
 	want := []string{"engram", "gentle-ai"}
 	if len(got) != len(want) {
 		t.Fatalf("length mismatch: got %v, want %v", got, want)
@@ -265,27 +268,27 @@ func TestAuthorizeBearerTokenConstantTimeComparison(t *testing.T) {
 
 	correct := httptest.NewRequest("GET", "/sync/pull", nil)
 	correct.Header.Set("Authorization", "Bearer correct-token")
-	if err := svc.Authorize(correct); err != nil {
+	if _, err := svc.Authorize(correct); err != nil {
 		t.Fatalf("correct token must be accepted, got %v", err)
 	}
 
 	wrong := httptest.NewRequest("GET", "/sync/pull", nil)
 	wrong.Header.Set("Authorization", "Bearer wrong-token")
-	if err := svc.Authorize(wrong); err == nil {
+	if _, err := svc.Authorize(wrong); err == nil {
 		t.Fatal("wrong token must be rejected")
 	}
 
 	// A token that is a prefix of the correct one must also be rejected.
 	prefix := httptest.NewRequest("GET", "/sync/pull", nil)
 	prefix.Header.Set("Authorization", "Bearer correct-toke")
-	if err := svc.Authorize(prefix); err == nil {
+	if _, err := svc.Authorize(prefix); err == nil {
 		t.Fatal("prefix of correct token must be rejected")
 	}
 
 	// A token that is a superset of the correct one must also be rejected.
 	super := httptest.NewRequest("GET", "/sync/pull", nil)
 	super.Header.Set("Authorization", "Bearer correct-token-extra")
-	if err := svc.Authorize(super); err == nil {
+	if _, err := svc.Authorize(super); err == nil {
 		t.Fatal("superset of correct token must be rejected")
 	}
 }
@@ -296,16 +299,17 @@ func TestAuthorizeProjectWildcard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	ctx := context.Background()
 
 	// "*" alone must allow any project.
 	svc.SetAllowedProjects([]string{"*"})
-	if err := svc.AuthorizeProject("any-project"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "any-project"); err != nil {
 		t.Fatalf("wildcard allowlist must permit any project, got %v", err)
 	}
-	if err := svc.AuthorizeProject("ANOTHER-ONE"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "ANOTHER-ONE"); err != nil {
 		t.Fatalf("wildcard allowlist must permit uppercased project, got %v", err)
 	}
-	if err := svc.AuthorizeProject("team-foo"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "team-foo"); err != nil {
 		t.Fatalf("wildcard allowlist must permit prefixed project, got %v", err)
 	}
 }
@@ -316,9 +320,10 @@ func TestAuthorizeProjectWildcardMixedWithExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	ctx := context.Background()
 
 	svc.SetAllowedProjects([]string{"proj-a", "*"})
-	if err := svc.AuthorizeProject("anything-at-all"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "anything-at-all"); err != nil {
 		t.Fatalf("wildcard in mixed list must still permit any project, got %v", err)
 	}
 }
@@ -326,10 +331,11 @@ func TestAuthorizeProjectWildcardMixedWithExact(t *testing.T) {
 // TestProjectScopeAuthorizerWildcard tests that NewProjectScopeAuthorizer also respects "*".
 func TestProjectScopeAuthorizerWildcard(t *testing.T) {
 	authorizer := NewProjectScopeAuthorizer([]string{"*"})
-	if err := authorizer.AuthorizeProject("any-project"); err != nil {
+	ctx := context.Background()
+	if err := authorizer.AuthorizeProject(ctx, "any-project"); err != nil {
 		t.Fatalf("wildcard authorizer must permit any project, got %v", err)
 	}
-	if err := authorizer.AuthorizeProject("team-foo"); err != nil {
+	if err := authorizer.AuthorizeProject(ctx, "team-foo"); err != nil {
 		t.Fatalf("wildcard authorizer must permit team-prefixed project, got %v", err)
 	}
 }
@@ -340,13 +346,14 @@ func TestAuthorizeProjectExactMatchStillWorksAfterWildcardChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
+	ctx := context.Background()
 
 	// Exact allowlist: only listed projects pass.
 	svc.SetAllowedProjects([]string{"proj-a", "proj-b"})
-	if err := svc.AuthorizeProject("proj-a"); err != nil {
+	if err := svc.AuthorizeProject(ctx, "proj-a"); err != nil {
 		t.Fatalf("exact match must still be allowed, got %v", err)
 	}
-	if err := svc.AuthorizeProject("proj-c"); !errors.Is(err, ErrProjectNotAllowed) {
+	if err := svc.AuthorizeProject(ctx, "proj-c"); !errors.Is(err, ErrProjectNotAllowed) {
 		t.Fatalf("unlisted project must be rejected, got %v", err)
 	}
 }

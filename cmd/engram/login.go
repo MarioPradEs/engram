@@ -19,6 +19,36 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
+// ─── Credential token errors ──────────────────────────────────────────────────
+
+// errCredentialsNotFound is returned by readCredentialsToken when no credentials.json exists.
+type errCredentialsNotFound struct{}
+
+func (e errCredentialsNotFound) Error() string {
+	return "credentials.json not found; falling back to env/cloud.json token"
+}
+
+// isCredentialsNotFoundError returns true if err is an errCredentialsNotFound.
+func isCredentialsNotFoundError(err error) bool {
+	var e errCredentialsNotFound
+	return errors.As(err, &e)
+}
+
+// errCredentialsExpired is returned by readCredentialsToken when the stored token is expired.
+type errCredentialsExpired struct {
+	ExpiresAt time.Time
+}
+
+func (e errCredentialsExpired) Error() string {
+	return fmt.Sprintf("credentials.json token expired at %s; run `engram login` to re-authenticate", e.ExpiresAt.Format(time.RFC3339))
+}
+
+// isExpiredCredentialsError returns true if err is an errCredentialsExpired.
+func isExpiredCredentialsError(err error) bool {
+	var e errCredentialsExpired
+	return errors.As(err, &e)
+}
+
 // ─── Injectable crypto/encoding functions (for testability) ──────────────────
 
 // base64DecodeRawURL is the seam for base64.RawURLEncoding.DecodeString.
@@ -76,14 +106,42 @@ var reclassifyHookFn func(cfg store.Config) = func(cfg store.Config) {
 	cmdReclassify(cfg)
 }
 
-// postLoginPullFn performs the post-login pull sync. Overridden in tests.
-var postLoginPullFn func(cfg store.Config) error = func(cfg store.Config) error {
-	return nil // real implementation: wire mutation pull transport
+// postLoginPullFn performs the post-login pull sync and returns the number of
+// mutations pulled. Uses the JWT from credentials.json (or env/cloud.json fallback)
+// and the cloud URL from cloudBaseURLFn. Overridden in tests.
+var postLoginPullFn func(cfg store.Config) (int, error) = func(cfg store.Config) (int, error) {
+	credDir, err := credentialsDirFn()
+	if err != nil {
+		return 0, fmt.Errorf("post-login pull: resolve credentials dir: %w", err)
+	}
+	token, tokenErr := resolveLoginToken(credDir, cfg)
+	if tokenErr != nil {
+		return 0, fmt.Errorf("post-login pull: resolve token: %w", tokenErr)
+	}
+	if token == "" {
+		return 0, nil // no token configured — skip pull silently
+	}
+	cloudURL := cloudBaseURLFn(cfg)
+	return doPostLoginPull(cloudURL, token)
 }
 
-// postLoginPushFn performs the post-login push sync. Overridden in tests.
-var postLoginPushFn func(cfg store.Config) error = func(cfg store.Config) error {
-	return nil // real implementation: wire mutation push transport
+// postLoginPushFn performs the post-login push sync and returns the number of
+// mutations pushed. Uses the JWT from credentials.json (or env/cloud.json fallback)
+// and the cloud URL from cloudBaseURLFn. Overridden in tests.
+var postLoginPushFn func(cfg store.Config) (int, error) = func(cfg store.Config) (int, error) {
+	credDir, err := credentialsDirFn()
+	if err != nil {
+		return 0, fmt.Errorf("post-login push: resolve credentials dir: %w", err)
+	}
+	token, tokenErr := resolveLoginToken(credDir, cfg)
+	if tokenErr != nil {
+		return 0, fmt.Errorf("post-login push: resolve token: %w", tokenErr)
+	}
+	if token == "" {
+		return 0, nil // no token configured — skip push silently
+	}
+	cloudURL := cloudBaseURLFn(cfg)
+	return doPostLoginPush(cloudURL, token, nil)
 }
 
 // ─── Credential file ─────────────────────────────────────────────────────────
@@ -94,6 +152,110 @@ type credentialFile struct {
 	IssuedAt    string `json:"issued_at"`
 	ExpiresAt   string `json:"expires_at"`
 	Email       string `json:"email"`
+}
+
+// ─── Credentials.json helpers ────────────────────────────────────────────────
+
+// readCredentialsToken reads ~/.engram/credentials.json (or the dir passed in)
+// and returns the access_token if the file exists and the token has not expired.
+//
+// Returns:
+//   - (token, nil) if the file exists and is not expired.
+//   - ("", errCredentialsNotFound{}) if the file does not exist.
+//   - ("", errCredentialsExpired{}) if the file exists but the token is expired.
+func readCredentialsToken(credDir string) (string, error) {
+	path := filepath.Join(credDir, "credentials.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errCredentialsNotFound{}
+		}
+		return "", fmt.Errorf("readCredentialsToken: %w", err)
+	}
+	var creds credentialFile
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return "", fmt.Errorf("readCredentialsToken: parse credentials.json: %w", err)
+	}
+	if strings.TrimSpace(creds.AccessToken) == "" {
+		return "", errCredentialsNotFound{}
+	}
+	if creds.ExpiresAt != "" {
+		expiresAt, parseErr := time.Parse(time.RFC3339, creds.ExpiresAt)
+		if parseErr == nil && time.Now().UTC().After(expiresAt) {
+			return "", errCredentialsExpired{ExpiresAt: expiresAt}
+		}
+	}
+	return creds.AccessToken, nil
+}
+
+// resolveLoginToken returns the bearer token to use for post-login sync.
+// Precedence: credentials.json access_token > ENGRAM_CLOUD_TOKEN env > cloud.json.
+//
+// If credentials.json exists but is expired, it prints an expiry warning and
+// falls through to the legacy sources so the operator can still sync with a
+// static token while the interactive re-login is pending.
+func resolveLoginToken(credDir string, cfg store.Config) (string, error) {
+	token, err := readCredentialsToken(credDir)
+	if err == nil {
+		return token, nil
+	}
+	if isExpiredCredentialsError(err) {
+		// Warn but fall through — let the legacy token source handle this cycle.
+		fmt.Fprintf(os.Stderr, "[login] warn: %v\n", err)
+	}
+	// Fall through to legacy sources: env > cloud.json.
+	cc, ccErr := resolveCloudRuntimeConfig(cfg)
+	if ccErr != nil {
+		return "", fmt.Errorf("resolveLoginToken: %w", ccErr)
+	}
+	if cc != nil && strings.TrimSpace(cc.Token) != "" {
+		return strings.TrimSpace(cc.Token), nil
+	}
+	return "", nil
+}
+
+// ─── Post-login sync helpers ──────────────────────────────────────────────────
+
+// doPostLoginPull pulls mutations from the cloud server using the given bearer token.
+// Returns the number of mutations pulled and any transport error.
+// When cloudURL or token is empty, returns (0, nil) immediately (no-op).
+func doPostLoginPull(cloudURL, token string) (int, error) {
+	cloudURL = strings.TrimSpace(cloudURL)
+	token = strings.TrimSpace(token)
+	if cloudURL == "" || token == "" {
+		return 0, nil
+	}
+	mt, err := remote.NewMutationTransport(cloudURL, token)
+	if err != nil {
+		return 0, fmt.Errorf("post-login pull: create transport: %w", err)
+	}
+	resp, err := mt.PullMutations(0, 500)
+	if err != nil {
+		return 0, fmt.Errorf("post-login pull: %w", err)
+	}
+	return len(resp.Mutations), nil
+}
+
+// doPostLoginPush pushes a batch of mutation entries to the cloud server using the
+// given bearer token. entries may be nil/empty (resulting in a push of zero mutations,
+// which still validates connectivity). Returns the number of accepted mutations and
+// any transport error.
+// When cloudURL or token is empty, returns (0, nil) immediately (no-op).
+func doPostLoginPush(cloudURL, token string, entries []remote.MutationEntry) (int, error) {
+	cloudURL = strings.TrimSpace(cloudURL)
+	token = strings.TrimSpace(token)
+	if cloudURL == "" || token == "" {
+		return 0, nil
+	}
+	mt, err := remote.NewMutationTransport(cloudURL, token)
+	if err != nil {
+		return 0, fmt.Errorf("post-login push: create transport: %w", err)
+	}
+	accepted, err := mt.PushMutations(entries)
+	if err != nil {
+		return 0, fmt.Errorf("post-login push: %w", err)
+	}
+	return len(accepted), nil
 }
 
 // ─── loginCommand ─────────────────────────────────────────────────────────────
@@ -217,22 +379,17 @@ func (c *loginCommand) Run() error {
 	// Canonical post-auth order (design Q2): reclassify → pull → push.
 	reclassifyHookFn(c.cfg)
 
-	pullErr := postLoginPullFn(c.cfg)
+	pulled, pullErr := postLoginPullFn(c.cfg)
 	if pullErr != nil {
 		fmt.Fprintf(os.Stderr, "[login] warn: post-login pull failed: %v (continuing)\n", pullErr)
 	}
 
-	pushErr := postLoginPushFn(c.cfg)
+	pushed, pushErr := postLoginPushFn(c.cfg)
 	if pushErr != nil {
 		fmt.Fprintf(os.Stderr, "[login] warn: post-login push failed: %v (retry with `engram sync --cloud`)\n", pushErr)
 	}
 
 	// Print sync summary (spec: cli-auth §"Synced: ↓{N} pulled, ↑{M} pushed").
-	// postLoginPullFn / postLoginPushFn are stubs that return nil counts today;
-	// the summary reflects success/failure with placeholder counts until the
-	// real mutation transport is wired.
-	pulled := 0
-	pushed := 0
 	fmt.Printf("Synced: ↓%d pulled, ↑%d pushed\n", pulled, pushed)
 
 	return nil

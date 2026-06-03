@@ -64,6 +64,9 @@ type CloudServer struct {
 	mux              *http.ServeMux
 	syncStatus       dashboard.SyncStatusProvider
 	listenAndServe   func(addr string, handler http.Handler) error
+	// /auth endpoint fields (set by WithAuthEndpoint option).
+	authLoader    AuthUserLoader // user directory for /auth principal resolution
+	authJWTSecret string         // ENGRAM_JWT_SECRET for minting JWTs in /auth
 }
 
 const defaultHost = "127.0.0.1"
@@ -226,6 +229,11 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
+	// /auth endpoint: mint engram JWT from oauth2-proxy X-Forwarded-Email.
+	// Only registered when WithAuthEndpoint option is applied (authLoader set).
+	if s.authLoader != nil {
+		s.registerAuthEndpoint()
+	}
 }
 
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {

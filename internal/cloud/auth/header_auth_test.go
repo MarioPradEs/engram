@@ -585,12 +585,19 @@ func TestBearerJWT_NoCreds_returns401(t *testing.T) {
 	}
 }
 
-// TestBearerJWT_HeaderPrecedence verifies that X-Forwarded-Email takes precedence
-// over a Bearer JWT when both are present.
-func TestBearerJWT_HeaderPrecedence(t *testing.T) {
+// TestBearerJWT_HeaderPrecedence_BearerWinsOnJWTInstance verifies that on a
+// JWT-mode authenticator (jwtSecret set), a valid Bearer JWT authenticates even
+// when X-Forwarded-Email is also present.  On the direct /sync/* path
+// X-Forwarded-Email is attacker-controlled; only the Bearer JWT is trusted.
+// The identity resolved MUST come from the JWT, not from the header.
+//
+// This replaces the old TestBearerJWT_HeaderPrecedence which asserted the
+// insecure behaviour (X-Forwarded-Email wins).  Under the C1 fix the header
+// is ignored on JWT-mode instances and Bob's JWT is the only valid credential.
+func TestBearerJWT_HeaderPrecedence_BearerWinsOnJWTInstance(t *testing.T) {
 	t.Parallel()
 	ha := newTestHAWithBearer(t)
-	// Mint a JWT for bob, but also set X-Forwarded-Email for alice.
+	// JWT for bob; alice is injected as a forged X-Forwarded-Email.
 	token := mintTestJWT(t, "bob@vivastudios.com", "Bob", "dev", "member", 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
@@ -599,11 +606,36 @@ func TestBearerJWT_HeaderPrecedence(t *testing.T) {
 
 	enriched, err := ha.Authorize(req)
 	if err != nil {
-		t.Fatalf("expected success, got: %v", err)
+		t.Fatalf("expected success with valid Bearer JWT, got: %v", err)
 	}
 	attr := ha.Attribution(enriched.Context())
-	// X-Forwarded-Email (alice) should win.
-	if attr.UserEmail != "alice@vivastudios.com" {
-		t.Errorf("expected X-Forwarded-Email to win, got %q", attr.UserEmail)
+	// On a JWT-mode authenticator the identity MUST come from the JWT (bob),
+	// not from the attacker-supplied X-Forwarded-Email (alice).
+	if attr.UserEmail != "bob@vivastudios.com" {
+		t.Errorf("C1 regression: expected JWT identity (bob), got %q — X-Forwarded-Email must NOT win on JWT-mode authenticator", attr.UserEmail)
+	}
+}
+
+// TestBearerJWT_ForgedHeader_NoJWT_IsRejected is the core C1 regression test.
+// On a JWT-mode authenticator (jwtSecret set), a request that carries ONLY a
+// forged X-Forwarded-Email (no Bearer JWT) MUST be rejected with 401.
+// This is the exact attack vector C1 describes: an attacker reaches /sync/*
+// directly (bypassing oauth2-proxy) and sets an arbitrary X-Forwarded-Email.
+func TestBearerJWT_ForgedHeader_NoJWT_IsRejected(t *testing.T) {
+	t.Parallel()
+	ha := newTestHAWithBearer(t) // jwtSecret is set — JWT mode active
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
+	// Forged header — no Bearer JWT accompanying it.
+	req.Header.Set("X-Forwarded-Email", "alice@vivastudios.com")
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("C1 CRITICAL: forged X-Forwarded-Email (no JWT) was ACCEPTED on JWT-mode authenticator — authentication bypass")
+	}
+	// Must be a plain 401-equivalent error (not a 403 AuthError).
+	var ae *AuthError
+	if asAuthError(err, &ae) && ae.Status == http.StatusForbidden {
+		t.Errorf("expected plain 401 error, got AuthError 403 %q — wrong error type", ae.Code)
 	}
 }

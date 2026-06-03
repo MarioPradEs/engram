@@ -585,6 +585,10 @@ func cloudSyncFailureMessage(project string, syncErr error) string {
 	if syncErr == nil {
 		return ""
 	}
+	// Spec: cli-auth §Token Lifetime and Expiry Handling — 401 → expiry prompt, no retry.
+	if isAuthError(syncErr) {
+		return "Session expired. Run 'engram login' to re-authenticate."
+	}
 	return syncguidance.AppendGuidance(syncErr.Error(), project, syncErr)
 }
 
@@ -654,6 +658,10 @@ func main() {
 		cmdSync(cfg)
 	case "cloud":
 		cmdCloud(cfg)
+	case "reclassify":
+		cmdReclassify(cfg)
+	case "login":
+		cmdLogin(cfg)
 	case "obsidian-export":
 		cmdObsidianExport(cfg)
 	case "projects":
@@ -2477,6 +2485,9 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
+  login              Authenticate with Engram cloud (OAuth flow -> stores credentials.json)
+  reclassify         Classify local observations with v2 scope rules (stamps classified_by_v2 marker)
+                       Required before first cloud sync; run automatically by engram login
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code, gemini-cli, codex)
   sync               Export new memories as compressed chunk to .engram/
                          --import   Import new chunks from .engram/ into local DB

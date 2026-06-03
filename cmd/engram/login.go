@@ -267,6 +267,15 @@ func doPostLoginPush(cloudURL, token string, entries []remote.MutationEntry) (in
 	return len(accepted), nil
 }
 
+// postLoginPushBatchSize is the maximum number of mutation entries per push
+// request. The cloud server enforces a hard cap of 100 entries per request and
+// returns 400 "batch too large" when the limit is exceeded. This constant must
+// stay ≤ cloudserver.maxMutationBatchSize (100).
+//
+// The autosync manager already respects this limit via Config.PushBatchSize.
+// Post-login push now mirrors that by chunking the full pending set.
+const postLoginPushBatchSize = 100
+
 // doPostLoginPushFromStore enumerates the pending local sync mutations from the
 // given store, converts them to MutationEntry records, and pushes them to the
 // cloud server using the given bearer token.
@@ -275,6 +284,12 @@ func doPostLoginPush(cloudURL, token string, entries []remote.MutationEntry) (in
 // nil entries (pushing nothing). This function reuses the same push transport as
 // the autosync manager — listing from sync_mutations → push → ack — so the
 // post-login push produces real counts.
+//
+// The cloud server caps each PushMutations request at 100 entries. This function
+// chunks the full pending set into slices of ≤postLoginPushBatchSize and
+// accumulates the total accepted count across all chunks. On chunk failure it
+// returns the count pushed so far plus the error (post-login push failure is a
+// login-success warning — the caller logs it and continues).
 //
 // Returns the number of mutations accepted by the server and any transport error.
 // When cloudURL or token is empty, returns (0, nil) immediately (no-op).
@@ -286,7 +301,8 @@ func doPostLoginPushFromStore(cloudURL, token string, s *store.Store) (int, erro
 		return 0, nil
 	}
 
-	// List pending mutations (same query the autosync manager uses).
+	// List all pending mutations. Reading 500 at a time is safe here because we
+	// chunk below — the server cap is enforced per-request, not on the local list.
 	pending, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 500)
 	if err != nil {
 		return 0, fmt.Errorf("post-login push: list pending mutations: %w", err)
@@ -295,7 +311,7 @@ func doPostLoginPushFromStore(cloudURL, token string, s *store.Store) (int, erro
 		return 0, nil // nothing to push — no network call needed
 	}
 
-	// Build entries for the transport (mirrors autosync/manager.go push()).
+	// Build all entries up front (mirrors autosync/manager.go push()).
 	entries := make([]remote.MutationEntry, len(pending))
 	for i, mut := range pending {
 		entries[i] = remote.MutationEntry{
@@ -307,7 +323,25 @@ func doPostLoginPushFromStore(cloudURL, token string, s *store.Store) (int, erro
 		}
 	}
 
-	return doPostLoginPush(cloudURL, token, entries)
+	// Push in chunks of ≤postLoginPushBatchSize to respect the server cap.
+	// Accumulate total accepted across chunks; return count-so-far on chunk failure.
+	totalAccepted := 0
+	for start := 0; start < len(entries); start += postLoginPushBatchSize {
+		end := start + postLoginPushBatchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		chunk := entries[start:end]
+
+		accepted, err := doPostLoginPush(cloudURL, token, chunk)
+		totalAccepted += accepted
+		if err != nil {
+			// Return count pushed so far — login continues with a warning.
+			return totalAccepted, err
+		}
+	}
+
+	return totalAccepted, nil
 }
 
 // ─── loginCommand ─────────────────────────────────────────────────────────────

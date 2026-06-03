@@ -128,6 +128,10 @@ var postLoginPullFn func(cfg store.Config) (int, error) = func(cfg store.Config)
 // postLoginPushFn performs the post-login push sync and returns the number of
 // mutations pushed. Uses the JWT from credentials.json (or env/cloud.json fallback)
 // and the cloud URL from cloudBaseURLFn. Overridden in tests.
+//
+// Gap A fix: opens the store to enumerate real pending mutations and pushes them
+// via doPostLoginPushFromStore (same transport path as the autosync manager).
+// Returns the actual count of accepted mutations.
 var postLoginPushFn func(cfg store.Config) (int, error) = func(cfg store.Config) (int, error) {
 	credDir, err := credentialsDirFn()
 	if err != nil {
@@ -141,7 +145,12 @@ var postLoginPushFn func(cfg store.Config) (int, error) = func(cfg store.Config)
 		return 0, nil // no token configured — skip push silently
 	}
 	cloudURL := cloudBaseURLFn(cfg)
-	return doPostLoginPush(cloudURL, token, nil)
+	s, err := storeNew(cfg)
+	if err != nil {
+		return 0, fmt.Errorf("post-login push: open store: %w", err)
+	}
+	defer s.Close()
+	return doPostLoginPushFromStore(cloudURL, token, s)
 }
 
 // ─── Credential file ─────────────────────────────────────────────────────────
@@ -256,6 +265,49 @@ func doPostLoginPush(cloudURL, token string, entries []remote.MutationEntry) (in
 		return 0, fmt.Errorf("post-login push: %w", err)
 	}
 	return len(accepted), nil
+}
+
+// doPostLoginPushFromStore enumerates the pending local sync mutations from the
+// given store, converts them to MutationEntry records, and pushes them to the
+// cloud server using the given bearer token.
+//
+// This is the Gap A fix: the previous implementation called doPostLoginPush with
+// nil entries (pushing nothing). This function reuses the same push transport as
+// the autosync manager — listing from sync_mutations → push → ack — so the
+// post-login push produces real counts.
+//
+// Returns the number of mutations accepted by the server and any transport error.
+// When cloudURL or token is empty, returns (0, nil) immediately (no-op).
+// When there are no pending mutations, returns (0, nil) without making a network call.
+func doPostLoginPushFromStore(cloudURL, token string, s *store.Store) (int, error) {
+	cloudURL = strings.TrimSpace(cloudURL)
+	token = strings.TrimSpace(token)
+	if cloudURL == "" || token == "" {
+		return 0, nil
+	}
+
+	// List pending mutations (same query the autosync manager uses).
+	pending, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 500)
+	if err != nil {
+		return 0, fmt.Errorf("post-login push: list pending mutations: %w", err)
+	}
+	if len(pending) == 0 {
+		return 0, nil // nothing to push — no network call needed
+	}
+
+	// Build entries for the transport (mirrors autosync/manager.go push()).
+	entries := make([]remote.MutationEntry, len(pending))
+	for i, mut := range pending {
+		entries[i] = remote.MutationEntry{
+			Project:   mut.Project,
+			Entity:    mut.Entity,
+			EntityKey: mut.EntityKey,
+			Op:        mut.Op,
+			Payload:   json.RawMessage(mut.Payload),
+		}
+	}
+
+	return doPostLoginPush(cloudURL, token, entries)
 }
 
 // ─── loginCommand ─────────────────────────────────────────────────────────────

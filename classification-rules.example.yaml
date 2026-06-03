@@ -1,0 +1,104 @@
+# classification-rules.example.yaml
+#
+# This is the SCHEMA reference for Engram scope-classification rules.
+# Copy this file to classification-rules.yaml and fill in your organisation's
+# specifics. The real file is NEVER committed to this repo — it lives in your
+# infrastructure repo (e.g. EngramCloud) and is mounted into the server container.
+#
+# Wire it to the MCP server via the ENGRAM_CLASSIFICATION_RULES env var:
+#
+#   ENGRAM_CLASSIFICATION_RULES=/path/to/classification-rules.yaml engram mcp
+#
+# Decision #805: Viva-specific data lives in config/data, NOT in Go source.
+# This file documents the schema; the fork ships only the MECHANISM.
+#
+# Schema version: 1
+
+# ─── Departments ─────────────────────────────────────────────────────────────
+# List the organisational units. Aliases are case-insensitive synonyms the AI
+# may encounter in conversation. Used for programmatic access; the free-form
+# 'rules' block below is what agents actually receive.
+
+departments:
+  - name: engineering
+    aliases:
+      - eng
+      - backend
+      - frontend
+  - name: art
+    aliases:
+      - art
+      - artistic
+      - 3d
+  - name: product
+    aliases:
+      - product
+      - pm
+  - name: qa
+    aliases:
+      - qa
+      - testing
+
+# ─── Conventions ─────────────────────────────────────────────────────────────
+# Naming conventions used for scope routing.
+
+conventions:
+  # The special project that receives 'team'-scoped cross-cutting observations.
+  # Observations in this project are visible to all enrolled users.
+  general_project: "general"
+
+  # Prefix used to identify team-owned projects (e.g. "team-platform").
+  team_project_prefix: "team-"
+
+# ─── Project Patterns ────────────────────────────────────────────────────────
+# Glob-style patterns that map project names to scope guidance.
+# Used for programmatic access; document the patterns in the 'rules' block too.
+
+project_patterns:
+  - pattern: "juego-*"
+    description: "Game projects — use project scope by default; team scope only for cross-cutting discoveries"
+  - pattern: "sdk-*"
+    description: "SDK / tooling projects — prefer team scope so all teams benefit"
+  - pattern: "team-*"
+    description: "Team-owned shared projects — team scope"
+
+# ─── Rules (free-form instruction text) ──────────────────────────────────────
+# This block is injected verbatim into the MCP server instructions that
+# connected agents receive. Write it as agent-readable markdown.
+# Keep it concise — it is prepended to every agent context.
+
+rules: |
+  ## Scope Classification Rules (operator-configured)
+
+  Use these four tiers when deciding scope for mem_save:
+
+  | Tier         | When to use                                                        |
+  |--------------|--------------------------------------------------------------------|
+  | `personal`   | Credentials, private thoughts, in-progress ideas, personal TODOs  |
+  | `department` | Department-internal process or conventions other areas don't need  |
+  | `project`    | About the current game/project — useful to the whole game team (DEFAULT) |
+  | `team`       | Cross-cutting knowledge not tied to one game; route to project `general` |
+
+  **Default**: when uncertain, choose `project` (narrower is safer).
+  **Smells private?** → `personal`.
+
+  ### Departments
+  - engineering (aliases: eng, backend, frontend)
+  - art (aliases: art, artistic, 3d)
+  - product (alias: pm)
+  - qa (alias: testing)
+
+  ### Project Conventions
+  - Game projects (`juego-*`): default to `project` scope
+  - SDK/tooling projects (`sdk-*`): prefer `team` scope → route to `general`
+  - Team projects (`team-*`): use `team` scope
+  - Cross-cutting knowledge: `scope=team`, `project=general`
+
+  ### The `general` project
+  Save to `project: general` when the knowledge is useful across ALL teams
+  (SDK bugs, company tooling, transversal conventions). Do NOT save to the
+  current game project — non-game users would never see it.
+
+  ### Human overrides
+  When a human explicitly specifies a scope, honor it without substitution.
+  Human overrides also stamp the `classified_by_v2` marker.

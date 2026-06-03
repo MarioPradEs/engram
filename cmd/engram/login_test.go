@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -162,13 +163,18 @@ func TestLoginHappyPath(t *testing.T) {
 		t.Errorf("token lifetime: got %v, want 168h (7 days)", lifetime)
 	}
 
-	// Verify file permissions 0600.
-	info, err := os.Stat(credPath)
-	if err != nil {
-		t.Fatalf("stat credentials.json: %v", err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("credentials.json perm: got %o, want 0600", info.Mode().Perm())
+	// Verify file permissions 0600. Skipped on Windows: NTFS does not map Unix
+	// permission bits, so Go reports 0666 for any writable file regardless of the
+	// 0600 passed to os.WriteFile. The owner-only intent still holds on the Linux
+	// hosts where Engram Cloud runs; this assertion verifies it there.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(credPath)
+		if err != nil {
+			t.Fatalf("stat credentials.json: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("credentials.json perm: got %o, want 0600", info.Mode().Perm())
+		}
 	}
 
 	// Verify reclassify hook was called before push.

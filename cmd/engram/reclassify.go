@@ -53,9 +53,10 @@ func classifyObservation(obs *store.Observation) string {
 		}
 	}
 
-	// Rule 3: secret scan — detect credentials in content.
+	// Rule 3: secret scan — detect credentials in title or content.
+	// Both fields are scanned: credentials can appear in either (S7 fix).
 	for _, pat := range secretPatterns {
-		if pat.MatchString(obs.Content) {
+		if pat.MatchString(obs.Title) || pat.MatchString(obs.Content) {
 			return "skipped_secret_scan"
 		}
 	}

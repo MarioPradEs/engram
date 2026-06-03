@@ -453,13 +453,28 @@ func resolveCloudRuntimeConfig(cfg store.Config) (*cloudConfig, error) {
 	if cc == nil {
 		cc = &cloudConfig{}
 	}
-	// ENGRAM_CLOUD_TOKEN overrides any token stored in cloud.json.
-	// When the env var is absent, the persisted token from cloud.json is used
-	// as a fallback so that `engram sync --cloud` works without requiring the
-	// env var to be set in every shell session (fix for issue #343).
+	// Server URL: env var overrides cloud.json.
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_SERVER")); v != "" {
 		cc.ServerURL = v
 	}
+	// Token precedence (highest → lowest):
+	//   1. credentials.json access_token (from `engram login` JWT) — not expired
+	//   2. ENGRAM_CLOUD_TOKEN env var
+	//   3. cloud.json token (already in cc.Token from loadCloudConfig above)
+	//
+	// This ensures `engram sync --cloud` and autosync both authenticate with the
+	// logged-in user's JWT (Gap B fix — W8 extension).
+	if credDir, credErr := credentialsDirFn(); credErr == nil {
+		if credToken, credTokenErr := readCredentialsToken(credDir); credTokenErr == nil && credToken != "" {
+			cc.Token = credToken
+			return cc, nil
+		} else if isExpiredCredentialsError(credTokenErr) {
+			// Expired JWT: warn and fall through to env/cloud.json sources.
+			log.Printf("[cloud] warn: %v", credTokenErr)
+		}
+		// errCredentialsNotFound or other error → fall through silently.
+	}
+	// ENGRAM_CLOUD_TOKEN overrides the cloud.json token (issue #343 fallback).
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_TOKEN")); v != "" {
 		cc.Token = v
 	}

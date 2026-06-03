@@ -55,7 +55,8 @@ func TestListMutationsSinceScopeFilter(t *testing.T) {
 	insertSessionMutation := func(sessionID string) {
 		t.Helper()
 		payload, _ := json.Marshal(map[string]interface{}{
-			"id": sessionID,
+			"id":        sessionID,
+			"directory": "/workspace",
 		})
 		_, err := cs.InsertMutationBatch(ctx, []MutationEntry{{
 			Project:   project,
@@ -123,9 +124,11 @@ func TestListMutationsSinceCursorAdvancesOnAllFiltered(t *testing.T) {
 	project := "cursor-advance-test"
 
 	// Insert 3 "operations" department observations (invisible to "engineering" caller).
+	// Each observation uses its own unique entity_key that matches the payload sync_id.
 	for i := 0; i < 3; i++ {
+		syncID := "hidden-cursor-" + string(rune('a'+i))
 		payload, _ := json.Marshal(map[string]interface{}{
-			"sync_id":    "hidden-obs-cursor",
+			"sync_id":    syncID,
 			"session_id": "sess-cursor",
 			"type":       "manual",
 			"title":      "hidden",
@@ -138,7 +141,7 @@ func TestListMutationsSinceCursorAdvancesOnAllFiltered(t *testing.T) {
 		seqs, err := cs.InsertMutationBatch(ctx, []MutationEntry{{
 			Project:   project,
 			Entity:    store.SyncEntityObservation,
-			EntityKey: "hidden-cursor-" + string(rune('a'+i)),
+			EntityKey: syncID,
 			Op:        store.SyncOpUpsert,
 			Payload:   json.RawMessage(payload),
 		}}, attr)

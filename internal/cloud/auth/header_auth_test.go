@@ -29,27 +29,27 @@ func buildTestLoader(t *testing.T, yaml string) *users.YAMLLoader {
 const testYAML = `users:
   - email: alice@vivastudios.com
     name: Alice
-    department: engineering
+    department: dev
     role: admin
     status: active
     enrolled:
       - project-a
   - email: bob@vivastudios.com
     name: Bob
-    department: engineering
+    department: dev
     role: member
     status: active
     enrolled:
       - project-b
   - email: removed@vivastudios.com
     name: Removed User
-    department: operations
+    department: qa
     role: member
     status: removed
     enrolled: []
   - email: offboarding@vivastudios.com
     name: Offboarding User
-    department: operations
+    department: qa
     role: member
     status: offboarding
     enrolled:
@@ -282,8 +282,8 @@ func TestHeaderAuthAttribution(t *testing.T) {
 	if attr.UserName != "Alice" {
 		t.Errorf("UserName = %q, want Alice", attr.UserName)
 	}
-	if attr.Department != "engineering" {
-		t.Errorf("Department = %q, want engineering", attr.Department)
+	if attr.Department != "dev" {
+		t.Errorf("Department = %q, want dev", attr.Department)
 	}
 	if attr.UserDeleted {
 		t.Error("UserDeleted should be false for active user")
@@ -351,12 +351,12 @@ func TestHeaderAuthBypassTokenWithMultipleAdmins(t *testing.T) {
 	loader := buildTestLoader(t, `users:
   - email: alice@vivastudios.com
     name: Alice
-    department: engineering
+    department: dev
     role: admin
     status: active
   - email: bob@vivastudios.com
     name: Bob
-    department: engineering
+    department: dev
     role: admin
     status: active
 `)

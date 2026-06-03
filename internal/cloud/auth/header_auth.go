@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
@@ -66,9 +67,14 @@ type AdminResolver interface {
 //   - Three-State Access Matrix: offboarding+read → 403 account_offboarding;
 //     offboarding+write → allowed; removed → 403 account_removed.
 //   - "general" is always injected into EnrolledProjects (design Q5).
+//   - Bearer JWT path: if jwtSecret is set and the request carries a Bearer
+//     token that is NOT the bypassToken, it is verified via VerifyJWT and the
+//     email from the claims is used to resolve the principal from the directory.
+//     Precedence: X-Forwarded-Email → bypass → JWT Bearer → 401.
 type HeaderAuthenticator struct {
 	loader      UserLoader
 	bypassToken string // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
+	jwtSecret   string // when non-empty, Bearer JWT tokens are accepted on /sync/*
 }
 
 // NewHeaderAuthenticator returns a HeaderAuthenticator backed by loader.
@@ -76,6 +82,21 @@ type HeaderAuthenticator struct {
 // When bypassToken is non-empty, loader must implement AdminResolver and have
 // exactly one admin; if not, NewHeaderAuthenticator returns an error.
 func NewHeaderAuthenticator(loader UserLoader, bypassToken string) (*HeaderAuthenticator, error) {
+	return NewHeaderAuthenticatorWithJWT(loader, bypassToken, "")
+}
+
+// NewHeaderAuthenticatorWithJWT is like NewHeaderAuthenticator but also accepts
+// Bearer-signed engram JWTs on /sync/* routes. jwtSecret is the HMAC-SHA256
+// signing secret used by MintJWT / VerifyJWT (minimum 32 bytes); empty string
+// disables JWT Bearer verification (falls back to X-Forwarded-Email only).
+//
+// Precedence when jwtSecret is non-empty:
+//
+//  1. Emergency bypass (Bearer == bypassToken)  → admin identity
+//  2. X-Forwarded-Email present                → header auth (oauth2-proxy path)
+//  3. Bearer JWT present                       → verify + re-resolve principal
+//  4. No credentials                           → 401
+func NewHeaderAuthenticatorWithJWT(loader UserLoader, bypassToken, jwtSecret string) (*HeaderAuthenticator, error) {
 	if bypassToken != "" {
 		ar, ok := loader.(AdminResolver)
 		if !ok {
@@ -85,7 +106,7 @@ func NewHeaderAuthenticator(loader UserLoader, bypassToken string) (*HeaderAuthe
 			return nil, fmt.Errorf("auth: ENGRAM_CLOUD_TOKEN requires exactly one admin in the user directory; found 0 or >1 admins")
 		}
 	}
-	return &HeaderAuthenticator{loader: loader, bypassToken: bypassToken}, nil
+	return &HeaderAuthenticator{loader: loader, bypassToken: bypassToken, jwtSecret: jwtSecret}, nil
 }
 
 // Authorize resolves the caller's identity and stores it in r.Context().
@@ -109,7 +130,9 @@ func NewHeaderAuthenticator(loader UserLoader, bypassToken string) (*HeaderAuthe
 // The principal is stored in r.Context() so downstream methods
 // (AuthorizeProject, Attribution, EnrolledProjects) are concurrency-safe.
 func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error) {
-	// Emergency bypass takes precedence over header auth.
+	// Emergency bypass takes precedence over all other auth paths.
+	// (Design: header → bypass → JWT Bearer → 401, but bypass is checked first
+	//  because it must work even when X-Forwarded-Email is absent on /sync/* routes.)
 	if ha.bypassToken != "" {
 		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
 		parts := strings.Fields(authHeader)
@@ -124,10 +147,36 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 		}
 	}
 
+	// X-Forwarded-Email path (oauth2-proxy route — /auth, /dashboard etc.).
 	email := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Email")))
-	if email == "" {
-		return r, fmt.Errorf("auth: X-Forwarded-Email is required")
+	if email != "" {
+		return ha.resolveByEmail(r, email)
 	}
+
+	// Bearer JWT path (direct /sync/* route, no oauth2-proxy header).
+	if ha.jwtSecret != "" {
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		parts := strings.Fields(authHeader)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
+			claims, err := VerifyJWT(ha.jwtSecret, parts[1], time.Now().UTC())
+			if err != nil {
+				return r, fmt.Errorf("auth: invalid bearer jwt: %w", err)
+			}
+			jwtEmail := strings.ToLower(strings.TrimSpace(claims.Email))
+			if jwtEmail == "" {
+				return r, fmt.Errorf("auth: bearer jwt missing email claim")
+			}
+			return ha.resolveByEmail(r, jwtEmail)
+		}
+	}
+
+	// No credentials present.
+	return r, fmt.Errorf("auth: X-Forwarded-Email is required")
+}
+
+// resolveByEmail looks up the principal for email, enforces the lifecycle matrix,
+// and returns an enriched request with the principal in context on success.
+func (ha *HeaderAuthenticator) resolveByEmail(r *http.Request, email string) (*http.Request, error) {
 	if !strings.HasSuffix(email, "@vivastudios.com") {
 		return r, fmt.Errorf("auth: email %q is not a @vivastudios.com address", email)
 	}

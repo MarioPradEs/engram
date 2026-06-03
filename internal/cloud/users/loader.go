@@ -46,17 +46,16 @@ type yamlFile struct {
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
+// NOTE: Viva Studios departments. Hardcoded as a quick fix to unblock deploy;
+// the canonical set should come from operator config (classification-rules.yaml)
+// per design decision #805 — tracked as a follow-up.
 var validDepartments = map[string]bool{
-	"engineering": true,
-	"product":     true,
-	"design":      true,
-	"marketing":   true,
-	"sales":       true,
-	"operations":  true,
-	"finance":     true,
-	"hr":          true,
-	"legal":       true,
-	"leadership":  true,
+	"ceo":       true,
+	"dev":       true,
+	"art":       true,
+	"qa":        true,
+	"analytics": true,
+	"marketing": true,
 }
 
 var validRoles = map[string]bool{

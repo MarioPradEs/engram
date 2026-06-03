@@ -27,14 +27,14 @@ func TestLoadValidYAML(t *testing.T) {
 users:
   - email: "alice@vivastudios.com"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     enrolled:
       - "eng-notes"
     status: "active"
   - email: "bob@vivastudios.com"
     name: "Bob"
-    department: "product"
+    department: "qa"
     role: "member"
     enrolled:
       - "eng-notes"
@@ -53,8 +53,8 @@ users:
 	if alice.Name != "Alice" {
 		t.Errorf("alice.Name = %q, want Alice", alice.Name)
 	}
-	if alice.Department != "engineering" {
-		t.Errorf("alice.Department = %q, want engineering", alice.Department)
+	if alice.Department != "dev" {
+		t.Errorf("alice.Department = %q, want dev", alice.Department)
 	}
 	if alice.Role != "admin" {
 		t.Errorf("alice.Role = %q, want admin", alice.Role)
@@ -93,7 +93,7 @@ func TestLoadRejectsNonVivastudiosEmail(t *testing.T) {
 users:
   - email: "`+tc.email+`"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     status: "active"
 `)
@@ -134,12 +134,12 @@ func TestLoadDuplicateEmail(t *testing.T) {
 users:
   - email: "alice@vivastudios.com"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     status: "active"
   - email: "alice@vivastudios.com"
     name: "Alice Duplicate"
-    department: "product"
+    department: "qa"
     role: "member"
     status: "active"
 `)
@@ -159,7 +159,7 @@ func TestLoadNoAdmin(t *testing.T) {
 users:
   - email: "bob@vivastudios.com"
     name: "Bob"
-    department: "product"
+    department: "qa"
     role: "member"
     status: "active"
 `)
@@ -179,7 +179,7 @@ func TestReloadUpdatesDirectory(t *testing.T) {
 users:
   - email: "alice@vivastudios.com"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     status: "active"
 `)
@@ -199,12 +199,12 @@ users:
 users:
   - email: "alice@vivastudios.com"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     status: "active"
   - email: "bob@vivastudios.com"
     name: "Bob"
-    department: "product"
+    department: "qa"
     role: "member"
     status: "active"
 `)
@@ -229,7 +229,7 @@ func TestReloadInvalidRetainsLastGood(t *testing.T) {
 users:
   - email: "alice@vivastudios.com"
     name: "Alice"
-    department: "engineering"
+    department: "dev"
     role: "admin"
     status: "active"
 `)
@@ -244,7 +244,7 @@ users:
 users:
   - email: "bad-no-admin@vivastudios.com"
     name: "BadUser"
-    department: "engineering"
+    department: "dev"
     role: "member"
     status: "active"
 `)

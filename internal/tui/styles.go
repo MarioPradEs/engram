@@ -186,6 +186,21 @@ var (
 				Foreground(colorOverlay)
 )
 
+// ─── Scope Selector Styles ────────────────────────────────────────────────────
+
+var (
+	// Scope badge in observation detail
+	scopeBadgeStyle = lipgloss.NewStyle().
+			Foreground(colorTeal).
+			Bold(true)
+
+	// Scope update feedback ("✓ Scope updated")
+	scopeFeedbackStyle = lipgloss.NewStyle().
+				Foreground(colorGreen).
+				Bold(true).
+				Padding(0, 1)
+)
+
 // ─── Search Styles ───────────────────────────────────────────────────────────
 
 var (

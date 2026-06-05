@@ -79,6 +79,8 @@ func (m Model) View() string {
 		content = m.viewSessionDetail()
 	case ScreenSetup:
 		content = m.viewSetup()
+	case ScreenScopeSelector:
+		content = m.viewScopeSelector()
 	default:
 		content = "Unknown screen"
 	}
@@ -325,6 +327,10 @@ func (m Model) viewObservationDetail() string {
 			projectStyle.Render(*obs.Project)))
 	}
 
+	b.WriteString(fmt.Sprintf("%s %s\n",
+		detailLabelStyle.Render("Scope:"),
+		scopeBadgeStyle.Render(obs.Scope)))
+
 	// Content section
 	b.WriteString("\n")
 	b.WriteString(sectionHeadingStyle.Render("  Content"))
@@ -368,7 +374,37 @@ func (m Model) viewObservationDetail() string {
 			timestampStyle.Render(fmt.Sprintf("line %d-%d of %d", m.DetailScroll+1, end, len(contentLines)))))
 	}
 
-	b.WriteString(helpStyle.Render("\n  j/k scroll • c copy • t timeline • esc back"))
+	if m.ScopeFeedback != "" {
+		b.WriteString("\n" + scopeFeedbackStyle.Render(m.ScopeFeedback))
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k scroll • c copy • t timeline • p scope • esc back"))
+
+	return b.String()
+}
+
+// ─── Scope Selector ───────────────────────────────────────────────────────────
+
+func (m Model) viewScopeSelector() string {
+	var b strings.Builder
+
+	header := "  Change Scope"
+	if m.SelectedObservation != nil {
+		header = fmt.Sprintf("  Change Scope — Observation #%d", m.SelectedObservation.ID)
+	}
+	b.WriteString(headerStyle.Render(header))
+	b.WriteString("\n\n")
+
+	for i, tier := range scopeTiers {
+		if i == m.ScopeSelectorCursor {
+			b.WriteString(menuSelectedStyle.Render("▸ " + tier))
+		} else {
+			b.WriteString(menuItemStyle.Render("  " + tier))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString(helpStyle.Render("\n  j/k navigate • enter confirm • esc cancel"))
 
 	return b.String()
 }

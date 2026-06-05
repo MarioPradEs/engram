@@ -34,6 +34,7 @@ const (
 	ScreenSessions
 	ScreenSessionDetail
 	ScreenSetup
+	ScreenScopeSelector
 )
 
 // ─── Custom Messages ─────────────────────────────────────────────────────────
@@ -62,6 +63,13 @@ type observationDetailMsg struct {
 	observation *store.Observation
 	err         error
 }
+
+type scopeUpdateMsg struct {
+	observation *store.Observation
+	err         error
+}
+
+type scopeFeedbackClearMsg struct{}
 
 type timelineMsg struct {
 	timeline *store.TimelineResult
@@ -128,6 +136,10 @@ type Model struct {
 
 	// Clipboard feedback
 	CopyFeedback string // "✓ Copied!" or "" — shown for 2 s after copy
+
+	// Scope selector
+	ScopeSelectorCursor int    // index into scopeTiers
+	ScopeFeedback       string // "✓ Scope updated" or "" — shown for 2 s after change
 
 	// Setup
 	SetupAgents           []setup.Agent
@@ -237,3 +249,34 @@ func installAgent(agentName string) tea.Cmd {
 
 var installAgentFn = setup.Install
 var addClaudeCodeAllowlistFn = setup.AddClaudeCodeAllowlist
+
+// ─── Scope selector ──────────────────────────────────────────────────────────
+
+// scopeTiers lists the 4 valid scope values in display order.
+var scopeTiers = []string{"personal", "department", "project", "team"}
+
+// scopeIndex returns the index of scope in scopeTiers, defaulting to 0.
+func scopeIndex(scope string) int {
+	for i, t := range scopeTiers {
+		if t == scope {
+			return i
+		}
+	}
+	return 0
+}
+
+// updateObservationScope returns a Cmd that persists the new scope and
+// wraps the result in a scopeUpdateMsg.
+func updateObservationScope(s *store.Store, id int64, newScope string) tea.Cmd {
+	return func() tea.Msg {
+		updated, err := s.UpdateObservation(id, store.UpdateObservationParams{Scope: &newScope})
+		return scopeUpdateMsg{observation: updated, err: err}
+	}
+}
+
+// errScopeUpdateFailed is a sentinel used in tests.
+var errScopeUpdateFailed = errScopeSentinel{}
+
+type errScopeSentinel struct{}
+
+func (errScopeSentinel) Error() string { return "scope update failed" }

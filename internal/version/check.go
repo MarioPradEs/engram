@@ -113,12 +113,13 @@ func normalizeVersion(v string) string {
 	return strings.TrimPrefix(strings.TrimSpace(v), "v")
 }
 
-// isNewer returns true if latest > current using simple semver comparison.
+// isNewer returns true if latest > current using 4-component semver comparison.
+// Components: (major, minor, patch, vivaIteration).
 func isNewer(latest, current string) bool {
 	latestParts := splitVersion(latest)
 	currentParts := splitVersion(current)
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if latestParts[i] > currentParts[i] {
 			return true
 		}
@@ -129,10 +130,38 @@ func isNewer(latest, current string) bool {
 	return false
 }
 
-// splitVersion splits "1.8.1" into [1, 8, 1]. Returns [0,0,0] on parse failure.
-func splitVersion(v string) [3]int {
-	var parts [3]int
-	segments := strings.SplitN(v, ".", 3)
+// splitVersion parses a version string into a 4-component tuple
+// [major, minor, patch, vivaIteration].
+//
+// The optional fork suffix "-viva.N" is recognised and parsed into the 4th
+// component. A version without the suffix has vivaIteration = 0, which means
+// legacy releases (e.g. "1.16.4") sort before any viva iteration of the same
+// base (e.g. "1.16.4-viva.1"), matching the natural migration order.
+//
+// Any other prerelease suffix (e.g. "-beta") is silently ignored and yields
+// vivaIteration = 0. Returns [0,0,0,0] on a completely unparseable input.
+func splitVersion(v string) [4]int {
+	var parts [4]int
+
+	// Separate base ("X.Y.Z") from any prerelease suffix ("-...").
+	base := v
+	vivaIteration := 0
+	if idx := strings.Index(v, "-"); idx != -1 {
+		base = v[:idx]
+		suffix := v[idx+1:] // e.g. "viva.1" or "beta"
+		if strings.HasPrefix(suffix, "viva.") {
+			iterStr := suffix[len("viva."):]
+			for _, c := range iterStr {
+				if c >= '0' && c <= '9' {
+					vivaIteration = vivaIteration*10 + int(c-'0')
+				} else {
+					break
+				}
+			}
+		}
+	}
+
+	segments := strings.SplitN(base, ".", 3)
 	for i, s := range segments {
 		if i >= 3 {
 			break
@@ -145,18 +174,21 @@ func splitVersion(v string) [3]int {
 			}
 		}
 	}
+	parts[3] = vivaIteration
 	return parts
 }
 
 // updateInstructions returns platform-appropriate update commands.
+// All install sources point at the Viva fork (MarioPradEs/engram).
 func updateInstructions() string {
+	const releasesURL = "https://github.com/MarioPradEs/engram/releases/latest"
 	switch runtime.GOOS {
 	case "darwin":
-		return "  brew update && brew upgrade engram"
+		return "  Download the latest release from: " + releasesURL
 	case "linux":
-		return "  brew update && brew upgrade engram\n  or: go install github.com/Gentleman-Programming/engram/cmd/engram@latest"
+		return "  go install github.com/MarioPradEs/engram/cmd/engram@latest\n  or: " + releasesURL
 	default:
-		return "  go install github.com/Gentleman-Programming/engram/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/releases/latest"
+		return "  go install github.com/MarioPradEs/engram/cmd/engram@latest\n  or: " + releasesURL
 	}
 }
 

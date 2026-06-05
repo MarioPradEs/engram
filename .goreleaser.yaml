@@ -44,6 +44,12 @@ changelog:
       - "^test:"
       - "^ci:"
 
+# Fork versioning: tags follow vX.Y.Z-viva.N (valid semver prerelease syntax).
+# Without this override GoReleaser would mark them as GitHub prereleases and
+# /releases/latest would skip them, breaking the auto-update check.
+release:
+  prerelease: false
+
 # NOTE (Viva fork): Homebrew tap publishing is intentionally disabled. The
 # upstream tap (Gentleman-Programming/homebrew-tap) is not writable from this
 # fork and HOMEBREW_TAP_TOKEN is not configured here. The team installs the

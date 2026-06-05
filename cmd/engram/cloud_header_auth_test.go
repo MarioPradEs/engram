@@ -14,9 +14,9 @@ func TestNewCloudRuntimeUsersFilePassedToConfig(t *testing.T) {
 	dir := t.TempDir()
 	usersYAML := dir + "/users.yaml"
 	yaml := `users:
-  - email: alice@example.com
+  - email: alice@vivastudios.com
     name: Alice
-    department: engineering
+    department: dev
     role: admin
     status: active
     enrolled:
@@ -44,9 +44,9 @@ func TestNewCloudRuntimeHeaderAuthWiresWhenUsersFileSet(t *testing.T) {
 	dir := t.TempDir()
 	usersYAML := dir + "/users.yaml"
 	yaml := `users:
-  - email: admin@example.com
+  - email: admin@vivastudios.com
     name: Admin User
-    department: engineering
+    department: dev
     role: admin
     status: active
     enrolled:

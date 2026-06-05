@@ -556,6 +556,7 @@ func (s *CloudServer) handlePushChunk(w http.ResponseWriter, r *http.Request) {
 	if storeWithAttr, ok := s.store.(chunkStoreWithAttribution); ok {
 		writeErr = storeWithAttr.WriteChunkWithAttribution(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData, attr)
 	} else {
+		log.Printf("cloudserver: store (%T) does not implement WriteChunkWithAttribution; chunk written WITHOUT Gate B or attribution stamping", s.store)
 		writeErr = s.store.WriteChunk(r.Context(), project, computedChunkID, req.CreatedBy, clientCreatedAt, normalizedData)
 	}
 	if writeErr != nil {

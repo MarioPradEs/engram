@@ -279,6 +279,138 @@ func TestWriteChunkWithAttributionFallsBackToNonPersonalWhenAttrZero(t *testing.
 	}
 }
 
+// TestWriteChunkWithAttributionRelationPassesThroughGateB is a Postgres-gated
+// integration test verifying that a relation mutation carried in chunk.Mutations[]
+// is persisted to cloud_mutations when WriteChunkWithAttribution is called with a
+// non-zero Attribution — i.e. Gate B must NOT drop relation entries (they have no
+// scope field and are not observations). A sibling personal-scoped observation in
+// the same chunk payload MUST be dropped by Gate B, proving both behaviours in one
+// assertion.
+func TestWriteChunkWithAttributionRelationPassesThroughGateB(t *testing.T) {
+	_, cs, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	attr := Attribution{
+		UserEmail:   "rel-tester@example.com",
+		UserName:    "Rel Tester",
+		Department:  "engineering",
+		UserDeleted: false,
+	}
+
+	project := "chunk-relation-test-" + uniqueTestSuffix(t)
+
+	// Build a chunk that has:
+	//  - a relation mutation in the mutations[] journal
+	//  - a personal-scoped observation (to prove Gate B still fires for observations)
+	// The relation entity has no scope → must pass through Gate B unchanged.
+	markedByActor := "agent-test"
+	markedByKind := "agent"
+
+	relationPayload, err := json.Marshal(map[string]any{
+		"sync_id":          "rel-chunk-test-001",
+		"source_id":        "obs-source-001",
+		"target_id":        "obs-target-001",
+		"relation":         "related",
+		"judgment_status":  "judged",
+		"marked_by_actor":  markedByActor,
+		"marked_by_kind":   markedByKind,
+		"marked_by_model":  "model-test",
+		"project":          project,
+		"created_at":       "2026-06-01T10:00:00Z",
+		"updated_at":       "2026-06-01T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal relation payload: %v", err)
+	}
+
+	rawChunk := map[string]any{
+		"sessions": []any{},
+		"observations": []any{
+			map[string]any{
+				"sync_id":    "obs-personal-relation-test",
+				"session_id": "sess-rel-test",
+				"type":       "manual",
+				"title":      "Personal obs alongside relation",
+				"content":    "should be dropped by Gate B",
+				"scope":      "personal",
+				"created_at": "2026-06-01T10:01:00Z",
+			},
+		},
+		"prompts": []any{},
+		"mutations": []any{
+			map[string]any{
+				"entity":     store.SyncEntityRelation,
+				"entity_key": "rel-chunk-test-001",
+				"op":         store.SyncOpUpsert,
+				"project":    project,
+				"payload":    string(relationPayload),
+			},
+		},
+	}
+
+	rawBytes, err := json.Marshal(rawChunk)
+	if err != nil {
+		t.Fatalf("marshal raw chunk: %v", err)
+	}
+
+	chunkPayload, err := chunkcodec.CanonicalizeForProject(rawBytes, project)
+	if err != nil {
+		t.Fatalf("canonicalize chunk: %v", err)
+	}
+	chunkID := chunkIDFromPayload(chunkPayload)
+
+	if err := cs.WriteChunkWithAttribution(ctx, project, chunkID, "rel-tester", "", chunkPayload, attr); err != nil {
+		t.Fatalf("WriteChunkWithAttribution: %v", err)
+	}
+
+	// ── Assert: relation IS persisted in cloud_mutations ──────────────────────
+	var relCount int
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM cloud_mutations
+		WHERE project = $1 AND entity = 'relation' AND entity_key = 'rel-chunk-test-001'
+	`, project).Scan(&relCount); err != nil {
+		t.Fatalf("count relation mutation: %v", err)
+	}
+	if relCount != 1 {
+		t.Errorf("relation mutation must be persisted in cloud_mutations, found %d row(s) — Gate B must not drop non-observation entities", relCount)
+	}
+
+	// ── Assert: the relation payload round-trips intact (fidelity, not just presence) ──
+	var storedPayload []byte
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT payload FROM cloud_mutations
+		WHERE project = $1 AND entity = 'relation' AND entity_key = 'rel-chunk-test-001'
+	`, project).Scan(&storedPayload); err != nil {
+		t.Fatalf("read relation payload: %v", err)
+	}
+	var storedRel map[string]any
+	if err := json.Unmarshal(storedPayload, &storedRel); err != nil {
+		t.Fatalf("stored relation payload is not valid JSON: %v", err)
+	}
+	if got := storedRel["sync_id"]; got != "rel-chunk-test-001" {
+		t.Errorf("relation payload sync_id = %v, want rel-chunk-test-001", got)
+	}
+	if got := storedRel["source_id"]; got != "obs-source-001" {
+		t.Errorf("relation payload source_id = %v, want obs-source-001", got)
+	}
+	if got := storedRel["target_id"]; got != "obs-target-001" {
+		t.Errorf("relation payload target_id = %v, want obs-target-001", got)
+	}
+
+	// ── Assert: personal observation IS dropped by Gate B ─────────────────────
+	var personalCount int
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM cloud_mutations
+		WHERE project = $1 AND entity = 'observation' AND entity_key = 'obs-personal-relation-test'
+	`, project).Scan(&personalCount); err != nil {
+		t.Fatalf("count personal obs: %v", err)
+	}
+	if personalCount != 0 {
+		t.Errorf("personal observation must be dropped by Gate B, found %d row(s)", personalCount)
+	}
+}
+
 // uniqueTestSuffix returns a short unique suffix for test project names.
 func uniqueTestSuffix(t *testing.T) string {
 	t.Helper()

@@ -48,14 +48,18 @@ func TestViewObservationDetailHelpIncludesP(t *testing.T) {
 
 func TestPressPInObservationDetailOpensScopeSelector(t *testing.T) {
 	_, m := newScopeFixture(t)
+	m.PrevScreen = ScreenRecent // entered detail from the Recent list
+
 	updatedModel, cmd := m.handleObservationDetailKeys("p")
 	updated := updatedModel.(Model)
 
 	if updated.Screen != ScreenScopeSelector {
 		t.Fatalf("screen = %v, want ScreenScopeSelector", updated.Screen)
 	}
-	if updated.PrevScreen != ScreenObservationDetail {
-		t.Fatalf("PrevScreen = %v, want ScreenObservationDetail", updated.PrevScreen)
+	// Opening the selector must NOT clobber PrevScreen, so ESC in the detail
+	// still returns to the real origin afterwards (regression guard).
+	if updated.PrevScreen != ScreenRecent {
+		t.Fatalf("PrevScreen = %v, want it preserved as ScreenRecent", updated.PrevScreen)
 	}
 	if cmd != nil {
 		t.Fatal("opening scope selector should not dispatch a command")
@@ -182,6 +186,36 @@ func TestScopeSelectorEscCancels(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatal("esc should not dispatch a command")
+	}
+}
+
+// Regression: opening the scope selector from the detail must NOT clobber
+// PrevScreen, so ESC in the detail still returns to the original origin
+// (e.g. the Recent list) instead of looping back into the detail.
+func TestObservationDetailEscReturnsToOriginAfterScopeSelector(t *testing.T) {
+	_, m := newScopeFixture(t)
+	m.Screen = ScreenObservationDetail
+	m.PrevScreen = ScreenRecent // entered detail from the Recent list
+
+	// Open the scope selector with 'p'
+	m1, _ := m.handleObservationDetailKeys("p")
+	mm := m1.(Model)
+	if mm.Screen != ScreenScopeSelector {
+		t.Fatalf("p did not open scope selector: screen=%v", mm.Screen)
+	}
+
+	// Cancel the selector with esc → back to detail
+	m2, _ := mm.handleScopeSelectorKeys("esc")
+	mm2 := m2.(Model)
+	if mm2.Screen != ScreenObservationDetail {
+		t.Fatalf("esc in selector did not return to detail: screen=%v", mm2.Screen)
+	}
+
+	// esc in the detail must return to the ORIGIN (Recent), not stay in detail
+	m3, _ := mm2.handleObservationDetailKeys("esc")
+	mm3 := m3.(Model)
+	if mm3.Screen != ScreenRecent {
+		t.Fatalf("esc in detail after scope selector did not return to origin: got screen=%v, want ScreenRecent", mm3.Screen)
 	}
 }
 

@@ -425,9 +425,11 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 			return m, loadTimeline(m.store, m.SelectedObservation.ID)
 		}
 	case "p":
-		// Open scope selector for this observation
+		// Open scope selector for this observation. Do NOT touch PrevScreen:
+		// the selector always returns to ScreenObservationDetail explicitly, and
+		// clobbering PrevScreen here would break ESC in the detail (it would loop
+		// back into the detail instead of returning to the origin list).
 		if m.SelectedObservation != nil {
-			m.PrevScreen = ScreenObservationDetail
 			m.Screen = ScreenScopeSelector
 			m.ScopeSelectorCursor = scopeIndex(m.SelectedObservation.Scope)
 			return m, nil

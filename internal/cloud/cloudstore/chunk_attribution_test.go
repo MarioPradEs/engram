@@ -306,8 +306,6 @@ func TestWriteChunkWithAttributionRelationPassesThroughGateB(t *testing.T) {
 	// The relation entity has no scope → must pass through Gate B unchanged.
 	markedByActor := "agent-test"
 	markedByKind := "agent"
-	markedByModel := "model-test"
-	_ = markedByModel // used inside the JSON literal below
 
 	relationPayload, err := json.Marshal(map[string]any{
 		"sync_id":          "rel-chunk-test-001",
@@ -376,6 +374,28 @@ func TestWriteChunkWithAttributionRelationPassesThroughGateB(t *testing.T) {
 	}
 	if relCount != 1 {
 		t.Errorf("relation mutation must be persisted in cloud_mutations, found %d row(s) — Gate B must not drop non-observation entities", relCount)
+	}
+
+	// ── Assert: the relation payload round-trips intact (fidelity, not just presence) ──
+	var storedPayload []byte
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT payload FROM cloud_mutations
+		WHERE project = $1 AND entity = 'relation' AND entity_key = 'rel-chunk-test-001'
+	`, project).Scan(&storedPayload); err != nil {
+		t.Fatalf("read relation payload: %v", err)
+	}
+	var storedRel map[string]any
+	if err := json.Unmarshal(storedPayload, &storedRel); err != nil {
+		t.Fatalf("stored relation payload is not valid JSON: %v", err)
+	}
+	if got := storedRel["sync_id"]; got != "rel-chunk-test-001" {
+		t.Errorf("relation payload sync_id = %v, want rel-chunk-test-001", got)
+	}
+	if got := storedRel["source_id"]; got != "obs-source-001" {
+		t.Errorf("relation payload source_id = %v, want obs-source-001", got)
+	}
+	if got := storedRel["target_id"]; got != "obs-target-001" {
+		t.Errorf("relation payload target_id = %v, want obs-target-001", got)
 	}
 
 	// ── Assert: personal observation IS dropped by Gate B ─────────────────────

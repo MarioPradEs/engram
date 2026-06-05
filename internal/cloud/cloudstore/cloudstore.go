@@ -339,6 +339,13 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 		if payload == "" {
 			payload = "{}"
 		}
+		// SyncMutation.Payload is a raw client-supplied string (unlike the typed
+		// arrays above, which are produced by json.Marshal). Validate here so a
+		// malformed relation payload fails loudly at this layer instead of as an
+		// opaque Postgres JSONB parse error deep inside the insert.
+		if !json.Valid([]byte(payload)) {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d] relation payload is not valid JSON", i)
+		}
 		entries = append(entries, MutationEntry{
 			Project:   project,
 			Entity:    entity,

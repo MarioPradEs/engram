@@ -20,6 +20,12 @@ const AuditOutcomeRejectedProjectPaused = "rejected_project_paused"
 // A sentinel-seq is still returned so the client ack count matches (R1).
 const AuditOutcomeRejectedPersonalScope = "rejected_personal_scope"
 
+// AuditOutcomeRedactedSecret is the outcome constant written when the server-side
+// secret scanner (secret_scan.go) detects a credential pattern in an observation
+// payload and redacts it in-place before writing to cloud_mutations. The observation
+// is preserved — only the secret substring is replaced with [REDACTED-SECRET].
+const AuditOutcomeRedactedSecret = "redacted_secret"
+
 // AuditActionMutationPush discriminates mutation push rejections.
 const AuditActionMutationPush = "mutation_push"
 

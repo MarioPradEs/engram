@@ -17,6 +17,13 @@ type chunkGateBDrop struct {
 	entityKey string
 }
 
+// chunkSecretRedaction records an observation entry whose payload had a secret
+// redacted in-place before being written to cloud_mutations.
+type chunkSecretRedaction struct {
+	project   string
+	entityKey string
+}
+
 // applyChunkAttributionAndGateB processes a slice of materialized MutationEntry
 // values from a chunk push, applying the same security layer as InsertMutationBatch:
 //
@@ -24,18 +31,37 @@ type chunkGateBDrop struct {
 //     with scope=personal are silently dropped. The drop is recorded in the returned
 //     drops slice so the caller can write audit log entries.
 //
-//  2. Attribution stamping: for kept observation entries, user_email / user_name /
+//  2. Secret scan: observation entries (non-personal) have their payload scanned for
+//     credentials. Any secret found is replaced with [REDACTED-SECRET] in-place before
+//     the entry is kept. The redaction is recorded in the returned redactions slice.
+//
+//  3. Attribution stamping: for kept observation entries, user_email / user_name /
 //     department / user_deleted are merged into the JSONB payload using
 //     stampAttributionIntoEntry (same helper used by InsertMutationBatch).
 //
 // When attr is zero (UserEmail == ""), Gate B is not applied and no stamping occurs —
 // this preserves the pre-auth legacy behaviour for unauthenticated chunk pushes.
+// Secret scanning is applied regardless of attr (secrets must not reach the cloud
+// even on unauthenticated paths).
 //
 // Non-observation entries (session, prompt, relation) pass through unchanged.
-func applyChunkAttributionAndGateB(entries []MutationEntry, attr Attribution) (kept []MutationEntry, drops []chunkGateBDrop) {
+func applyChunkAttributionAndGateB(entries []MutationEntry, attr Attribution) (kept []MutationEntry, drops []chunkGateBDrop, redactions []chunkSecretRedaction) {
 	if attr.UserEmail == "" {
-		// Zero attribution → bypass Gate B and stamping.
-		return entries, nil
+		// Zero attribution → bypass Gate B and stamping, but still scan for secrets.
+		scanned := make([]MutationEntry, 0, len(entries))
+		for _, entry := range entries {
+			if strings.TrimSpace(entry.Entity) == store.SyncEntityObservation {
+				if redacted, found := redactSecretsInObservationPayload(entry.Payload); found {
+					entry.Payload = json.RawMessage(redacted)
+					redactions = append(redactions, chunkSecretRedaction{
+						project:   strings.TrimSpace(entry.Project),
+						entityKey: strings.TrimSpace(entry.EntityKey),
+					})
+				}
+			}
+			scanned = append(scanned, entry)
+		}
+		return scanned, nil, redactions
 	}
 
 	kept = make([]MutationEntry, 0, len(entries))
@@ -55,11 +81,20 @@ func applyChunkAttributionAndGateB(entries []MutationEntry, attr Attribution) (k
 			continue
 		}
 
+		// Secret scan: redact any credentials found in the payload before stamping.
+		if redacted, found := redactSecretsInObservationPayload(entry.Payload); found {
+			entry.Payload = json.RawMessage(redacted)
+			redactions = append(redactions, chunkSecretRedaction{
+				project:   strings.TrimSpace(entry.Project),
+				entityKey: strings.TrimSpace(entry.EntityKey),
+			})
+		}
+
 		// Stamp attribution into the JSONB payload (same helper as InsertMutationBatch).
 		entry = stampAttributionIntoEntry(entry, attr)
 		kept = append(kept, entry)
 	}
-	return kept, drops
+	return kept, drops, redactions
 }
 
 // insertMaterializedMutationsWithAttribution inserts a slice of already-filtered,
@@ -173,8 +208,8 @@ func (cs *CloudStore) WriteChunkWithAttribution(ctx context.Context, project, ch
 		return err
 	}
 
-	// Apply Gate B + attribution stamping to produce the filtered/stamped set.
-	mutations, drops := applyChunkAttributionAndGateB(rawMutations, attr)
+	// Apply Gate B + secret scan + attribution stamping to produce the filtered/stamped set.
+	mutations, drops, redactions := applyChunkAttributionAndGateB(rawMutations, attr)
 
 	tx, err := cs.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -229,6 +264,19 @@ func (cs *CloudStore) WriteChunkWithAttribution(ctx context.Context, project, ch
 			EntryCount:  1,
 			ReasonCode:  "gate_b_personal_scope",
 			Metadata:    map[string]any{"entity_key": d.entityKey},
+		})
+	}
+
+	// Write audit log entries for secret redactions (after commit — best-effort, non-fatal).
+	for _, r := range redactions {
+		_ = cs.InsertAuditEntry(ctx, AuditEntry{
+			Contributor: contributor,
+			Project:     r.project,
+			Action:      AuditActionChunkPush,
+			Outcome:     AuditOutcomeRedactedSecret,
+			EntryCount:  1,
+			ReasonCode:  "secret_scan",
+			Metadata:    map[string]any{"entity_key": r.entityKey},
 		})
 	}
 

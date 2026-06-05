@@ -831,7 +831,12 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		project   string
 		entityKey string
 	}
+	type redactionInfo struct {
+		project   string
+		entityKey string
+	}
 	var drops []dropInfo
+	var secretRedactions []redactionInfo
 	storedBatch := make([]MutationEntry, 0, len(batch))
 	droppedIdx := make(map[int]struct{}, 0) // original indices that are personal
 
@@ -846,6 +851,14 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 				})
 				droppedIdx[i] = struct{}{}
 				continue
+			}
+			// Secret scan: redact any credentials in the payload before persisting.
+			if redacted, found := redactSecretsInObservationPayload(entry.Payload); found {
+				entry.Payload = json.RawMessage(redacted)
+				secretRedactions = append(secretRedactions, redactionInfo{
+					project:   strings.TrimSpace(entry.Project),
+					entityKey: strings.TrimSpace(entry.EntityKey),
+				})
 			}
 			// Stamp attribution into the payload + prepare denorm values for
 			// non-personal observation entries.
@@ -949,6 +962,19 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 			EntryCount:  1,
 			ReasonCode:  "gate_b_personal_scope",
 			Metadata:    map[string]any{"entity_key": d.entityKey},
+		})
+	}
+
+	// Audit secret redactions (after commit — best-effort, non-fatal).
+	for _, r := range secretRedactions {
+		_ = cs.InsertAuditEntry(ctx, AuditEntry{
+			Contributor: contributor,
+			Project:     r.project,
+			Action:      AuditActionMutationPush,
+			Outcome:     AuditOutcomeRedactedSecret,
+			EntryCount:  1,
+			ReasonCode:  "secret_scan",
+			Metadata:    map[string]any{"entity_key": r.entityKey},
 		})
 	}
 

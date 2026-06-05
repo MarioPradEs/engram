@@ -28,7 +28,7 @@ func TestApplyChunkAttributionAndGateBDropsPersonal(t *testing.T) {
 			Payload: json.RawMessage(`{"id":"sess-1"}`)},
 	}
 
-	kept, drops := applyChunkAttributionAndGateB(entries, attr)
+	kept, drops, _ := applyChunkAttributionAndGateB(entries, attr)
 
 	// 3 entries kept (project obs + dept obs + session); personal obs dropped.
 	if len(kept) != 3 {
@@ -55,7 +55,7 @@ func TestApplyChunkAttributionAndGateBStampsAttr(t *testing.T) {
 		makeObsMutationEntry("proj", "obs-1", "project"),
 	}
 
-	kept, drops := applyChunkAttributionAndGateB(entries, attr)
+	kept, drops, _ := applyChunkAttributionAndGateB(entries, attr)
 	if len(drops) != 0 {
 		t.Fatalf("expected no drops, got %d", len(drops))
 	}
@@ -87,7 +87,7 @@ func TestApplyChunkAttributionAndGateBNoAttrIsNoop(t *testing.T) {
 	}
 
 	// Zero Attribution → no stamping, no Gate B drop.
-	kept, drops := applyChunkAttributionAndGateB(entries, Attribution{})
+	kept, drops, _ := applyChunkAttributionAndGateB(entries, Attribution{})
 	if len(kept) != 2 {
 		t.Fatalf("expected both entries kept when attr is zero, got %d", len(kept))
 	}
@@ -112,7 +112,7 @@ func TestApplyChunkAttributionAndGateBSessionPassesThrough(t *testing.T) {
 		Payload:   json.RawMessage(`{"id":"sess-1","directory":"/tmp"}`),
 	}
 
-	kept, drops := applyChunkAttributionAndGateB([]MutationEntry{sessEntry}, attr)
+	kept, drops, _ := applyChunkAttributionAndGateB([]MutationEntry{sessEntry}, attr)
 	if len(kept) != 1 {
 		t.Fatalf("expected session to pass through, got %d kept", len(kept))
 	}

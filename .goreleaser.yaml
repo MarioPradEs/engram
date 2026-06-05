@@ -44,14 +44,8 @@ changelog:
       - "^test:"
       - "^ci:"
 
-brews:
-  - repository:
-      owner: Gentleman-Programming
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
-    name: engram
-    homepage: "https://github.com/Gentleman-Programming/engram"
-    description: "Persistent memory for AI coding agents. Agent-agnostic, single binary, zero dependencies."
-    license: "MIT"
-    commit_msg_template: "chore: update engram formula to {{ .Tag }}"
+# NOTE (Viva fork): Homebrew tap publishing is intentionally disabled. The
+# upstream tap (Gentleman-Programming/homebrew-tap) is not writable from this
+# fork and HOMEBREW_TAP_TOKEN is not configured here. The team installs the
+# binary directly from the fork's GitHub Releases (tar.gz / zip). If a Viva
+# Homebrew tap is created later, re-add a brews: block pointing at it.

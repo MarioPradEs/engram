@@ -14,7 +14,9 @@ import (
 )
 
 const (
-	repoOwner = "Gentleman-Programming"
+	// Fork (Viva Studios): auto-update checks releases from the fork, not upstream,
+	// so the multi-user/cloud features are not "downgraded" to an upstream release.
+	repoOwner = "MarioPradEs"
 	repoName  = "engram"
 )
 

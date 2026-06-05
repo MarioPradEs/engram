@@ -132,6 +132,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.CopyFeedback = ""
 		return m, nil
 
+	case scopeUpdateMsg:
+		if msg.err != nil {
+			m.ErrorMsg = msg.err.Error()
+			return m, nil
+		}
+		m.SelectedObservation = msg.observation
+		m.ScopeFeedback = "✓ Scope updated"
+		return m, clearScopeFeedbackAfter(2 * time.Second)
+
+	case scopeFeedbackClearMsg:
+		m.ScopeFeedback = ""
+		return m, nil
+
 	case spinner.TickMsg:
 		// Only forward spinner ticks when we're actually installing
 		if m.SetupInstalling {
@@ -170,6 +183,8 @@ func (m Model) handleKeyPress(key string) (tea.Model, tea.Cmd) {
 		return m.handleSessionDetailKeys(key)
 	case ScreenSetup:
 		return m.handleSetupKeys(key)
+	case ScreenScopeSelector:
+		return m.handleScopeSelectorKeys(key)
 	}
 	return m, nil
 }
@@ -409,11 +424,43 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 		if m.SelectedObservation != nil {
 			return m, loadTimeline(m.store, m.SelectedObservation.ID)
 		}
+	case "p":
+		// Open scope selector for this observation
+		if m.SelectedObservation != nil {
+			m.PrevScreen = ScreenObservationDetail
+			m.Screen = ScreenScopeSelector
+			m.ScopeSelectorCursor = scopeIndex(m.SelectedObservation.Scope)
+			return m, nil
+		}
 	case "esc", "q":
 		m.Screen = m.PrevScreen
 		m.Cursor = 0
 		m.DetailScroll = 0
 		return m, m.refreshScreen(m.PrevScreen)
+	}
+	return m, nil
+}
+
+// ─── Scope Selector ───────────────────────────────────────────────────────────
+
+func (m Model) handleScopeSelectorKeys(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "up", "k":
+		if m.ScopeSelectorCursor > 0 {
+			m.ScopeSelectorCursor--
+		}
+	case "down", "j":
+		if m.ScopeSelectorCursor < len(scopeTiers)-1 {
+			m.ScopeSelectorCursor++
+		}
+	case "enter":
+		chosen := scopeTiers[m.ScopeSelectorCursor]
+		m.Screen = ScreenObservationDetail
+		if m.SelectedObservation != nil {
+			return m, updateObservationScope(m.store, m.SelectedObservation.ID, chosen)
+		}
+	case "esc", "q":
+		m.Screen = ScreenObservationDetail
 	}
 	return m, nil
 }

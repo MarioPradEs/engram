@@ -44,3 +44,10 @@ func clearFeedbackAfter(d time.Duration) tea.Cmd {
 		return clipboardClearMsg{}
 	})
 }
+
+// clearScopeFeedbackAfter returns a Cmd that sends scopeFeedbackClearMsg after d.
+func clearScopeFeedbackAfter(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(_ time.Time) tea.Msg {
+		return scopeFeedbackClearMsg{}
+	})
+}

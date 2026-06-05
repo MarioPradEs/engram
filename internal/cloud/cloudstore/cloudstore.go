@@ -203,89 +203,12 @@ func toManifestEntries(rows []manifestRow) []engramsync.ChunkEntry {
 	return entries
 }
 
+// WriteChunk writes a chunk and materializes it into cloud_mutations.
+// It is the unauthenticated variant: no Gate B, no attribution stamping.
+// Delegates to WriteChunkWithAttribution with a zero Attribution so all
+// existing call sites (tests, fakes) continue to work without change.
 func (cs *CloudStore) WriteChunk(ctx context.Context, project, chunkID, createdBy, clientCreatedAt string, payload []byte) error {
-	if cs == nil || cs.db == nil {
-		return fmt.Errorf("cloudstore: not initialized")
-	}
-	project = strings.TrimSpace(project)
-	if project == "" {
-		return fmt.Errorf("cloudstore: project is required")
-	}
-	if strings.TrimSpace(chunkID) == "" {
-		return fmt.Errorf("cloudstore: chunk id is required")
-	}
-	expectedChunkID := chunkIDFromPayload(payload)
-	if chunkID != expectedChunkID {
-		return fmt.Errorf("cloudstore: chunk id does not match payload hash (expected %s)", expectedChunkID)
-	}
-	originCreatedAt, err := parseClientCreatedAt(clientCreatedAt)
-	if err != nil {
-		return err
-	}
-
-	var existingPayload []byte
-	err = cs.db.QueryRowContext(ctx, `SELECT payload::text FROM cloud_chunks WHERE project_name = $1 AND chunk_id = $2`, project, chunkID).Scan(&existingPayload)
-	if err == nil {
-		normalizedIncoming := normalizeJSON(payload)
-		normalizedExisting := normalizeJSON(existingPayload)
-		if string(normalizedIncoming) != string(normalizedExisting) {
-			return fmt.Errorf("%w: existing chunk %q has different payload", ErrChunkConflict, chunkID)
-		}
-		_ = cs.indexChunkSessions(ctx, project, payload)
-		cs.invalidateDashboardReadModel()
-		return nil
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("cloudstore: read existing chunk: %w", err)
-	}
-
-	chunk, err := parseChunkData(payload)
-	if err != nil {
-		return fmt.Errorf("cloudstore: parse chunk for materialization: %w", err)
-	}
-	mutations, err := materializedChunkMutations(project, chunk)
-	if err != nil {
-		return err
-	}
-
-	tx, err := cs.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("cloudstore: begin write chunk tx: %w", err)
-	}
-	defer func() {
-		if tx != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	counts := summarizeChunk(payload)
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		project, strings.TrimSpace(chunkID), strings.TrimSpace(createdBy), originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts)
-	if err != nil {
-		if isUniqueViolation(err) {
-			conflictErr := cs.resolveChunkConflict(ctx, project, chunkID, payload)
-			if conflictErr != nil {
-				return conflictErr
-			}
-			cs.invalidateDashboardReadModel()
-			return nil
-		}
-		return fmt.Errorf("cloudstore: write chunk: %w", err)
-	}
-	if err := cs.indexChunkSessionsWith(ctx, tx, project, payload); err != nil {
-		return err
-	}
-	if err := insertMaterializedMutations(ctx, tx, mutations); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("cloudstore: commit write chunk: %w", err)
-	}
-	tx = nil
-	cs.invalidateDashboardReadModel()
-	return nil
+	return cs.WriteChunkWithAttribution(ctx, project, chunkID, createdBy, clientCreatedAt, payload, Attribution{})
 }
 
 func (cs *CloudStore) invalidateDashboardReadModel() {

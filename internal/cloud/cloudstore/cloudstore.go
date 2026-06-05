@@ -279,7 +279,7 @@ func (cs *CloudStore) indexChunkSessionsWith(ctx context.Context, execer chunkSe
 
 func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]MutationEntry, error) {
 	project = strings.TrimSpace(project)
-	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts))
+	entries := make([]MutationEntry, 0, len(chunk.Sessions)+len(chunk.Observations)+len(chunk.Prompts)+len(chunk.Mutations))
 
 	for i, session := range chunk.Sessions {
 		entityKey := strings.TrimSpace(session.ID)
@@ -315,6 +315,37 @@ func materializedChunkMutations(project string, chunk engramsync.ChunkData) ([]M
 			return nil, fmt.Errorf("cloudstore: materialize chunk prompt %q: %w", entityKey, err)
 		}
 		entries = append(entries, MutationEntry{Project: project, Entity: store.SyncEntityPrompt, EntityKey: entityKey, Op: store.SyncOpUpsert, Payload: payload})
+	}
+
+	// Relation mutations are not carried in the typed arrays (sessions/observations/prompts)
+	// but arrive via the chunk.Mutations journal. Materialize relation entries into
+	// cloud_mutations so they are queryable and downloadable alongside other entities.
+	// Other mutation-journal entities (session, observation, prompt) are already covered
+	// by their typed arrays above; only relations need this extra pass.
+	for i, mutation := range chunk.Mutations {
+		entity := strings.TrimSpace(mutation.Entity)
+		if entity != store.SyncEntityRelation {
+			continue
+		}
+		entityKey := strings.TrimSpace(mutation.EntityKey)
+		if entityKey == "" {
+			return nil, fmt.Errorf("cloudstore: materialize chunk: mutations[%d] relation entity_key is required", i)
+		}
+		op := strings.TrimSpace(mutation.Op)
+		if op == "" {
+			op = store.SyncOpUpsert
+		}
+		payload := strings.TrimSpace(mutation.Payload)
+		if payload == "" {
+			payload = "{}"
+		}
+		entries = append(entries, MutationEntry{
+			Project:   project,
+			Entity:    entity,
+			EntityKey: entityKey,
+			Op:        op,
+			Payload:   json.RawMessage(payload),
+		})
 	}
 
 	return entries, nil

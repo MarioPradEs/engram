@@ -26,13 +26,18 @@ func TestNormalizeVersion(t *testing.T) {
 func TestSplitVersion(t *testing.T) {
 	tests := []struct {
 		in   string
-		want [3]int
+		want [4]int
 	}{
-		{"1.8.1", [3]int{1, 8, 1}},
-		{"2.0.0", [3]int{2, 0, 0}},
-		{"1.0", [3]int{1, 0, 0}},
-		{"", [3]int{0, 0, 0}},
-		{"1.8.1-beta", [3]int{1, 8, 1}},
+		{"1.8.1", [4]int{1, 8, 1, 0}},
+		{"2.0.0", [4]int{2, 0, 0, 0}},
+		{"1.0", [4]int{1, 0, 0, 0}},
+		{"", [4]int{0, 0, 0, 0}},
+		// non-viva prerelease: patch digits stop at '-', iteration stays 0
+		{"1.8.1-beta", [4]int{1, 8, 1, 0}},
+		// viva suffix: parsed into the 4th component
+		{"1.16.3-viva.1", [4]int{1, 16, 3, 1}},
+		{"1.16.3-viva.9", [4]int{1, 16, 3, 9}},
+		{"1.16.3-viva.12", [4]int{1, 16, 3, 12}},
 	}
 	for _, tt := range tests {
 		if got := splitVersion(tt.in); got != tt.want {
@@ -43,19 +48,33 @@ func TestSplitVersion(t *testing.T) {
 
 func TestIsNewer(t *testing.T) {
 	tests := []struct {
+		name            string
 		latest, current string
 		want            bool
 	}{
-		{"1.8.1", "1.8.0", true},
-		{"2.0.0", "1.9.9", true},
-		{"1.8.1", "1.8.1", false},
-		{"1.7.0", "1.8.1", false},
-		{"1.8.2", "1.8.1", true},
+		// existing base-version cases
+		{"patch bump", "1.8.1", "1.8.0", true},
+		{"major bump", "2.0.0", "1.9.9", true},
+		{"equal", "1.8.1", "1.8.1", false},
+		{"older major", "1.7.0", "1.8.1", false},
+		{"patch newer", "1.8.2", "1.8.1", true},
+		// viva iteration: same base, iteration advances
+		{"viva iter newer", "1.16.4-viva.2", "1.16.4-viva.1", true},
+		{"viva iter older", "1.16.4-viva.1", "1.16.4-viva.2", false},
+		{"viva iter equal", "1.16.4-viva.1", "1.16.4-viva.1", false},
+		// different base with viva suffix
+		{"base patch beats viva iter", "1.16.5-viva.1", "1.16.4-viva.9", true},
+		// legacy (no viva) vs viva.N — viva.1 is newer than bare release
+		{"viva beats legacy same base", "1.16.4-viva.1", "1.16.4", true},
+		// legacy is NOT newer than viva
+		{"legacy not newer than viva", "1.16.4", "1.16.4-viva.1", false},
 	}
 	for _, tt := range tests {
-		if got := isNewer(tt.latest, tt.current); got != tt.want {
-			t.Errorf("isNewer(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNewer(tt.latest, tt.current); got != tt.want {
+				t.Errorf("isNewer(%q, %q) = %v, want %v", tt.latest, tt.current, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -217,10 +236,54 @@ func TestCheckLatestUsesGitHubToken(t *testing.T) {
 	})
 }
 
+func TestCheckLatestVivaVersioning(t *testing.T) {
+	t.Run("viva iteration bump is detected as update", func(t *testing.T) {
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v1.16.4-viva.2"}`))
+		}))
+
+		result := CheckLatest("1.16.4-viva.1")
+		if result.Status != StatusUpdateAvailable {
+			t.Fatalf("status = %q, want %q", result.Status, StatusUpdateAvailable)
+		}
+		if !strings.Contains(result.Message, "1.16.4-viva.1 -> 1.16.4-viva.2") {
+			t.Fatalf("message = %q", result.Message)
+		}
+	})
+
+	t.Run("same viva version is up to date", func(t *testing.T) {
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v1.16.4-viva.1"}`))
+		}))
+
+		result := CheckLatest("1.16.4-viva.1")
+		if result.Status != StatusUpToDate {
+			t.Fatalf("status = %q, want %q", result.Status, StatusUpToDate)
+		}
+	})
+
+	t.Run("dev version still yields no update check", func(t *testing.T) {
+		// Do NOT call withCheckServer here; the dev guard fires before any HTTP
+		// request is made, so no server is needed.
+		result := CheckLatest("dev")
+		if result.Status != StatusCheckFailed {
+			t.Fatalf("status = %q, want %q", result.Status, StatusCheckFailed)
+		}
+		if !strings.Contains(result.Message, "do not map to a release version") {
+			t.Fatalf("message = %q", result.Message)
+		}
+	})
+}
+
 func TestUpdateInstructions(t *testing.T) {
 	msg := updateInstructions()
 	if msg == "" {
 		t.Fatal("expected non-empty update instructions")
+	}
+	if !strings.Contains(msg, "MarioPradEs/engram") {
+		t.Fatalf("update instructions should reference the fork (MarioPradEs/engram), got: %q", msg)
 	}
 }
 

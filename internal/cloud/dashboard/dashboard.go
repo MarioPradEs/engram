@@ -45,6 +45,12 @@ type MountConfig struct {
 	ClearSessionCookie  func(w http.ResponseWriter, r *http.Request)
 	IsAdmin             func(r *http.Request) bool
 	GetDisplayName      func(r *http.Request) string
+	// AutoLoginFromHeader resolves the proxy-injected identity into a bearer JWT.
+	// Returns ("", nil)  → no header present (render token-paste fallback).
+	// Returns ("", err)  → header present but principal denied (403, no cookie).
+	// Returns (jwt, nil) → mint succeeded; handleLoginPage wraps it via CreateSessionCookie.
+	// nil means auto-login is disabled (token-paste only).
+	AutoLoginFromHeader func(r *http.Request) (string, error)
 	Store               DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
@@ -231,11 +237,34 @@ func renderComponentStatus(w http.ResponseWriter, r *http.Request, status int, c
 
 func (h *handlers) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	next := sanitizeDashboardNext(r.URL.Query().Get("next"))
+	// Existing valid-session bypass: if the caller already has a valid session, redirect.
 	if h.cfg.RequireSession != nil {
 		if err := h.cfg.RequireSession(r); err == nil {
 			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
 			return
 		}
+	}
+	// Auto-login from proxy-injected identity header (D2).
+	// AutoLoginFromHeader is nil when not wired (e.g. token-paste-only deployments).
+	if h.cfg.AutoLoginFromHeader != nil {
+		jwt, err := h.cfg.AutoLoginFromHeader(r)
+		if err != nil {
+			// Header present but principal denied (removed, not provisioned).
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if jwt != "" {
+			// Mint session cookie via the existing closure and redirect.
+			if h.cfg.CreateSessionCookie != nil {
+				if err := h.cfg.CreateSessionCookie(w, r, jwt); err != nil {
+					http.Error(w, "unable to create dashboard session", http.StatusInternalServerError)
+					return
+				}
+			}
+			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
+			return
+		}
+		// jwt == "" → header absent → fall through to token-paste fallback form.
 	}
 	renderComponent(w, r, LoginPage("", next))
 }

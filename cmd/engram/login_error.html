@@ -59,6 +59,15 @@
     .title{ font-size:1.22rem; font-weight:600; }
     .subtitle{ margin-top:10px; color:var(--text-dim); font-size:.9rem; line-height:1.55; }
     code{ background:rgba(255,255,255,.06); padding:2px 7px; border-radius:6px; color:var(--viva-orange); font-size:.85rem; }
+    .btn{
+      display:inline-block; margin-top:22px;
+      background:var(--viva-orange); color:#000;
+      font-weight:700; font-size:.92rem;
+      text-decoration:none; border-radius:10px;
+      padding:11px 22px;
+      transition:filter .15s ease;
+    }
+    .btn:hover{ filter:brightness(1.08); }
   </style>
 </head>
 <body>
@@ -70,6 +79,8 @@
     <div class="status">No se pudo iniciar sesión</div>
     <div class="title">La autenticación no se completó</div>
     <p class="subtitle">Cerrá esta pestaña y volvé a ejecutar <code>engram login</code>.<br>Si el problema persiste, revisá la terminal para ver el detalle.</p>
+    <!-- canonical Viva dashboard URL — promote to ENGRAM_DASHBOARD_URL if a second deployment appears -->
+    <a class="btn" href="https://engram.vivastudios.com/dashboard">Reintentar por la web</a>
   </main>
 </body>
 </html>

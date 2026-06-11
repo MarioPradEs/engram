@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gentleman-Programming/engram/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
@@ -195,9 +196,37 @@ func (s *CloudServer) routes() {
 		})
 		return nil
 	}
+	// AutoLoginFromHeader closure: resolves the oauth2-proxy-injected identity into a bearer JWT.
+	// Only wired when authLoader is set (the OAuth/header deployment path).
+	// Returns ("", nil)  → header absent → token-paste fallback.
+	// Returns ("", err)  → principal denied → 403 in handleLoginPage.
+	// Returns (jwt, nil) → identity minted; handleLoginPage wraps it via CreateSessionCookie.
+	var autoLoginFromHeader func(r *http.Request) (string, error)
+	if s.authLoader != nil {
+		autoLoginFromHeader = func(r *http.Request) (string, error) {
+			email := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Email")))
+			if email == "" {
+				return "", nil // header absent → token-paste fallback
+			}
+			p, ok := s.authLoader.Lookup(email)
+			if !ok || strings.EqualFold(p.Status, "removed") {
+				return "", fmt.Errorf("auto-login denied for %q", email)
+			}
+			// Reuse the /auth endpoint's JWT minting path (auth_endpoint.go:100-106)
+			// so there is exactly one identity-minting code path in the server.
+			return auth.MintJWT(s.authJWTSecret, auth.JWTClaims{
+				Sub:        p.Email,
+				Email:      p.Email,
+				Name:       p.Name,
+				Department: p.Department,
+				Role:       p.Role,
+			}, time.Now().UTC())
+		}
+	}
 	if s.auth == nil {
 		validateLoginToken = nil
 		createSessionCookie = nil
+		autoLoginFromHeader = nil
 	}
 	dashboard.Mount(s.mux, dashboard.MountConfig{
 		RequireSession:      s.authorizeDashboardRequest,
@@ -214,12 +243,18 @@ func (s *CloudServer) routes() {
 				MaxAge:   -1,
 			})
 		},
+		AutoLoginFromHeader: autoLoginFromHeader,
 		IsAdmin: func(r *http.Request) bool {
 			return s.isDashboardAdmin(r)
 		},
-		// GetDisplayName: returns "OPERATOR" until the session codec surfaces a
-		// display name (out of scope for this change). Satisfies REQ-103 / AD-2.
-		GetDisplayName:    func(r *http.Request) string { return "OPERATOR" },
+		// GetDisplayName: returns the JWT Name claim when the session carries a
+		// verifiable JWT; falls back to "OPERATOR" for static admin token sessions.
+		GetDisplayName: func(r *http.Request) string {
+			if claims, ok := s.dashboardPrincipal(r); ok && strings.TrimSpace(claims.Name) != "" {
+				return claims.Name
+			}
+			return "OPERATOR"
+		},
 		Store:             dashboardStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,
@@ -349,23 +384,52 @@ func (s *CloudServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "service": "engram-cloud"})
 }
 
+// dashboardPrincipal decodes the request's session cookie and returns the JWT
+// claims embedded in it. Returns (zero, false) when no valid session cookie is
+// present or the session does not contain a verifiable JWT (e.g. static admin
+// token session). This is a per-call decode — no context enrichment because
+// RequireSession returns error (not *http.Request), so enrichment would be dropped.
+func (s *CloudServer) dashboardPrincipal(r *http.Request) (auth.JWTClaims, bool) {
+	if s.auth == nil {
+		return auth.JWTClaims{}, false
+	}
+	cookie, err := r.Cookie(dashboardSessionCookieName)
+	if err != nil {
+		return auth.JWTClaims{}, false
+	}
+	bearer, err := s.dashboardBearerToken(cookie.Value)
+	if err != nil || strings.TrimSpace(bearer) == "" {
+		return auth.JWTClaims{}, false
+	}
+	claims, err := auth.VerifyJWT(s.authJWTSecret, bearer, time.Now().UTC())
+	if err != nil {
+		return auth.JWTClaims{}, false
+	}
+	return claims, true
+}
+
 func (s *CloudServer) isDashboardAdmin(r *http.Request) bool {
 	if s.auth == nil {
 		return false
 	}
+	// Static token path (first, backward compat): ENGRAM_CLOUD_TOKEN via cookie.
 	adminToken := strings.TrimSpace(s.dashboardAdmin)
-	if adminToken == "" {
-		return false
+	if adminToken != "" {
+		cookie, err := r.Cookie(dashboardSessionCookieName)
+		if err == nil {
+			token, err := s.dashboardBearerToken(cookie.Value)
+			if err == nil && hmac.Equal([]byte(token), []byte(adminToken)) {
+				return true
+			}
+		}
 	}
-	cookie, err := r.Cookie(dashboardSessionCookieName)
-	if err != nil {
-		return false
+	// JWT path: role:admin in verified JWT claims.
+	if claims, ok := s.dashboardPrincipal(r); ok {
+		if strings.EqualFold(strings.TrimSpace(claims.Role), "admin") {
+			return true
+		}
 	}
-	token, err := s.dashboardBearerToken(cookie.Value)
-	if err != nil {
-		return false
-	}
-	return hmac.Equal([]byte(token), []byte(adminToken))
+	return false
 }
 
 func (s *CloudServer) handlePullManifest(w http.ResponseWriter, r *http.Request) {

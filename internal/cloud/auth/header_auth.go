@@ -57,16 +57,18 @@ type AdminResolver interface {
 // enrollment.  It operates in two modes depending on whether jwtSecret is set:
 //
 // JWT mode (NewHeaderAuthenticatorWithJWT with non-empty jwtSecret):
-//   Used on /sync/* routes that Caddy routes directly to the cloud server,
-//   bypassing oauth2-proxy.  On this path X-Forwarded-Email is
-//   attacker-controlled and is COMPLETELY IGNORED.  Only a valid Bearer JWT
-//   (or the emergency bypass token) is accepted.
-//   Precedence: bypass → Bearer JWT → 401.
+//
+//	Used on /sync/* routes that Caddy routes directly to the cloud server,
+//	bypassing oauth2-proxy.  On this path X-Forwarded-Email is
+//	attacker-controlled and is COMPLETELY IGNORED.  Only a valid Bearer JWT
+//	(or the emergency bypass token) is accepted.
+//	Precedence: bypass → Bearer JWT → 401.
 //
 // Header mode (NewHeaderAuthenticator / NewHeaderAuthenticatorWithJWT with ""):
-//   Used on oauth2-proxy-protected routes where X-Forwarded-Email is
-//   trustworthy (injected by the proxy).  Bearer JWT is NOT checked.
-//   Precedence: bypass → X-Forwarded-Email → 401.
+//
+//	Used on oauth2-proxy-protected routes where X-Forwarded-Email is
+//	trustworthy (injected by the proxy).  Bearer JWT is NOT checked.
+//	Precedence: bypass → X-Forwarded-Email → 401.
 //
 // Design decisions implemented:
 //   - Principal is REQUEST-SCOPED via context (no shared mutable state — safe
@@ -81,8 +83,9 @@ type AdminResolver interface {
 //   - "general" is always injected into EnrolledProjects (design Q5).
 type HeaderAuthenticator struct {
 	loader      UserLoader
-	bypassToken string // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
-	jwtSecret   string // when non-empty, Bearer JWT tokens are accepted on /sync/*
+	bypassToken string           // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
+	jwtSecret   string           // when non-empty, Bearer JWT tokens are accepted on /sync/*
+	now         func() time.Time // injectable time seam for testing; nil means time.Now
 }
 
 // NewHeaderAuthenticator returns a HeaderAuthenticator backed by loader.

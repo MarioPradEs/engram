@@ -23,13 +23,13 @@ var ErrInvalidDashboardSessionToken = errors.New("invalid dashboard session toke
 var ErrProjectNotAllowed = errors.New("project is not allowed for this token")
 
 type Service struct {
-	store          *cloudstore.CloudStore
-	expectedToken  string
-	dashboardAuth  map[string]struct{}
-	allowed        map[string]struct{}
-	allowedAll     bool
-	jwtSecret      []byte
-	now            func() time.Time
+	store         *cloudstore.CloudStore
+	expectedToken string
+	dashboardAuth map[string]struct{}
+	allowed       map[string]struct{}
+	allowedAll    bool
+	jwtSecret     []byte
+	now           func() time.Time
 }
 
 type ProjectScopeAuthorizer struct {
@@ -56,6 +56,13 @@ type dashboardSessionClaims struct {
 	Iat       int64  `json:"iat"`
 }
 
+// serviceEnvelope returns the sessionEnvelope keyed by s.jwtSecret.
+// Used by MintDashboardSession / ParseDashboardSession to share the one
+// HMAC sign/verify code path with HeaderAuthenticator.
+func (s *Service) serviceEnvelope() sessionEnvelope {
+	return sessionEnvelope{secret: s.jwtSecret}
+}
+
 // MintDashboardSession returns a signed dashboard session token.
 // The token is opaque to clients and validated by ParseDashboardSession.
 func (s *Service) MintDashboardSession(bearerToken string) (string, error) {
@@ -73,29 +80,14 @@ func (s *Service) MintDashboardSession(bearerToken string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
-	signature := s.sign(payloadPart)
-	return payloadPart + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+	return s.serviceEnvelope().seal(payload), nil
 }
 
 // ParseDashboardSession verifies and decodes a signed dashboard session token.
 func (s *Service) ParseDashboardSession(sessionToken string) (string, error) {
-	sessionToken = strings.TrimSpace(sessionToken)
-	parts := strings.Split(sessionToken, ".")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", ErrInvalidDashboardSessionToken
-	}
-	expectedSig := s.sign(parts[0])
-	providedSig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := s.serviceEnvelope().open(sessionToken)
 	if err != nil {
-		return "", ErrInvalidDashboardSessionToken
-	}
-	if !hmac.Equal(expectedSig, providedSig) {
-		return "", ErrInvalidDashboardSessionToken
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return "", ErrInvalidDashboardSessionToken
+		return "", err
 	}
 	var claims dashboardSessionClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {

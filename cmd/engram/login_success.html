@@ -60,6 +60,15 @@
     .status{ color:var(--ok); font-size:.78rem; font-weight:700; letter-spacing:1.6px; text-transform:uppercase; margin-bottom:14px; }
     .title{ font-size:1.22rem; font-weight:600; }
     .subtitle{ margin-top:10px; color:var(--text-dim); font-size:.9rem; line-height:1.55; }
+    .btn{
+      display:inline-block; margin-top:22px;
+      background:var(--viva-orange); color:#000;
+      font-weight:700; font-size:.92rem;
+      text-decoration:none; border-radius:10px;
+      padding:11px 22px;
+      transition:filter .15s ease;
+    }
+    .btn:hover{ filter:brightness(1.08); }
   </style>
 </head>
 <body>
@@ -71,6 +80,8 @@
     <div class="status">Conectado</div>
     <div class="title">Bienvenido a Engram Cloud · Viva</div>
     <p class="subtitle">Tu sesión está activa.<br>Ya podés cerrar esta pestaña.</p>
+    <!-- canonical Viva dashboard URL — promote to ENGRAM_DASHBOARD_URL if a second deployment appears -->
+    <a class="btn" href="https://engram.vivastudios.com/dashboard">Ir al dashboard</a>
   </main>
 </body>
 </html>

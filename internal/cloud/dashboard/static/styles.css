@@ -1,20 +1,21 @@
-/* Engram Cloud Dashboard - TUI-aligned visual system on top of Pico CSS */
+/* Engram Cloud Dashboard - Viva palette override on top of Pico CSS */
 
 :root {
-	--engram-base: #191724;
-	--engram-surface: #1f1d2e;
-	--engram-surface-soft: rgba(31, 29, 46, 0.82);
-	--engram-overlay: #6e6a86;
-	--engram-text: #e0def4;
-	--engram-muted: #908caa;
-	--engram-primary: #c4a7e7;
-	--engram-primary-hover: #d4b8f2;
+	/* Viva brand palette — replaces Rosé Pine defaults */
+	--engram-base: #060607;
+	--engram-surface: #101012;
+	--engram-surface-soft: rgba(16, 16, 18, 0.82);
+	--engram-overlay: rgba(245, 130, 31, 0.22);
+	--engram-text: #ffffff;
+	--engram-muted: #9a9aa2;
+	--engram-primary: #f5821f;
+	--engram-primary-hover: #ff9a3d;
 	--engram-success: #9ccfd8;
 	--engram-warning: #f6c177;
 	--engram-danger: #eb6f92;
-	--engram-accent: #ebbcba;
+	--engram-accent: #f5821f;
 	--engram-blue: #31748f;
-	--engram-shadow: rgba(9, 8, 16, 0.5);
+	--engram-shadow: rgba(0, 0, 0, 0.6);
 	--engram-font-display: "Iosevka", "Iosevka Term", "Iosevka Fixed", "IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
 	--engram-font-body: "Iosevka Aile", "Iosevka Etoile", "Iosevka", "Inter", "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
 }
@@ -27,10 +28,10 @@
 	--pico-primary: var(--engram-primary);
 	--pico-primary-hover: var(--engram-primary-hover);
 	--pico-border-color: var(--engram-overlay);
-	--pico-form-element-background-color: rgba(25, 23, 36, 0.88);
-	--pico-form-element-border-color: rgba(110, 106, 134, 0.7);
+	--pico-form-element-background-color: rgba(16, 16, 18, 0.88);
+	--pico-form-element-border-color: rgba(245, 130, 31, 0.35);
 	--pico-form-element-color: var(--engram-text);
-	--pico-form-element-placeholder-color: rgba(144, 140, 170, 0.7);
+	--pico-form-element-placeholder-color: rgba(154, 154, 162, 0.7);
 	--pico-primary-background: var(--engram-primary);
 	--pico-primary-inverse: var(--engram-base);
 	--pico-secondary: var(--engram-blue);
@@ -47,10 +48,10 @@ body.shell-body {
 	font-family: var(--engram-font-body);
 	color: var(--engram-text);
 	background:
-		radial-gradient(circle at top left, rgba(196, 167, 231, 0.2), transparent 28%),
-		radial-gradient(circle at 85% 18%, rgba(49, 116, 143, 0.2), transparent 22%),
-		radial-gradient(circle at 18% 82%, rgba(156, 207, 216, 0.12), transparent 20%),
-		linear-gradient(180deg, #120f1c 0%, #171320 32%, #191724 100%);
+		radial-gradient(circle at top left, rgba(245, 130, 31, 0.14), transparent 28%),
+		radial-gradient(circle at 85% 18%, rgba(245, 130, 31, 0.07), transparent 22%),
+		radial-gradient(circle at 18% 82%, rgba(245, 130, 31, 0.07), transparent 20%),
+		linear-gradient(180deg, #060607 0%, #0b0b0d 60%, #060607 100%);
 	background-attachment: fixed;
 }
 

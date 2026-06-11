@@ -467,7 +467,7 @@ func TestBearerJWT_ExpiredToken_returns401(t *testing.T) {
 	t.Parallel()
 	ha := newTestHAWithBearer(t)
 	// Mint a token issued 8 days ago (exp = iat + 7d, so already expired).
-	expiredToken := mintTestJWT(t, "alice@vivastudios.com", "Alice", "dev", "admin", -(8*24*3600))
+	expiredToken := mintTestJWT(t, "alice@vivastudios.com", "Alice", "dev", "admin", -(8 * 24 * 3600))
 
 	req := httptest.NewRequest(http.MethodGet, "/sync/mutations/pull", nil)
 	req.Header.Set("Authorization", "Bearer "+expiredToken)

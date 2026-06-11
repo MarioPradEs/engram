@@ -127,7 +127,9 @@ func TestProjectScopeAuthorizerEnrolledProjects(t *testing.T) {
 			authorizer := NewProjectScopeAuthorizer(tc.input)
 
 			// Structural assertion matching cloudserver.EnrolledProjectsProvider.
-			var ep interface{ EnrolledProjects(context.Context) []string } = authorizer
+			var ep interface {
+				EnrolledProjects(context.Context) []string
+			} = authorizer
 			got := ep.EnrolledProjects(context.Background())
 			if got == nil {
 				t.Fatal("EnrolledProjects() returned nil; expected empty slice for fail-open-safe callers")
@@ -153,7 +155,9 @@ func TestServiceEnrolledProjects(t *testing.T) {
 	}
 	svc.SetAllowedProjects([]string{"engram", "GENTLE-AI", "engram"})
 
-	var ep interface{ EnrolledProjects(context.Context) []string } = svc
+	var ep interface {
+		EnrolledProjects(context.Context) []string
+	} = svc
 	got := ep.EnrolledProjects(context.Background())
 	want := []string{"engram", "gentle-ai"}
 	if len(got) != len(want) {

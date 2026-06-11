@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed" // embeds the Viva-branded login callback pages (login_*.html)
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/internal/cloud/remote"
 	"github.com/Gentleman-Programming/engram/internal/store"
+	"github.com/cli/browser"
 )
 
 // ─── Credential token errors ──────────────────────────────────────────────────
@@ -348,11 +350,11 @@ func doPostLoginPushFromStore(cloudURL, token string, s *store.Store) (int, erro
 
 // loginCommand implements the `engram login` flow with injectable seams.
 type loginCommand struct {
-	cfg      store.Config
+	cfg       store.Config
 	exchanger TokenExchanger
-	browser  BrowserOpener
-	clock    Clock
-	secret   string // JWT signing secret (from ENGRAM_JWT_SECRET or default)
+	browser   BrowserOpener
+	clock     Clock
+	secret    string // JWT signing secret (from ENGRAM_JWT_SECRET or default)
 }
 
 // Run executes the full login flow:
@@ -481,6 +483,29 @@ func (c *loginCommand) Run() error {
 	return nil
 }
 
+// ─── Loopback callback pages (Viva-branded, embedded at build time) ──────────
+
+//go:embed login_success.html
+var loginSuccessHTML string
+
+//go:embed login_error.html
+var loginErrorHTML string
+
+// writeLoginSuccessPage renders the branded "Conectado" page after the loopback
+// callback captures the token.
+func writeLoginSuccessPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(loginSuccessHTML))
+}
+
+// writeLoginErrorPage renders the branded error page (CSRF/state mismatch or
+// missing token) with the given HTTP status instead of plain text.
+func writeLoginErrorPage(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(loginErrorHTML))
+}
+
 // ─── Real loopback OAuth flow (Opción A: /auth → token-in-redirect) ──────────
 
 // loopbackAuthExchanger implements RawTokenExchanger using the RFC 8252 loopback
@@ -496,7 +521,7 @@ func (c *loginCommand) Run() error {
 //   - redirect_uri is always 127.0.0.1 (not user-controlled).
 //   - The server validates redirect_uri is a loopback address (open-redirect guard).
 type loopbackAuthExchanger struct {
-	cloudAuthURL string       // e.g. "https://engram.vivastudios.com/auth"
+	cloudAuthURL string // e.g. "https://engram.vivastudios.com/auth"
 	browser      BrowserOpener
 }
 
@@ -539,17 +564,17 @@ func (e *loopbackAuthExchanger) ExchangeWithToken() (string, auth.JWTClaims, err
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		receivedState := r.URL.Query().Get("state")
 		if receivedState != state {
+			writeLoginErrorPage(w, http.StatusBadRequest)
 			resultCh <- callbackResult{err: fmt.Errorf("loopback: state mismatch (csrf protection): got %q, want %q", receivedState, state)}
-			http.Error(w, "state mismatch", http.StatusBadRequest)
 			return
 		}
 		token := r.URL.Query().Get("token")
 		if token == "" {
+			writeLoginErrorPage(w, http.StatusBadRequest)
 			resultCh <- callbackResult{err: fmt.Errorf("loopback: callback missing token")}
-			http.Error(w, "missing token", http.StatusBadRequest)
 			return
 		}
-		_, _ = w.Write([]byte("<html><body>Login complete. You may close this tab.</body></html>"))
+		writeLoginSuccessPage(w)
 		resultCh <- callbackResult{token: token}
 	})
 
@@ -693,13 +718,13 @@ func cmdLogin(cfg store.Config) {
 	cloudBase := cloudBaseURLFn(cfg)
 	authURL := cloudBase + "/auth"
 
-	browser := &noopBrowserOpener{}
-	exchanger := newLoopbackAuthExchanger(authURL, browser)
+	opener := &realBrowserOpener{}
+	exchanger := newLoopbackAuthExchanger(authURL, opener)
 
 	runner := &loginCommand{
 		cfg:       cfg,
 		exchanger: exchanger,
-		browser:   browser,
+		browser:   opener,
 		clock:     realClock{},
 		// secret is not used when loopbackAuthExchanger returns a server-minted token.
 		secret: strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET")),
@@ -709,10 +734,16 @@ func cmdLogin(cfg store.Config) {
 	}
 }
 
-// noopBrowserOpener prints the URL when it cannot open a browser automatically.
-type noopBrowserOpener struct{}
+// realBrowserOpener opens URLs in the operating system's default browser via
+// github.com/cli/browser, which handles the platform-specific launch (rundll32
+// on Windows, open on macOS, xdg-open on Linux) and the query-string escaping
+// that a hand-rolled exec would get wrong. It prints the URL first so the user
+// can still copy it when the automatic launch is suppressed (headless or
+// locked-down environments); if OpenURL fails, the caller prints an explicit
+// fallback message (see loopbackAuthExchanger.ExchangeWithToken).
+type realBrowserOpener struct{}
 
-func (n *noopBrowserOpener) Open(openURL string) error {
-	fmt.Printf("Open this URL in your browser:\n  %s\n", openURL)
-	return nil
+func (realBrowserOpener) Open(openURL string) error {
+	fmt.Printf("Opening your browser to sign in...\n  %s\n", openURL)
+	return browser.OpenURL(openURL)
 }

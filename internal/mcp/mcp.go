@@ -378,6 +378,12 @@ Examples:
 				mcp.WithString("observation",
 					mcp.Description("Backward-compatible alias for content. Prefer content for new clients."),
 				),
+				mcp.WithString("juego",
+					mcp.Description("Game identifier. Must match a name from the controlled vocabulary injected by the server. Omit if no clear match."),
+				),
+				mcp.WithString("tipo",
+					mcp.Description("Content type inferred from the observation (e.g. bug, decision, hallazgo, solución). Free inference."),
+				),
 				mcp.WithString("type",
 					mcp.Description("Category: decision, architecture, bugfix, pattern, config, discovery, learning (default: manual)"),
 				),
@@ -1175,6 +1181,14 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		truncated := len(content) > s.MaxObservationLength()
 
+		// Build validated tags from optional juego/tipo args.
+		// The games vocabulary comes from the typed ClassRules config when available.
+		var gamesVocab []string
+		if cfg.ClassRules != nil {
+			gamesVocab = cfg.ClassRules.Games
+		}
+		tags := buildTagsFromArgs(req.GetArguments(), gamesVocab)
+
 		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      typ,
@@ -1183,6 +1197,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			Project:   project,
 			Scope:     scope,
 			TopicKey:  topicKey,
+			Tags:      tags,
 		})
 		if err != nil {
 			return mcp.NewToolResultError("Failed to save: " + err.Error()), nil
@@ -2783,4 +2798,38 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+// buildTagsFromArgs constructs the tags map from the mem_save handler arguments
+// applying the knowledge-tags vocabulary validation rules:
+//
+//   - juego: included only if present AND non-empty AND a member of vocab
+//     (case-insensitive). Dropped silently if not a member or vocab is empty.
+//   - tipo: included as-is if present and non-empty (free inference, no validation).
+//   - departamento / proyecto: NEVER set here — identity-derived server-side.
+//
+// Returns nil (not an empty map) when no facet is set, satisfying the
+// omitempty nil-vs-empty rule (RD4) so legacy observations serialize without
+// a tags key.
+func buildTagsFromArgs(args map[string]any, vocab []string) map[string]string {
+	tags := map[string]string{}
+
+	if juego, _ := args["juego"].(string); strings.TrimSpace(juego) != "" {
+		j := strings.TrimSpace(juego)
+		for _, v := range vocab {
+			if strings.EqualFold(v, j) {
+				tags["juego"] = v // use canonical casing from vocab
+				break
+			}
+		}
+	}
+
+	if tipo, _ := args["tipo"].(string); strings.TrimSpace(tipo) != "" {
+		tags["tipo"] = strings.TrimSpace(tipo)
+	}
+
+	if len(tags) == 0 {
+		return nil
+	}
+	return tags
 }

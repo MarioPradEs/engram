@@ -67,6 +67,17 @@ type MCPConfig struct {
 	// classrules.LoadFromFile; see internal/cloud/classrules for the schema.
 	// When empty, the base instructions are used unchanged (graceful absent).
 	ClassificationRulesText string
+
+	// ClassRules is the full typed classification config. When set, it is used
+	// by buildServerInstructions to render both scope-classification rules and
+	// the four-facet memory tagging guidance (Games vocabulary + juego/tipo
+	// instructions). ClassRules takes precedence over ClassificationRulesText
+	// when both are set.
+	//
+	// Set this field alongside ClassificationRulesText from the loaded
+	// classrules.Config so the Games vocabulary is available both for
+	// instruction rendering and for mem_save juego validation.
+	ClassRules *classrules.Config
 }
 
 var suggestTopicKey = store.SuggestTopicKey
@@ -238,6 +249,13 @@ IF judgment_required IS TRUE:
 // The classrules package owns the BuildInstructions logic; this function
 // translates MCPConfig into the classrules.Config needed by that API.
 func buildServerInstructions(cfg MCPConfig) string {
+	// Prefer the full typed config (ClassRules) when available — it carries both
+	// the free-form Rules text AND the structured Games vocabulary needed to render
+	// the four-facet tagging guidance. Fall back to the legacy string-only path for
+	// callers that only set ClassificationRulesText.
+	if cfg.ClassRules != nil {
+		return classrules.BuildInstructions(serverInstructions, cfg.ClassRules)
+	}
 	if cfg.ClassificationRulesText == "" {
 		return serverInstructions
 	}

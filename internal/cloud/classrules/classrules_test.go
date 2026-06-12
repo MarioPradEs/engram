@@ -172,6 +172,86 @@ func TestBuildInstructions_EmptyRules(t *testing.T) {
 	}
 }
 
+// TestBuildInstructionsTagging verifies that BuildInstructions renders the games
+// vocabulary and four-facet tagging guidance when Games is non-empty, and omits
+// the juego instructions when Games is empty or nil.
+func TestBuildInstructionsTagging(t *testing.T) {
+	base := "Base MCP instructions here."
+
+	tests := []struct {
+		name             string
+		cfg              *classrules.Config
+		wantContains     []string
+		wantNotContains  []string
+	}{
+		{
+			name: "non-empty Games renders vocab and four-facet guidance",
+			cfg: &classrules.Config{
+				Games: []string{"game-a", "game-b"},
+				Rules: "existing rules text",
+			},
+			wantContains: []string{
+				"game-a",
+				"game-b",
+				"Allowed games",
+				"juego",
+				"tipo",
+				"departamento",
+				"proyecto",
+				"do NOT supply",
+				"existing rules text",
+				base,
+			},
+			wantNotContains: []string{
+				"do not set juego",
+			},
+		},
+		{
+			name: "empty Games omits Allowed games and disables juego",
+			cfg: &classrules.Config{
+				Games: []string{},
+			},
+			wantContains: []string{
+				base,
+				"do not set juego",
+			},
+			wantNotContains: []string{
+				"Allowed games",
+			},
+		},
+		{
+			name: "nil Games (no tagging configured) — base unchanged, no tagging block",
+			cfg: &classrules.Config{
+				Games: nil,
+			},
+			wantContains: []string{
+				base,
+			},
+			wantNotContains: []string{
+				"Allowed games",
+				"do not set juego",
+				"Memory Tagging Rules",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := classrules.BuildInstructions(base, tt.cfg)
+			for _, want := range tt.wantContains {
+				if !contains(result, want) {
+					t.Errorf("result must contain %q\nfull result:\n%s", want, result)
+				}
+			}
+			for _, notWant := range tt.wantNotContains {
+				if contains(result, notWant) {
+					t.Errorf("result must NOT contain %q\nfull result:\n%s", notWant, result)
+				}
+			}
+		})
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
 		func() bool {

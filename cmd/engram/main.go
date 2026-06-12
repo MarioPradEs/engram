@@ -923,7 +923,12 @@ func cmdMCP(cfg store.Config) {
 	if rulesPath := strings.TrimSpace(os.Getenv("ENGRAM_CLASSIFICATION_RULES")); rulesPath != "" {
 		if ruleCfg, err := classrules.LoadFromFile(rulesPath); err != nil {
 			log.Printf("[mcp] classification-rules: %v (continuing without injection)", err)
-		} else if ruleCfg != nil && ruleCfg.Rules != "" {
+		} else if ruleCfg != nil {
+			// Carry the full typed config so Games vocabulary is available for both
+			// instruction rendering (BuildInstructions) and mem_save juego validation.
+			mcpCfg.ClassRules = ruleCfg
+			// Keep ClassificationRulesText populated for any callers that read it
+			// directly (backward compatibility).
 			mcpCfg.ClassificationRulesText = ruleCfg.Rules
 		}
 	}

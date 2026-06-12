@@ -165,6 +165,75 @@ func TestStampAttributionScopeOrthogonality(t *testing.T) {
 	}
 }
 
+// TestMergeIdentityTagsIntoPayloadMapRD4 verifies RD4: a payload that arrives
+// with an empty "tags":{} object and NO identity facets (empty department +
+// empty project) must have the "tags" key DELETED, not left as an empty object.
+//
+// This tests the cloud trust boundary: the server must not persist an empty
+// tags:{} in JSONB when the client sent one and identity provides nothing to
+// merge in (legacy-absence contract).
+func TestMergeIdentityTagsIntoPayloadMapRD4(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputTags  map[string]interface{} // pre-existing tags in payload (may be empty map)
+		department string
+		project    string
+		wantAbsent bool // if true, the "tags" key must not exist in the output map at all
+	}{
+		{
+			name:       "empty tags object + empty identity → tags key must be deleted (RD4)",
+			inputTags:  map[string]interface{}{}, // client sent tags:{}
+			department: "",
+			project:    "",
+			wantAbsent: true,
+		},
+		{
+			name:       "empty tags object + only department → tags key present with departamento",
+			inputTags:  map[string]interface{}{},
+			department: "qa",
+			project:    "",
+			wantAbsent: false,
+		},
+		{
+			name:       "no tags key + empty identity → tags key remains absent",
+			inputTags:  nil, // no tags key at all
+			department: "",
+			project:    "",
+			wantAbsent: true,
+		},
+		{
+			name:       "tags with AI facets + empty identity → tags key preserved (AI facets kept)",
+			inputTags:  map[string]interface{}{"juego": "game-a", "tipo": "decision"},
+			department: "",
+			project:    "",
+			wantAbsent: false, // juego+tipo must survive even with no identity
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build the map directly to test mergeIdentityTagsIntoPayloadMap.
+			m := map[string]interface{}{
+				"sync_id": "test-1",
+				"content": "test",
+			}
+			if tt.inputTags != nil {
+				m["tags"] = tt.inputTags
+			}
+
+			mergeIdentityTagsIntoPayloadMap(m, tt.department, tt.project)
+
+			_, hasTags := m["tags"]
+			if tt.wantAbsent && hasTags {
+				t.Errorf("expected tags key to be absent after merge with empty identity, but it still exists: %v", m["tags"])
+			}
+			if !tt.wantAbsent && !hasTags {
+				t.Errorf("expected tags key to be present, but it was absent")
+			}
+		})
+	}
+}
+
 // TestChunkAttributionTagsParity verifies that applyChunkAttributionAndGateB
 // applies the same identity tag stamp as stampAttributionIntoEntry (RD3 parity).
 func TestChunkAttributionTagsParity(t *testing.T) {

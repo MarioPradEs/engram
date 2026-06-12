@@ -1050,10 +1050,15 @@ func mergeIdentityTagsIntoPayloadMap(m map[string]interface{}, department, proje
 		delete(tags, "proyecto")
 	}
 
-	// Only set tags on the map when there is at least one facet to write.
-	// This avoids creating an empty tags object on payloads with no identity.
+	// Only keep the tags key when there is at least one facet to write.
+	// If empty, delete any pre-existing tags key (including a client-supplied
+	// empty tags:{}) so the JSONB column never stores an empty object.
+	// This satisfies RD4 at the cloud trust boundary: absence is the correct
+	// representation when no facets are present.
 	if len(tags) > 0 {
 		m["tags"] = tags
+	} else {
+		delete(m, "tags")
 	}
 }
 

@@ -108,6 +108,11 @@ type Observation struct {
 	Department     string `json:"department,omitempty"`
 	UserDeleted    bool   `json:"user_deleted,omitempty"`
 	ClassifiedByV2 bool   `json:"classified_by_v2,omitempty"`
+	// Tags is the four-facet knowledge tag set (knowledge-tags-foundation).
+	// It lives exclusively in the JSONB payload — no SQL column.
+	// omitempty omits the key when nil; callers must set nil (not empty map) for
+	// untagged observations so legacy serialization stays key-absent (RD4).
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 type SearchResult struct {
@@ -174,6 +179,10 @@ type AddObservationParams struct {
 	Project   string `json:"project,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	TopicKey  string `json:"topic_key,omitempty"`
+	// Tags carries the four-facet knowledge tags (knowledge-tags-foundation).
+	// Nil means untagged. Must be nil (not empty map) to avoid "tags" key
+	// appearing in the serialized payload for untagged observations (RD4).
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 type UpdateObservationParams struct {
@@ -380,6 +389,9 @@ type syncObservationPayload struct {
 	Department     string `json:"department,omitempty"`
 	UserDeleted    bool   `json:"user_deleted,omitempty"`
 	ClassifiedByV2 bool   `json:"classified_by_v2,omitempty"`
+	// Tags is the four-facet knowledge tag set (knowledge-tags-foundation).
+	// Nil/absent means untagged. omitempty omits the key on nil maps (RD4).
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 type syncPromptPayload struct {
@@ -2354,6 +2366,13 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 	normHash := hashNormalized(content)
 	topicKey := normalizeTopicKey(p.TopicKey)
 
+	// Normalize tags: an empty non-nil map must be reset to nil so that
+	// untagged observations serialize without a "tags" key (RD4).
+	tags := p.Tags
+	if len(tags) == 0 {
+		tags = nil
+	}
+
 	var observationID int64
 	err := s.withTx(func(tx *sql.Tx) error {
 		var obs *Observation
@@ -2396,6 +2415,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				if err != nil {
 					return err
 				}
+				// Tags are not stored in the SQL row; carry them from params
+				// so they reach the sync payload (knowledge-tags-foundation WU1).
+				obs.Tags = tags
 				observationID = existingID
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 			}
@@ -2434,6 +2456,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			if err != nil {
 				return err
 			}
+			// Tags are not stored in the SQL row; carry them from params
+			// so they reach the sync payload (knowledge-tags-foundation WU1).
+			obs.Tags = tags
 			observationID = existingID
 			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 		}
@@ -2473,6 +2498,9 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 		if err != nil {
 			return err
 		}
+		// Tags are not stored in the SQL row; carry them from params
+		// so they reach the sync payload (knowledge-tags-foundation WU1).
+		obs.Tags = tags
 		return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 	})
 	if err != nil {
@@ -5657,6 +5685,7 @@ func observationPayloadFromObservation(obs *Observation) syncObservationPayload 
 		Department:     obs.Department,
 		UserDeleted:    obs.UserDeleted,
 		ClassifiedByV2: obs.ClassifiedByV2,
+		Tags:           obs.Tags,
 	}
 }
 

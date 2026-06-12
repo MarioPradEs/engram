@@ -1010,6 +1010,58 @@ func extractScopeFromPayload(payload json.RawMessage) string {
 
 // stampAttributionIntoEntry returns a copy of entry with attribution fields
 // merged into the JSONB payload. Used for non-personal observation entries.
+// mergeIdentityTagsIntoPayloadMap stamps the server-authoritative tag facets
+// (departamento from JWT, proyecto from workspace) into the payload map m.
+//
+// Authority rules (design §C, §3):
+//   - tags.departamento = department (JWT — AUTHORITATIVE, overwrites any client value)
+//   - tags.proyecto     = project    (workspace — AUTHORITATIVE, overwrites any client value)
+//   - tags.juego / tags.tipo are LEFT UNTOUCHED (client/AI-owned)
+//
+// When department is empty, departamento is OMITTED rather than written as ""
+// (partial tagging — absence is valid, no placeholder).
+// When project is empty, proyecto is also omitted.
+//
+// This helper is shared by stampAttributionIntoEntry (mutation push path) and
+// applyChunkAttributionAndGateB (chunk push path) to guarantee RD3 parity —
+// both paths apply the identical stamp; neither can diverge.
+func mergeIdentityTagsIntoPayloadMap(m map[string]interface{}, department, project string) {
+	// Retrieve or create the tags sub-object.
+	var tags map[string]interface{}
+	if existing, ok := m["tags"]; ok && existing != nil {
+		if t, ok := existing.(map[string]interface{}); ok {
+			tags = t
+		}
+	}
+	if tags == nil {
+		tags = map[string]interface{}{}
+	}
+
+	// Stamp identity facets authoritatively (overwrites any client-supplied value).
+	if department != "" {
+		tags["departamento"] = department
+	} else {
+		// Ensure no empty-string placeholder survives (partial tagging: absent = valid).
+		delete(tags, "departamento")
+	}
+	if project != "" {
+		tags["proyecto"] = project
+	} else {
+		delete(tags, "proyecto")
+	}
+
+	// Only keep the tags key when there is at least one facet to write.
+	// If empty, delete any pre-existing tags key (including a client-supplied
+	// empty tags:{}) so the JSONB column never stores an empty object.
+	// This satisfies RD4 at the cloud trust boundary: absence is the correct
+	// representation when no facets are present.
+	if len(tags) > 0 {
+		m["tags"] = tags
+	} else {
+		delete(m, "tags")
+	}
+}
+
 func stampAttributionIntoEntry(entry MutationEntry, attr Attribution) MutationEntry {
 	if attr.UserEmail == "" {
 		return entry
@@ -1026,6 +1078,11 @@ func stampAttributionIntoEntry(entry MutationEntry, attr Attribution) MutationEn
 	m["user_name"] = attr.UserName
 	m["department"] = attr.Department
 	m["user_deleted"] = attr.UserDeleted
+
+	// Stamp authoritative identity tag facets (departamento from JWT, proyecto
+	// from entry.Project). AI-owned facets (juego, tipo) are untouched.
+	mergeIdentityTagsIntoPayloadMap(m, attr.Department, strings.TrimSpace(entry.Project))
+
 	stamped, err := json.Marshal(m)
 	if err != nil {
 		return entry

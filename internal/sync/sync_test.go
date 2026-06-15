@@ -1533,6 +1533,11 @@ func TestCloudExportKnownChunkReconcileFailureDoesNotAckMutations(t *testing.T) 
 		t.Fatal("expected pending mutation seqs")
 	}
 
+	// local-only entity filter: production strips sessions and prompts from cloud
+	// chunks before serialising; replicate that here so the chunk ID matches.
+	chunk.Sessions = nil
+	chunk.Prompts = nil
+
 	chunkJSON, err := json.Marshal(chunk)
 	if err != nil {
 		t.Fatalf("marshal chunk: %v", err)
@@ -1711,9 +1716,19 @@ func TestCloudImportAppliesMutationReconciliationForUpdatesAndDeletes(t *testing
 }
 
 func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
+	// Verify that ApplyPulledChunk is atomic: a chunk with one valid observation
+	// mutation followed by an undecodable observation payload must roll back the
+	// entire chunk — the first observation must not be persisted and the chunk
+	// must not be marked as synced.
+	//
+	// Note: a missing session_id FK is NOT an unrecoverable error (the import
+	// path synthesises a stub session), so we use an unparseable payload instead.
 	dst := newTestStore(t)
 	if err := dst.EnrollProject("proj-a"); err != nil {
 		t.Fatalf("enroll destination project: %v", err)
+	}
+	if err := dst.CreateSession("sess-atomic", "proj-a", "/tmp/atomic"); err != nil {
+		t.Fatalf("create session: %v", err)
 	}
 
 	transport := newFakeCloudTransport()
@@ -1722,16 +1737,19 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 
 	badChunk := ChunkData{Mutations: []store.SyncMutation{
 		{
-			Entity:    store.SyncEntitySession,
-			EntityKey: "remote-sess",
+			// First mutation: valid observation — will be rolled back if the chunk fails.
+			Entity:    store.SyncEntityObservation,
+			EntityKey: "obs-good",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"id":"remote-sess","project":"proj-a","directory":"/remote"}`,
+			Payload:   `{"sync_id":"obs-good","session_id":"sess-atomic","type":"note","title":"good","content":"valid","project":"proj-a","scope":"project"}`,
 		},
 		{
+			// Second mutation: undecodable payload — causes a hard failure that
+			// cannot be recovered (unlike a missing session FK, which is stubbed).
 			Entity:    store.SyncEntityObservation,
 			EntityKey: "obs-bad",
 			Op:        store.SyncOpUpsert,
-			Payload:   `{"sync_id":"obs-bad","session_id":"missing-session","type":"note","title":"bad","content":"fails fk","project":"proj-a","scope":"project"}`,
+			Payload:   `not-valid-json`,
 		},
 	}}
 	badPayload, err := json.Marshal(badChunk)
@@ -1742,11 +1760,12 @@ func TestCloudImportChunkApplyIsAtomicOnFailure(t *testing.T) {
 
 	importer := NewCloudWithTransport(dst, transport, "proj-a")
 	if _, err := importer.Import(); err == nil {
-		t.Fatal("expected cloud import failure for invalid mutation chunk")
+		t.Fatal("expected cloud import failure for chunk with undecodable mutation")
 	}
 
-	if _, err := dst.GetSession("remote-sess"); err == nil {
-		t.Fatal("expected remote session mutation to be rolled back after failed chunk import")
+	// The first (valid) observation must have been rolled back.
+	if obs, err := dst.GetObservationBySyncID("obs-good"); err == nil {
+		t.Fatalf("expected obs-good to be rolled back after failed chunk import, got %+v", obs)
 	}
 	synced, err := dst.GetSyncedChunks()
 	if err != nil {

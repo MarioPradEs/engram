@@ -391,6 +391,14 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		if err != nil {
 			return nil, fmt.Errorf("build mutation-backed export: %w", err)
 		}
+		// local-only entity filter (prompts/sessions are never exported to cloud):
+		// strip sessions and prompts from the chunk before it reaches the cloud
+		// transport. filterByPendingMutations uses data.Sessions as a lookup table
+		// (to resolve project membership) but must not carry them into the payload.
+		// Observations reference session_id; the import side recovers missing
+		// session dependencies via recoverLocalMissingSessionDependencies.
+		chunk.Sessions = nil
+		chunk.Prompts = nil
 	} else {
 		// Get the timestamp of the last chunk to filter "new" data
 		lastChunkTime := sy.lastChunkTime(manifest)
@@ -573,7 +581,12 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 			}
 
 			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
-				if mode == importModeLocal {
+				// Recovery applies to both local and cloud modes. Cloud chunks
+				// never carry sessions (local-only entity filter), so observation
+				// mutations may reference session IDs that do not yet exist in the
+				// destination. recoverLocalMissingSessionDependencies creates
+				// synthetic stub sessions to satisfy the FK constraint.
+				if mode == importModeLocal || mode == importModeCloud {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)
 					if recoveryErr != nil {
 						return nil, recoveryErr

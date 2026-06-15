@@ -3363,6 +3363,10 @@ func (s *Store) Export() (*ExportData, error) {
 // ExportProject returns an export restricted to records relevant to a single
 // normalized project. This avoids full-database exports when only one project
 // needs to sync.
+//
+// This is the LOCAL full-export path (e.g. /export HTTP handler, local backup).
+// It includes sessions and prompts. For the cloud chunk-export path use
+// ExportProjectForCloud, which strips sessions and prompts (local-only entities).
 func (s *Store) ExportProject(project string) (*ExportData, error) {
 	normalizedProject, _ := NormalizeProject(project)
 	normalizedProject = strings.TrimSpace(normalizedProject)
@@ -3370,6 +3374,29 @@ func (s *Store) ExportProject(project string) (*ExportData, error) {
 		return nil, fmt.Errorf("project is required")
 	}
 	return s.exportWithProjectScope(normalizedProject)
+}
+
+// ExportProjectForCloud returns an export restricted to a single project for
+// the cloud chunk-export path (engram sync --cloud). It strips sessions and
+// prompts from the payload before the chunk is built.
+//
+// local-only entity filter (prompts/sessions are never exported to cloud):
+// the shared team brain holds ONLY observations (+ relations). Sessions are
+// local runtime context; prompts are raw user input — both stay local-only.
+// This closes the chunk/snapshot gap: ExportProject (used by the local /export
+// handler) still includes sessions+prompts for backup purposes; only this
+// cloud-scoped variant enforces the strip.
+func (s *Store) ExportProjectForCloud(project string) (*ExportData, error) {
+	data, err := s.ExportProject(project)
+	if err != nil {
+		return nil, err
+	}
+	// local-only entity filter: strip sessions and prompts before the chunk
+	// reaches the cloud transport. Observations are the only entity type that
+	// the shared team brain should receive.
+	data.Sessions = nil
+	data.Prompts = nil
+	return data, nil
 }
 
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {

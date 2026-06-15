@@ -6,6 +6,153 @@ import (
 	"time"
 )
 
+// ─── Chunk/snapshot cloud-export gate (ExportProjectForCloud) ─────────────────
+//
+// Gate C: the cloud snapshot export path (ExportProjectForCloud) must strip
+// sessions and prompts from the exported payload. The shared team brain holds
+// ONLY observations (+ relations). Sessions are local runtime context;
+// prompts are raw user input — both are local-only by company policy.
+
+// TestChunkExportGateCloudExportStripsSessionsAndPrompts verifies that
+// ExportProjectForCloud returns Sessions=0 and Prompts=0 even when the project
+// has sessions and prompts, and that all non-deleted observations are included.
+func TestChunkExportGateCloudExportStripsSessionsAndPrompts(t *testing.T) {
+	s := newTestStore(t)
+
+	proj := "cloud-gate-proj"
+	if err := s.CreateSession("cloud-gate-sess", proj, "/tmp/cloud-gate"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "cloud-gate-sess",
+		Type:      "decision",
+		Title:     "cloud gate obs",
+		Content:   "observations must pass through",
+		Project:   proj,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "cloud-gate-sess",
+		Content:   "user prompt — local-only",
+		Project:   proj,
+	}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+
+	data, err := s.ExportProjectForCloud(proj)
+	if err != nil {
+		t.Fatalf("ExportProjectForCloud: %v", err)
+	}
+
+	// Gate C: sessions must be stripped.
+	if len(data.Sessions) != 0 {
+		t.Errorf("chunk-export gate: ExportProjectForCloud must return 0 sessions, got %d — sessions are local-only", len(data.Sessions))
+	}
+	// Gate C: prompts must be stripped.
+	if len(data.Prompts) != 0 {
+		t.Errorf("chunk-export gate: ExportProjectForCloud must return 0 prompts, got %d — prompts are local-only", len(data.Prompts))
+	}
+	// Observations must pass through.
+	if len(data.Observations) != 1 {
+		t.Errorf("chunk-export gate: expected 1 observation, got %d — observations must not be stripped", len(data.Observations))
+	}
+}
+
+// TestChunkExportGateLocalExportPreservesSessionsAndPrompts verifies that the
+// local full-export path (ExportProject, used by the /export HTTP handler) still
+// includes sessions and prompts. This is the regression guard.
+func TestChunkExportGateLocalExportPreservesSessionsAndPrompts(t *testing.T) {
+	s := newTestStore(t)
+
+	proj := "local-gate-proj"
+	if err := s.CreateSession("local-gate-sess", proj, "/tmp/local-gate"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "local-gate-sess",
+		Type:      "note",
+		Title:     "local export obs",
+		Content:   "local export must include everything",
+		Project:   proj,
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "local-gate-sess",
+		Content:   "user prompt — must be in local export",
+		Project:   proj,
+	}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+
+	data, err := s.ExportProject(proj)
+	if err != nil {
+		t.Fatalf("ExportProject: %v", err)
+	}
+
+	// Regression guard: local export must still include sessions.
+	if len(data.Sessions) == 0 {
+		t.Error("local-export regression: ExportProject must include sessions but returned 0")
+	}
+	// Regression guard: local export must still include prompts.
+	if len(data.Prompts) == 0 {
+		t.Error("local-export regression: ExportProject must include prompts but returned 0")
+	}
+	if len(data.Observations) == 0 {
+		t.Error("local-export regression: ExportProject must include observations but returned 0")
+	}
+}
+
+// TestChunkExportGateCloudExportMultipleObservations verifies that all
+// non-deleted observations for the project are returned by ExportProjectForCloud,
+// even when sessions and prompts exist alongside them.
+func TestChunkExportGateCloudExportMultipleObservations(t *testing.T) {
+	s := newTestStore(t)
+
+	proj := "cloud-multi-obs-proj"
+	if err := s.CreateSession("cloud-multi-sess", proj, "/tmp/cloud-multi"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "cloud-multi-sess",
+			Type:      "manual",
+			Title:     "obs",
+			Content:   "content",
+			Project:   proj,
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("AddObservation %d: %v", i, err)
+		}
+	}
+	if _, err := s.AddPrompt(AddPromptParams{
+		SessionID: "cloud-multi-sess",
+		Content:   "prompt",
+		Project:   proj,
+	}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+
+	data, err := s.ExportProjectForCloud(proj)
+	if err != nil {
+		t.Fatalf("ExportProjectForCloud: %v", err)
+	}
+
+	if len(data.Sessions) != 0 {
+		t.Errorf("cloud export gate: expected 0 sessions, got %d", len(data.Sessions))
+	}
+	if len(data.Prompts) != 0 {
+		t.Errorf("cloud export gate: expected 0 prompts, got %d", len(data.Prompts))
+	}
+	// Dedupe may collapse identical observations, so we just need at least 1.
+	if len(data.Observations) == 0 {
+		t.Error("cloud export gate: expected observations to be present, got 0")
+	}
+}
+
 // TestLocalOnlyEntityFilterPromptNotExportedToCloud verifies that the
 // local-only entity filter (prompts/sessions are never exported to cloud)
 // prevents prompt mutations from being returned by ListPendingSyncMutations

@@ -1,0 +1,165 @@
+/* Engram Triage — local-only UI styles */
+
+:root {
+	--triage-base: #0d0d0f;
+	--triage-surface: #16161a;
+	--triage-text: #ededf0;
+	--triage-muted: #888896;
+	--triage-primary: #f5821f;
+	--triage-success: #3dd68c;
+	--triage-warning: #f6c177;
+	--triage-danger: #eb6f92;
+}
+
+[data-theme="dark"] {
+	--pico-background-color: var(--triage-base);
+	--pico-card-background-color: var(--triage-surface);
+	--pico-color: var(--triage-text);
+	--pico-muted-color: var(--triage-muted);
+	--pico-primary: var(--triage-primary);
+}
+
+body {
+	font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
+.triage-header {
+	border-bottom: 1px solid rgba(245, 130, 31, 0.2);
+	padding: 1rem 0;
+	margin-bottom: 1.5rem;
+}
+
+.triage-header h1 {
+	font-size: 1.4rem;
+	margin: 0;
+	color: var(--triage-primary);
+}
+
+.triage-subtitle {
+	font-size: 0.75rem;
+	color: var(--triage-muted);
+	margin: 0.25rem 0 0;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+/* Project card grid */
+.project-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+	gap: 1rem;
+	margin-top: 1rem;
+}
+
+.project-card {
+	border: 1px solid rgba(245, 130, 31, 0.15);
+	border-radius: 6px;
+	padding: 1rem;
+	text-decoration: none;
+	color: inherit;
+	display: block;
+	transition: border-color 0.15s;
+}
+
+.project-card:hover {
+	border-color: rgba(245, 130, 31, 0.5);
+	text-decoration: none;
+}
+
+.project-card h3 {
+	margin: 0 0 0.5rem;
+	font-size: 1rem;
+}
+
+.project-meta {
+	font-size: 0.8rem;
+	color: var(--triage-muted);
+	margin: 0.25rem 0 0;
+}
+
+/* Scope badges */
+.badge {
+	display: inline-block;
+	padding: 0.15em 0.5em;
+	border-radius: 3px;
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	margin-left: 0.4rem;
+}
+
+.badge-shared {
+	background: rgba(61, 214, 140, 0.15);
+	color: var(--triage-success);
+}
+
+.badge-personal {
+	background: rgba(135, 135, 160, 0.15);
+	color: var(--triage-muted);
+}
+
+.badge-triage {
+	background: rgba(246, 193, 119, 0.15);
+	color: var(--triage-warning);
+}
+
+.badge-default {
+	background: rgba(245, 130, 31, 0.12);
+	color: var(--triage-primary);
+	font-size: 0.65rem;
+	font-weight: 400;
+	margin-left: 0.3rem;
+}
+
+/* Observation list */
+.obs-list {
+	margin-top: 1rem;
+}
+
+.obs-row {
+	display: flex;
+	align-items: baseline;
+	gap: 0.5rem;
+	padding: 0.5rem 0;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.obs-title {
+	flex: 1;
+	font-size: 0.9rem;
+}
+
+.obs-meta {
+	font-size: 0.75rem;
+	color: var(--triage-muted);
+}
+
+/* Back link */
+.back-link {
+	font-size: 0.8rem;
+	color: var(--triage-muted);
+	text-decoration: none;
+	margin-bottom: 1rem;
+	display: inline-block;
+}
+
+.back-link:hover {
+	color: var(--triage-primary);
+}
+
+/* Warning notice */
+.triage-warning-notice {
+	background: rgba(246, 193, 119, 0.08);
+	border-left: 3px solid var(--triage-warning);
+	padding: 0.75rem 1rem;
+	margin: 1rem 0;
+	font-size: 0.8rem;
+	color: var(--triage-warning);
+}
+
+.empty-state {
+	color: var(--triage-muted);
+	font-size: 0.9rem;
+	margin: 2rem 0;
+}

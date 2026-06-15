@@ -16,6 +16,7 @@ package triage
 
 import (
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -43,29 +44,64 @@ type BrowserOpener func(url string) error
 // Server is the local triage HTTP server. It owns its own ServeMux and is
 // independent of internal/server.Server (the main Engram API daemon).
 type Server struct {
-	store   *store.Store
-	port    int
-	mux     *http.ServeMux
-	listen  func(network, address string) (net.Listener, error)
-	ln      net.Listener // pre-injected listener (for tests); overrides listen
-	browser BrowserOpener
+	store       *store.Store
+	triageStore TriageStore // narrow interface; set by NewWithStore or derived from store
+	port        int
+	mux         *http.ServeMux
+	listen      func(network, address string) (net.Listener, error)
+	ln          net.Listener // pre-injected listener (for tests); overrides listen
+	browser     BrowserOpener
+	cwdDir      string // filesystem path of the project directory at launch (for ResolveDefaultScope)
+	cwdProject  string // project name matching cwdDir (Option A: cwd-only default badge)
 }
 
-// New creates a triage Server. When port is 0 and no listener is pre-injected,
-// Start will attempt to bind to DefaultPort.
+// New creates a triage Server backed by a real *store.Store.
+// When port is 0 and no listener is pre-injected, Start will attempt to bind to DefaultPort.
 // s may be nil in unit tests that only exercise the HTTP handler layer.
 func New(s *store.Store, port int) *Server {
 	if port == 0 {
 		port = resolvePort()
 	}
+	var ts TriageStore
+	if s != nil {
+		ts = s
+	}
 	srv := &Server{
-		store:  s,
-		port:   port,
-		listen: net.Listen,
+		store:       s,
+		triageStore: ts,
+		port:        port,
+		listen:      net.Listen,
 	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
+}
+
+// NewWithStore creates a triage Server with a narrow TriageStore interface.
+// This constructor is used in tests and by cmdTriage when injecting a stub store.
+// s may be nil (real store not needed when ts provides the data).
+// cwdDir is the project root directory for resolving default_scope (Option A).
+func NewWithStore(s *store.Store, ts TriageStore, port int, cwdDir string) *Server {
+	if port == 0 {
+		port = resolvePort()
+	}
+	srv := &Server{
+		store:       s,
+		triageStore: ts,
+		port:        port,
+		listen:      net.Listen,
+		cwdDir:      cwdDir,
+	}
+	srv.mux = http.NewServeMux()
+	srv.routes()
+	return srv
+}
+
+// SetCwdProject sets the project name that corresponds to the launch directory.
+// Only this project shows a resolved default-scope badge on the index page.
+// This is called by cmdTriage after project detection (Option A boundary).
+func (s *Server) SetCwdProject(project string) {
+	s.cwdProject = project
 }
 
 // resolvePort reads ENGRAM_TRIAGE_PORT or falls back to DefaultPort.
@@ -135,14 +171,25 @@ func (s *Server) Start() error {
 }
 
 // routes registers all triage HTTP handlers on the server's mux.
-// WU-3 registers stub routes only; real view handlers are added in WU-4.
 func (s *Server) routes() {
 	// Health check — always available for smoke tests and monitoring.
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 
-	// Index / landing page stub — returns placeholder until WU-4 adds the
-	// real templ-rendered projects page.
+	// Index / landing page: grouped-by-project read view (WU-4).
 	s.mux.HandleFunc("GET /", s.handleIndex)
+
+	// Per-project observation list (WU-4).
+	s.mux.HandleFunc("GET /project/{name}", s.handleProject)
+
+	// Static assets: pico.min.css, htmx.min.js, triage.css.
+	// Served under /triage/static/ to avoid collisions with any future API prefix.
+	// Sub-FS into the "static" directory embedded in StaticFS so that
+	// http.FileServer sees the files at the root (no "static/" prefix in paths).
+	staticSub, err := fs.Sub(StaticFS, "static")
+	if err != nil {
+		panic("triage: failed to sub StaticFS: " + err.Error())
+	}
+	s.mux.Handle("GET /triage/static/", http.StripPrefix("/triage/static/", http.FileServer(http.FS(staticSub))))
 }
 
 // handleHealth returns 200 OK with a simple JSON status body.
@@ -152,17 +199,3 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, `{"status":"ok","service":"triage"}`)
 }
 
-// handleIndex is the stub landing-page handler for WU-3.
-// WU-4 replaces this with the real templ-rendered projects list.
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, `<!DOCTYPE html>
-<html>
-<head><title>Engram Triage</title></head>
-<body>
-<h1>Engram Triage</h1>
-<p>triage UI is loading — real view coming in WU-4.</p>
-</body>
-</html>`)
-}

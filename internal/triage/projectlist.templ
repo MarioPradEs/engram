@@ -1,0 +1,54 @@
+package triage
+
+import (
+	"fmt"
+
+	"github.com/Gentleman-Programming/engram/internal/store"
+)
+
+// ObservationRow is the view model for a single observation in the project list.
+// It carries the pre-computed UI scope and needs-triage flag.
+type ObservationRow struct {
+	Obs        store.Observation
+	UIScope    string // "shared", "personal"
+	NeedsTriage bool
+}
+
+// ProjectListPage renders the per-project observation list.
+// Observations are pre-sorted by the handler (newest first via store query).
+templ ProjectListPage(project string, rows []ObservationRow) {
+	<section>
+		<a href="/" class="back-link">← All Projects</a>
+		<h2>
+			{ project }
+		</h2>
+		if len(rows) == 0 {
+			<p class="empty-state">No observations found for this project.</p>
+		} else {
+			<p class="triage-subtitle">{ fmt.Sprintf("%d observation(s)", len(rows)) }</p>
+			<div class="obs-list">
+				for _, row := range rows {
+					@ObsRowView(row)
+				}
+			</div>
+		}
+		<p class="triage-warning-notice">
+			Toggle controls (scope mutation) are available in the next version (WU-5). This is a read-only view.
+		</p>
+	</section>
+}
+
+// ObsRowView renders a single observation row with its scope badge.
+templ ObsRowView(row ObservationRow) {
+	<div class="obs-row">
+		<span class="obs-title">{ row.Obs.Title }</span>
+		if row.NeedsTriage {
+			<span class="badge badge-triage">needs triage</span>
+		} else if row.UIScope == "shared" {
+			<span class="badge badge-shared">shared</span>
+		} else {
+			<span class="badge badge-personal">personal</span>
+		}
+		<span class="obs-meta">{ row.Obs.Type }</span>
+	</div>
+}

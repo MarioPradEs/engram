@@ -1,0 +1,26 @@
+package triage
+
+// TriageLayout wraps triage page content in a minimal HTML shell.
+// It references /triage/static/ for pico, htmx, and triage-specific CSS.
+templ TriageLayout(title string, content templ.Component) {
+	<!DOCTYPE html>
+	<html lang="en" data-theme="dark">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title } — Engram Triage</title>
+			<link rel="stylesheet" href="/triage/static/pico.min.css"/>
+			<link rel="stylesheet" href="/triage/static/triage.css"/>
+			<script src="/triage/static/htmx.min.js"></script>
+		</head>
+		<body>
+			<main class="container">
+				<div class="triage-header">
+					<h1>Engram Triage</h1>
+					<p class="triage-subtitle">local-only · loopback · scope review</p>
+				</div>
+				@content
+			</main>
+		</body>
+	</html>
+}

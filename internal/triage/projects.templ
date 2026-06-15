@@ -1,0 +1,52 @@
+package triage
+
+import (
+	"fmt"
+	"net/url"
+
+	"github.com/Gentleman-Programming/engram/internal/store"
+)
+
+// ProjectsPage renders the landing page with all projects grouped by name.
+// cwdProject is the project name matching the server's launch directory.
+// cwdDefault is the resolved default scope for the cwd project ("shared"/"personal").
+// cwdHasExplicit is true when the cwd project has an explicit default_scope in config.json.
+templ ProjectsPage(projects []store.ProjectStats, cwdProject string, cwdDefault string, cwdHasExplicit bool) {
+	<section>
+		<div class="section-header">
+			<h2>Projects</h2>
+			<p class="triage-subtitle">{ fmt.Sprintf("%d project(s) in local store", len(projects)) }</p>
+		</div>
+		<div class="triage-warning-notice">
+			Scope changes set new observations only. Pre-sync observations already sent to the cloud cannot be recalled (Gate A is v1.5).
+		</div>
+		if len(projects) == 0 {
+			<p class="empty-state">No projects found in local store.</p>
+		} else {
+			<div class="project-grid">
+				for _, p := range projects {
+					@ProjectCard(p, cwdProject, cwdDefault, cwdHasExplicit)
+				}
+			</div>
+		}
+	</section>
+}
+
+// ProjectCard renders a single project summary card.
+// Only the cwdProject shows a resolved default-scope badge (Option A).
+templ ProjectCard(p store.ProjectStats, cwdProject string, cwdDefault string, cwdHasExplicit bool) {
+	<a href={ templ.SafeURL("/project/" + url.PathEscape(p.Name)) } class="project-card">
+		<h3>
+			{ p.Name }
+			if p.Name == cwdProject {
+				<span class="badge badge-default">default: { cwdDefault }</span>
+				if !cwdHasExplicit {
+					<span class="badge badge-triage">unset</span>
+				}
+			}
+		</h3>
+		<p class="project-meta">
+			{ fmt.Sprintf("%d observations · %d sessions", p.ObservationCount, p.SessionCount) }
+		</p>
+	</a>
+}

@@ -86,9 +86,10 @@ func TestCmdTriageStartCallsBrowserOpener(t *testing.T) {
 	}
 }
 
-// TestCmdTriageServerBindsLoopback verifies that the triage server handler
-// serves the stub index route at /. Uses httptest rather than a real listener.
-func TestCmdTriageServerBindsLoopback(t *testing.T) {
+// TestCmdTriageHandlerRoutes verifies that the triage server handler responds
+// 200 OK on the expected routes (/ and /health). Uses httptest.ResponseRecorder,
+// not a real network listener — does not test the loopback bind address.
+func TestCmdTriageHandlerRoutes(t *testing.T) {
 	srv := triage.New(nil, 0)
 	h := srv.Handler()
 

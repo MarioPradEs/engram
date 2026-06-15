@@ -33,6 +33,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	ts := s.triageStore
 	if ts == nil {
 		// No store injected (unit test or pre-init) — render empty page gracefully.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := ProjectsPage(nil, "", "personal", false)
 		if err := TriageLayout("Projects", page).Render(context.Background(), w); err != nil {
 			log.Printf("[triage] handleIndex render error: %v", err)

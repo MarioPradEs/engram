@@ -49,6 +49,8 @@ func cmdTriage(cfg store.Config) {
 		fatal(err)
 	}
 	if s != nil {
+		// Guard is load-bearing: the injectable storeNew stub used in
+		// TestCmdTriageDispatch returns (nil, nil), so s can be nil here.
 		defer s.Close()
 	}
 

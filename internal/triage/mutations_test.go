@@ -247,6 +247,53 @@ func TestHandleShareAll_ReportsCount(t *testing.T) {
 	}
 }
 
+// limitEnforcingStore is a MutableTriageStore that enforces a limit parameter,
+// unlike fakeMutableStore which ignores it. Used to verify W-2: share-all must
+// not be capped at obsPerProjectLimit.
+type limitEnforcingStore struct {
+	fakeMutableStore
+	lastLimit int // records the limit passed to the most recent RecentObservations call
+}
+
+func (f *limitEnforcingStore) RecentObservations(project, scope string, limit int) ([]store.Observation, error) {
+	f.lastLimit = limit
+	return f.fakeMutableStore.RecentObservations(project, scope, limit)
+}
+
+// TestHandleShareAll_SharesAllBeyondLimit verifies that share-all operates on
+// ALL observations in a project, not just the first obsPerProjectLimit (200).
+// W-2: the handler must pass a limit > obsPerProjectLimit (200) to the store so
+// that projects with >200 observations are not silently truncated.
+func TestHandleShareAll_SharesAllBeyondLimit(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	const total = 250
+	obs := make([]store.Observation, total)
+	for i := range obs {
+		obs[i] = store.Observation{ID: int64(i + 1), Title: "obs", Scope: "personal", Project: ptrStr("bigproject")}
+	}
+
+	// Confirm page: the store must be queried with a limit > 200.
+	ls := &limitEnforcingStore{fakeMutableStore: fakeMutableStore{observations: obs}}
+	srv := triage.NewWithMutableStore(nil, ls, 0, "")
+	h := srv.Handler()
+
+	formNoConfirm := url.Values{}
+	req := httptest.NewRequest(http.MethodPost, "/project/bigproject/share-all",
+		strings.NewReader(formNoConfirm.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 confirm page, got %d", rec.Code)
+	}
+	// The limit passed to RecentObservations must be well above 200 (W-2: no cap).
+	const oldCap = 200
+	if ls.lastLimit <= oldCap {
+		t.Errorf("W-2: share-all passed limit=%d to store (must be > %d to avoid silent truncation)", ls.lastLimit, oldCap)
+	}
+}
+
 // ─── Classify (set default scope): POST /project/{name}/classify ─────────────
 
 // TestHandleClassify_SetsCwdProjectDefault verifies that POSTing to

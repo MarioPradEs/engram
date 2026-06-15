@@ -69,6 +69,12 @@ Loopback-only, no authentication. Access is controlled by network position: only
 
 **Do not expose the triage port externally.** There is no auth layer to add because the design assumption is your-machine-only.
 
+### CSRF mitigation
+
+State-changing POST endpoints (`/observations/{id}/scope`, `/project/{name}/share-all`, `/project/{name}/classify`) are wrapped with an **Origin-check middleware**. If a request carries an `Origin` header that is not one of the trusted loopback origins (`http://127.0.0.1:7438`, `http://localhost:7438`), the server responds `403 Forbidden`.
+
+This prevents a malicious web page from making cross-origin requests to the triage server on behalf of the local user. Requests without an `Origin` header (curl, direct browser navigation, same-origin form submissions) pass through unchanged.
+
 ## Scope model (UI ↔ store)
 
 `engram triage` uses a two-value vocabulary in the UI and in config.json:

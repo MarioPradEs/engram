@@ -38,9 +38,9 @@ func WriteProjectDefaultScope(projectDir string, scope string) error {
 	if err == nil {
 		// Parse into a raw map so all existing keys are preserved verbatim.
 		if jsonErr := json.Unmarshal(existing, &raw); jsonErr != nil {
-			// Malformed config — treat as empty; do not corrupt the file further.
-			// A new map with only default_scope will be written.
-			raw = map[string]json.RawMessage{}
+			// Malformed config.json — return an error and leave the file untouched.
+			// Silently resetting it would discard fields like project_name (S-3).
+			return fmt.Errorf("triage: config.json is malformed and cannot be updated safely: %w", jsonErr)
 		}
 	}
 

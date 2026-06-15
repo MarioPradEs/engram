@@ -259,6 +259,63 @@ func TestHandleProject_RouteNotMatched(t *testing.T) {
 	}
 }
 
+// ─── Per-project classify controls gate (W-1) ────────────────────────────────
+
+// TestHandleProject_ClassifyControlsAbsentForNonCwdProject verifies that the
+// classify ("Set default") buttons are NOT rendered on the per-project page
+// when the visited project is not the cwd project. W-1: the classify controls
+// must be gated by cwd, matching the gate that already exists on projects.templ.
+func TestHandleProject_ClassifyControlsAbsentForNonCwdProject(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Title: "Some obs", Scope: "team", Project: ptrStr("other")},
+	}
+	s := &fakeTriageStore{observations: obs}
+	// cwd project is "mine" — visiting "other" must not show classify controls.
+	srv := triage.NewWithStore(nil, s, 0, "")
+	srv.SetCwdProject("mine")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/project/other", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "btn-classify") {
+		t.Errorf("W-1: classify buttons must NOT appear for non-cwd project; body excerpt: %s",
+			body[:min(500, len(body))])
+	}
+}
+
+// TestHandleProject_ClassifyControlsPresentForCwdProject verifies that the
+// classify ("Set default") buttons ARE rendered when visiting the cwd project page.
+func TestHandleProject_ClassifyControlsPresentForCwdProject(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Title: "My obs", Scope: "team", Project: ptrStr("mine")},
+	}
+	s := &fakeTriageStore{observations: obs}
+	srv := triage.NewWithStore(nil, s, 0, "")
+	srv.SetCwdProject("mine")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/project/mine", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "btn-classify") {
+		t.Errorf("W-1: classify buttons must appear for cwd project; body excerpt: %s",
+			body[:min(500, len(body))])
+	}
+}
+
 // ─── Golden tests ─────────────────────────────────────────────────────────────
 
 // TestHandleIndex_Golden renders the index page with a fixed dataset and

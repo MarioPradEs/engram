@@ -31,8 +31,15 @@ type MutableTriageStore interface {
 }
 
 const (
-	// obsPerProjectLimit is the maximum observations loaded per project page.
+	// obsPerProjectLimit is the maximum observations loaded per project page (read view).
 	obsPerProjectLimit = 200
+
+	// obsShareAllLimit is the upper bound used by handleShareAll to fetch ALL
+	// observations for a project before bulk-updating them. Using a very large
+	// sentinel avoids silent truncation (W-2) while keeping the existing
+	// RecentObservations interface unchanged.
+	// In practice, no project is expected to reach 10 million observations.
+	obsShareAllLimit = 10_000_000
 )
 
 // handleIndex renders the landing page grouped by project.
@@ -107,7 +114,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	ts := s.triageStore
 	if ts == nil {
 		// No store — render empty project page for tests.
-		page := ProjectListPage(projectName, nil)
+		page := ProjectListPage(projectName, nil, s.cwdProject)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := TriageLayout(projectName, page).Render(context.Background(), w); err != nil {
 			log.Printf("[triage] handleProject render error: %v", err)
@@ -134,7 +141,8 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := ProjectListPage(projectName, rows)
+	// Pass cwdProject so the template gates classify controls to the cwd project (W-1).
+	page := ProjectListPage(projectName, rows, s.cwdProject)
 	if err := TriageLayout(projectName, page).Render(context.Background(), w); err != nil {
 		log.Printf("[triage] handleProject render error: %v", err)
 	}
@@ -221,8 +229,10 @@ func (s *Server) handleShareAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch the current project observations to get the count and IDs.
-	observations, err := ms.RecentObservations(projectName, "", obsPerProjectLimit)
+	// Fetch ALL observations for the project — no cap (W-2).
+	// obsShareAllLimit is a very large sentinel so that the share-all action never
+	// silently truncates projects with more than obsPerProjectLimit (200) items.
+	observations, err := ms.RecentObservations(projectName, "", obsShareAllLimit)
 	if err != nil {
 		log.Printf("[triage] handleShareAll %q: RecentObservations: %v", projectName, err)
 		http.Error(w, "failed to load observations", http.StatusInternalServerError)

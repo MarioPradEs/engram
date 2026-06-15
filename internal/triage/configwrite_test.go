@@ -147,6 +147,38 @@ func TestWriteProjectDefaultScope_TempFileInSameDir(t *testing.T) {
 	}
 }
 
+// TestWriteProjectDefaultScope_MalformedJSON verifies that when config.json
+// exists but contains malformed JSON, WriteProjectDefaultScope returns an error
+// and leaves the original file untouched (S-3: no silent data loss on bad input).
+func TestWriteProjectDefaultScope_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	engDir := filepath.Join(dir, ".engram")
+	if err := os.MkdirAll(engDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(engDir, "config.json")
+	malformed := []byte(`{"project_name": "test", INVALID`)
+	if err := os.WriteFile(configPath, malformed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must return an error.
+	err := triage.WriteProjectDefaultScope(dir, "shared")
+	if err == nil {
+		t.Fatal("want error for malformed config.json, got nil")
+	}
+
+	// File must be unchanged.
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("config.json disappeared: %v", readErr)
+	}
+	if string(got) != string(malformed) {
+		t.Errorf("want original file unchanged; got %q", string(got))
+	}
+}
+
 // TestWriteProjectDefaultScope_OverwritesScope verifies that calling Write
 // twice updates the scope rather than duplicating the key.
 func TestWriteProjectDefaultScope_OverwritesScope(t *testing.T) {

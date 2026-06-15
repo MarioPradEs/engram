@@ -224,6 +224,36 @@ func (s *Server) Start() error {
 	return http.Serve(ln, s.mux) //nolint:gosec // intentionally loopback-only
 }
 
+// trustedOrigins is the set of allowed Origin header values for loopback
+// CSRF protection. Only exact matches are accepted. An empty/absent Origin
+// header is allowed (curl, direct nav, same-origin form without CORS).
+var trustedOrigins = map[string]bool{
+	"http://127.0.0.1:7438": true,
+	"http://localhost:7438": true,
+}
+
+// originCheckMiddleware rejects cross-origin requests to state-changing
+// endpoints. If the request carries an Origin header that is NOT in
+// trustedOrigins, it responds with 403 Forbidden.
+//
+// Rationale: the loopback triage server has no authentication. An attacker's
+// web page could make cross-origin POST requests (CSRF) if there were no
+// check. Same-origin forms and curl do not send an Origin header, so they
+// are unaffected.
+func originCheckMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			if !trustedOrigins[origin] {
+				http.Error(w,
+					"forbidden: cross-origin requests are not allowed on the loopback triage server",
+					http.StatusForbidden)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
 // routes registers all triage HTTP handlers on the server's mux.
 func (s *Server) routes() {
 	// Health check — always available for smoke tests and monitoring.
@@ -235,13 +265,13 @@ func (s *Server) routes() {
 	// Per-project observation list (WU-4).
 	s.mux.HandleFunc("GET /project/{name}", s.handleProject)
 
-	// WU-5 mutation endpoints.
+	// WU-5 mutation endpoints — wrapped with origin-check CSRF middleware.
 	// Per-item scope toggle: sets the scope of one observation directly.
-	s.mux.HandleFunc("POST /observations/{id}/scope", s.handleToggleScope)
+	s.mux.HandleFunc("POST /observations/{id}/scope", originCheckMiddleware(s.handleToggleScope))
 	// Bulk share-all: with confirm=1 moves the project backlog to shared.
-	s.mux.HandleFunc("POST /project/{name}/share-all", s.handleShareAll)
+	s.mux.HandleFunc("POST /project/{name}/share-all", originCheckMiddleware(s.handleShareAll))
 	// Classify: sets the project default_scope in config.json (cwd project only).
-	s.mux.HandleFunc("POST /project/{name}/classify", s.handleClassify)
+	s.mux.HandleFunc("POST /project/{name}/classify", originCheckMiddleware(s.handleClassify))
 
 	// Static assets: pico.min.css, htmx.min.js, triage.css.
 	// Served under /triage/static/ to avoid collisions with any future API prefix.

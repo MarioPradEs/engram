@@ -23,8 +23,27 @@ type triageStarter interface {
 
 // newTriageServer is the production factory for a triage.Server. It is a
 // package-level var so tests can replace it with a stub to avoid real listeners.
+//
+// C-1: the real factory wires a MutableTriageStore so all mutation endpoints
+// are live, and calls SetCwdProject so the classify boundary (Option A) is
+// enforced correctly. A nil adapter is passed when s is nil (test stub path).
 var newTriageServer = func(s *store.Store, port int) triageStarter {
-	return triage.New(s, port)
+	// Resolve cwd and the project name that matches it.
+	cwdDir, _ := os.Getwd()
+	cwdProject := ""
+	if cwdDir != "" {
+		cwdProject = detectProject(cwdDir)
+	}
+
+	// Build a nil-safe mutable store adapter (guard for test stubs where s==nil).
+	var ms triage.MutableTriageStore
+	if s != nil {
+		ms = triage.NewStoreAdapter(s)
+	}
+
+	srv := triage.NewWithMutableStore(s, ms, port, cwdDir)
+	srv.SetCwdProject(cwdProject)
+	return srv
 }
 
 // cmdTriage is the entry point for `engram triage`. It:

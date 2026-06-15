@@ -18,7 +18,9 @@ type ObservationRow struct {
 
 // ProjectListPage renders the per-project observation list with inline scope toggles.
 // Observations are pre-sorted by the handler (newest first via store query).
-templ ProjectListPage(project string, rows []ObservationRow) {
+// cwdProject is the project name that matches the cwd at server launch time;
+// classify controls are only rendered when project == cwdProject (Option A, W-1).
+templ ProjectListPage(project string, rows []ObservationRow, cwdProject string) {
 	<section>
 		<a href="/" class="back-link">← All Projects</a>
 		<h2>
@@ -32,14 +34,16 @@ templ ProjectListPage(project string, rows []ObservationRow) {
 				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/share-all") }>
 					<button type="submit" class="btn-bulk-share">Mark all as shared…</button>
 				</form>
-				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
-					<input type="hidden" name="scope" value="shared"/>
-					<button type="submit" class="btn-classify">Set default: shared</button>
-				</form>
-				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
-					<input type="hidden" name="scope" value="personal"/>
-					<button type="submit" class="btn-classify">Set default: personal</button>
-				</form>
+				if project == cwdProject {
+					<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
+						<input type="hidden" name="scope" value="shared"/>
+						<button type="submit" class="btn-classify">Set default: shared</button>
+					</form>
+					<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
+						<input type="hidden" name="scope" value="personal"/>
+						<button type="submit" class="btn-classify">Set default: personal</button>
+					</form>
+				}
 			</div>
 			<div class="obs-list">
 				for _, row := range rows {

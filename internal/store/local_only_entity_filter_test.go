@@ -6,25 +6,26 @@ import (
 	"time"
 )
 
-// TestGateBPromptNotExportedToCloud verifies that Gate B prevents prompt
-// mutations from being returned by ListPendingSyncMutations (the cloud-export
-// path). Prompts are raw user context, local-only by company policy — the
-// shared team brain holds only observations (+ relations).
+// TestLocalOnlyEntityFilterPromptNotExportedToCloud verifies that the
+// local-only entity filter (prompts/sessions are never exported to cloud)
+// prevents prompt mutations from being returned by ListPendingSyncMutations
+// (the cloud-export path). Prompts are raw user context, local-only by company
+// policy — the shared team brain holds only observations (+ relations).
 //
 // The row IS stored in sync_mutations for local machinery (repair, backfill),
 // but is invisible to the export selector.
-func TestGateBPromptNotExportedToCloud(t *testing.T) {
+func TestLocalOnlyEntityFilterPromptNotExportedToCloud(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.EnrollProject("gate-b-prompt-proj"); err != nil {
+	if err := s.EnrollProject("local-filter-prompt-proj"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
 	}
 
-	syncID := "gate-b-prompt-test"
-	proj := "gate-b-prompt-proj"
+	syncID := "local-filter-prompt-test"
+	proj := "local-filter-prompt-proj"
 	payload := syncPromptPayload{
 		SyncID:    syncID,
-		SessionID: "sess-gate-b-prompt",
+		SessionID: "sess-local-filter-prompt",
 		Project:   &proj,
 	}
 
@@ -59,28 +60,29 @@ func TestGateBPromptNotExportedToCloud(t *testing.T) {
 	}
 	for _, m := range mutations {
 		if m.Entity == SyncEntityPrompt && m.EntityKey == syncID {
-			t.Errorf("Gate B: prompt mutation (key=%s) must not be exported to cloud via ListPendingSyncMutations", syncID)
+			t.Errorf("local-only entity filter: prompt mutation (key=%s) must not be exported to cloud via ListPendingSyncMutations", syncID)
 		}
 	}
 }
 
-// TestGateBSessionNotExportedToCloud verifies that Gate B prevents session
-// mutations from being returned by ListPendingSyncMutations. Sessions are
-// local runtime context, local-only by company policy.
+// TestLocalOnlyEntityFilterSessionNotExportedToCloud verifies that the
+// local-only entity filter (prompts/sessions are never exported to cloud)
+// prevents session mutations from being returned by ListPendingSyncMutations.
+// Sessions are local runtime context, local-only by company policy.
 //
 // The row IS stored in sync_mutations for local machinery (repair, backfill,
 // delete propagation), but is invisible to the export selector.
-func TestGateBSessionNotExportedToCloud(t *testing.T) {
+func TestLocalOnlyEntityFilterSessionNotExportedToCloud(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.EnrollProject("gate-b-sess-proj"); err != nil {
+	if err := s.EnrollProject("local-filter-sess-proj"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
 	}
 
-	syncID := "gate-b-session-test"
+	syncID := "local-filter-session-test"
 	payload := syncSessionPayload{
 		ID:      syncID,
-		Project: "gate-b-sess-proj",
+		Project: "local-filter-sess-proj",
 	}
 
 	var enqueueErr error
@@ -114,43 +116,43 @@ func TestGateBSessionNotExportedToCloud(t *testing.T) {
 	}
 	for _, m := range mutations {
 		if m.Entity == SyncEntitySession && m.EntityKey == syncID {
-			t.Errorf("Gate B: session mutation (key=%s) must not be exported to cloud via ListPendingSyncMutations", syncID)
+			t.Errorf("local-only entity filter: session mutation (key=%s) must not be exported to cloud via ListPendingSyncMutations", syncID)
 		}
 	}
 }
 
-// TestGateBObservationAndRelationStillEnqueue verifies that Gate B does NOT
-// over-filter: non-personal observations and relations must still be enqueued
-// and returned by ListPendingSyncMutations.
-func TestGateBObservationAndRelationStillEnqueue(t *testing.T) {
+// TestLocalOnlyEntityFilterObservationAndRelationStillEnqueue verifies that
+// the local-only entity filter does NOT over-filter: non-personal observations
+// and relations must still be enqueued and returned by ListPendingSyncMutations.
+func TestLocalOnlyEntityFilterObservationAndRelationStillEnqueue(t *testing.T) {
 	s := newTestStore(t)
 
-	if err := s.EnrollProject("gate-b-proj"); err != nil {
+	if err := s.EnrollProject("local-filter-proj"); err != nil {
 		t.Fatalf("EnrollProject: %v", err)
 	}
 
-	obsSyncID := "gate-b-obs-test"
-	gateProj := "gate-b-proj"
+	obsSyncID := "local-filter-obs-test"
+	filterProj := "local-filter-proj"
 	obsPayload := syncObservationPayload{
 		SyncID:    obsSyncID,
-		SessionID: "sess-gate-b-obs",
-		Project:   &gateProj,
+		SessionID: "sess-local-filter-obs",
+		Project:   &filterProj,
 		Scope:     "project",
 		Type:      "manual",
-		Title:     "Gate B obs",
+		Title:     "local-only filter obs",
 		Content:   "content",
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	relSyncID := "gate-b-rel-test"
+	relSyncID := "local-filter-rel-test"
 	relPayload := syncRelationPayload{
-		SyncID:        relSyncID,
-		SourceID:      obsSyncID,
-		TargetID:      obsSyncID, // self-relation, valid for this test
-		Relation:      "related",
-		Project:       "gate-b-proj",
-		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-		UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+		SyncID:    relSyncID,
+		SourceID:  obsSyncID,
+		TargetID:  obsSyncID, // self-relation, valid for this test
+		Relation:  "related",
+		Project:   "local-filter-proj",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	err := s.withTx(func(tx *sql.Tx) error {
@@ -186,7 +188,7 @@ func TestGateBObservationAndRelationStillEnqueue(t *testing.T) {
 }
 
 // TestGateAPersonalObservationRegressionGuard ensures that Gate A (personal
-// observation filtering) is still intact after Gate B changes.
+// observation filtering) is still intact after local-only entity filter changes.
 func TestGateAPersonalObservationRegressionGuard(t *testing.T) {
 	s := newTestStore(t)
 
@@ -226,10 +228,10 @@ func TestGateAPersonalObservationRegressionGuard(t *testing.T) {
 	}
 }
 
-// TestListPendingSyncMutationsExcludesPromptAndSession verifies that
+// TestLocalOnlyEntityFilterListPendingExcludesPromptAndSession verifies that
 // ListPendingSyncMutations does not return prompt or session rows even when
 // they were directly inserted into sync_mutations (representing ~2860 legacy rows).
-func TestListPendingSyncMutationsExcludesPromptAndSession(t *testing.T) {
+func TestLocalOnlyEntityFilterListPendingExcludesPromptAndSession(t *testing.T) {
 	s := newTestStore(t)
 
 	if err := s.EnrollProject("list-excl-proj"); err != nil {
@@ -260,10 +262,10 @@ func TestListPendingSyncMutationsExcludesPromptAndSession(t *testing.T) {
 
 	for _, m := range mutations {
 		if m.Entity == SyncEntityPrompt {
-			t.Errorf("ListPendingSyncMutations returned a prompt row (key=%s) — must be excluded", m.EntityKey)
+			t.Errorf("ListPendingSyncMutations returned a prompt row (key=%s) — must be excluded by local-only entity filter", m.EntityKey)
 		}
 		if m.Entity == SyncEntitySession {
-			t.Errorf("ListPendingSyncMutations returned a session row (key=%s) — must be excluded", m.EntityKey)
+			t.Errorf("ListPendingSyncMutations returned a session row (key=%s) — must be excluded by local-only entity filter", m.EntityKey)
 		}
 	}
 
@@ -278,9 +280,9 @@ func TestListPendingSyncMutationsExcludesPromptAndSession(t *testing.T) {
 	}
 }
 
-// TestListPendingSyncMutationsAfterSeqExcludesPromptAndSession verifies that
+// TestLocalOnlyEntityFilterListAfterSeqExcludesPromptAndSession verifies that
 // ListPendingSyncMutationsAfterSeq also excludes prompt and session rows.
-func TestListPendingSyncMutationsAfterSeqExcludesPromptAndSession(t *testing.T) {
+func TestLocalOnlyEntityFilterListAfterSeqExcludesPromptAndSession(t *testing.T) {
 	s := newTestStore(t)
 
 	if err := s.EnrollProject("afterseq-proj"); err != nil {
@@ -312,10 +314,10 @@ func TestListPendingSyncMutationsAfterSeqExcludesPromptAndSession(t *testing.T) 
 
 	for _, m := range mutations {
 		if m.Entity == SyncEntityPrompt {
-			t.Errorf("ListPendingSyncMutationsAfterSeq returned a prompt row (key=%s) — must be excluded", m.EntityKey)
+			t.Errorf("ListPendingSyncMutationsAfterSeq returned a prompt row (key=%s) — must be excluded by local-only entity filter", m.EntityKey)
 		}
 		if m.Entity == SyncEntitySession {
-			t.Errorf("ListPendingSyncMutationsAfterSeq returned a session row (key=%s) — must be excluded", m.EntityKey)
+			t.Errorf("ListPendingSyncMutationsAfterSeq returned a session row (key=%s) — must be excluded by local-only entity filter", m.EntityKey)
 		}
 	}
 
@@ -330,10 +332,10 @@ func TestListPendingSyncMutationsAfterSeqExcludesPromptAndSession(t *testing.T) 
 	}
 }
 
-// TestCountPendingNonEnrolledSyncMutationsExcludesPromptAndSession verifies
+// TestLocalOnlyEntityFilterCountNonEnrolledExcludesPromptAndSession verifies
 // that CountPendingNonEnrolledSyncMutations does not count prompt or session
 // rows, so they do not block sync readiness checks.
-func TestCountPendingNonEnrolledSyncMutationsExcludesPromptAndSession(t *testing.T) {
+func TestLocalOnlyEntityFilterCountNonEnrolledExcludesPromptAndSession(t *testing.T) {
 	s := newTestStore(t)
 
 	// Insert prompt and session rows for a non-enrolled project.
@@ -359,7 +361,55 @@ func TestCountPendingNonEnrolledSyncMutationsExcludesPromptAndSession(t *testing
 
 	for _, c := range counts {
 		if c.Project == "non-enrolled-proj" {
-			t.Errorf("CountPendingNonEnrolledSyncMutations counted %d prompt/session row(s) for non-enrolled-proj — must exclude them", c.Count)
+			t.Errorf("CountPendingNonEnrolledSyncMutations counted %d prompt/session row(s) for non-enrolled-proj — must exclude them (local-only entity filter)", c.Count)
 		}
+	}
+}
+
+// TestLocalOnlyEntityFilterAckSeqsReachesHealthy verifies that after acking
+// all observation/relation rows, the lifecycle reaches SyncLifecycleHealthy
+// even when only prompt/session rows remain unacked. Prompt/session rows are
+// never pushed to the cloud and must not count in the remaining-unacked tally
+// that determines lifecycle state.
+func TestLocalOnlyEntityFilterAckSeqsReachesHealthy(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.EnrollProject("ack-lifecycle-proj"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	// Insert an observation row (will be acked) and a prompt + session row
+	// (local-only, never acked by cloud machinery).
+	insert := func(entity, key string) int64 {
+		t.Helper()
+		res, err := s.db.Exec(
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			DefaultSyncTargetKey, entity, key, SyncOpUpsert, `{}`, SyncSourceLocal, "ack-lifecycle-proj",
+		)
+		if err != nil {
+			t.Fatalf("direct insert %s/%s: %v", entity, key, err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+
+	obsSeq := insert(SyncEntityObservation, "ack-obs-1")
+	insert(SyncEntityPrompt, "ack-prompt-1")    // never acked — local-only
+	insert(SyncEntitySession, "ack-session-1")  // never acked — local-only
+
+	// Ack only the observation row.
+	if err := s.AckSyncMutationSeqs(DefaultSyncTargetKey, []int64{obsSeq}); err != nil {
+		t.Fatalf("AckSyncMutationSeqs: %v", err)
+	}
+
+	// Lifecycle must be Healthy: prompt/session rows must not count in the
+	// remaining-unacked total (local-only entity filter on the ack path).
+	state, err := s.GetSyncState(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("GetSyncState: %v", err)
+	}
+	if state.Lifecycle != SyncLifecycleHealthy {
+		t.Errorf("expected lifecycle %q after acking observation, got %q — prompt/session rows must not block ack lifecycle (local-only entity filter)", SyncLifecycleHealthy, state.Lifecycle)
 	}
 }

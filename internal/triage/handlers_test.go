@@ -134,11 +134,13 @@ func TestHandleIndex_NoCwdBadgeForOtherProjects(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rec.Code)
 	}
-	// "beta" entry should appear but must not contain a default badge annotation.
-	// We check that "default:" only appears once in the body (for alpha, not beta).
-	count := strings.Count(body, "default:")
+	// The resolved default-scope badge uses class "badge-default".
+	// Only the cwd project (alpha) gets this badge; beta must not have it.
+	// Note: classify buttons say "Set default: ..." but use class "btn-classify",
+	// not "badge-default" — so counting badge-default is the precise check.
+	count := strings.Count(body, "badge-default")
 	if count > 1 {
-		t.Errorf("want default: badge only for cwd project, got %d occurrences", count)
+		t.Errorf("want badge-default only for cwd project, got %d occurrences", count)
 	}
 }
 

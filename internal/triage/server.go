@@ -44,15 +44,47 @@ type BrowserOpener func(url string) error
 // Server is the local triage HTTP server. It owns its own ServeMux and is
 // independent of internal/server.Server (the main Engram API daemon).
 type Server struct {
-	store       *store.Store
-	triageStore TriageStore // narrow interface; set by NewWithStore or derived from store
-	port        int
-	mux         *http.ServeMux
-	listen      func(network, address string) (net.Listener, error)
-	ln          net.Listener // pre-injected listener (for tests); overrides listen
-	browser     BrowserOpener
-	cwdDir      string // filesystem path of the project directory at launch (for ResolveDefaultScope)
-	cwdProject  string // project name matching cwdDir (Option A: cwd-only default badge)
+	store         *store.Store
+	triageStore   TriageStore        // narrow interface; set by NewWithStore or derived from store
+	mutableStore  MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
+	port          int
+	mux           *http.ServeMux
+	listen        func(network, address string) (net.Listener, error)
+	ln            net.Listener // pre-injected listener (for tests); overrides listen
+	browser       BrowserOpener
+	cwdDir        string // filesystem path of the project directory at launch (for ResolveDefaultScope)
+	cwdProject    string // project name matching cwdDir (Option A: cwd-only default badge)
+}
+
+// StoreAdapter wraps *store.Store to satisfy MutableTriageStore.
+// It exposes only the narrow subset of store methods used by triage handlers,
+// keeping the dependency surface minimal and the handlers independently testable.
+type StoreAdapter struct {
+	s *store.Store
+}
+
+// NewStoreAdapter returns a MutableTriageStore backed by a real *store.Store.
+// Use this in production wiring (cmdTriage) instead of passing *store.Store directly.
+func NewStoreAdapter(s *store.Store) MutableTriageStore {
+	return &StoreAdapter{s: s}
+}
+
+func (a *StoreAdapter) ListProjectsWithStats() ([]store.ProjectStats, error) {
+	return a.s.ListProjectsWithStats()
+}
+
+func (a *StoreAdapter) RecentObservations(project, scope string, limit int) ([]store.Observation, error) {
+	return a.s.RecentObservations(project, scope, limit)
+}
+
+// UpdateObservationScope proxies to store.UpdateObservation, setting only the
+// scope field. This is the canonical mutation path for triage handlers — it
+// does NOT re-implement any store logic (design decision #4).
+func (a *StoreAdapter) UpdateObservationScope(id int64, internalScope string) error {
+	_, err := a.s.UpdateObservation(id, store.UpdateObservationParams{
+		Scope: &internalScope,
+	})
+	return err
 }
 
 // New creates a triage Server backed by a real *store.Store.
@@ -91,6 +123,28 @@ func NewWithStore(s *store.Store, ts TriageStore, port int, cwdDir string) *Serv
 		port:        port,
 		listen:      net.Listen,
 		cwdDir:      cwdDir,
+	}
+	srv.mux = http.NewServeMux()
+	srv.routes()
+	return srv
+}
+
+// NewWithMutableStore creates a triage Server with a MutableTriageStore that
+// supports both read and mutation endpoints (WU-5). The mutableStore satisfies
+// TriageStore as well, so it is used for all handler operations.
+// cwdDir is the project root directory for resolving default_scope and writing
+// config.json (Option A: only the cwd project can have its default set).
+func NewWithMutableStore(s *store.Store, ms MutableTriageStore, port int, cwdDir string) *Server {
+	if port == 0 {
+		port = resolvePort()
+	}
+	srv := &Server{
+		store:        s,
+		triageStore:  ms,
+		mutableStore: ms,
+		port:         port,
+		listen:       net.Listen,
+		cwdDir:       cwdDir,
 	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
@@ -180,6 +234,14 @@ func (s *Server) routes() {
 
 	// Per-project observation list (WU-4).
 	s.mux.HandleFunc("GET /project/{name}", s.handleProject)
+
+	// WU-5 mutation endpoints.
+	// Per-item scope toggle: sets the scope of one observation directly.
+	s.mux.HandleFunc("POST /observations/{id}/scope", s.handleToggleScope)
+	// Bulk share-all: with confirm=1 moves the project backlog to shared.
+	s.mux.HandleFunc("POST /project/{name}/share-all", s.handleShareAll)
+	// Classify: sets the project default_scope in config.json (cwd project only).
+	s.mux.HandleFunc("POST /project/{name}/classify", s.handleClassify)
 
 	// Static assets: pico.min.css, htmx.min.js, triage.css.
 	// Served under /triage/static/ to avoid collisions with any future API prefix.

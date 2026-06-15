@@ -2,6 +2,8 @@ package triage
 
 import (
 	"fmt"
+	"net/url"
+	"strconv"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -9,12 +11,12 @@ import (
 // ObservationRow is the view model for a single observation in the project list.
 // It carries the pre-computed UI scope and needs-triage flag.
 type ObservationRow struct {
-	Obs        store.Observation
-	UIScope    string // "shared", "personal"
+	Obs         store.Observation
+	UIScope     string // "shared", "personal"
 	NeedsTriage bool
 }
 
-// ProjectListPage renders the per-project observation list.
+// ProjectListPage renders the per-project observation list with inline scope toggles.
 // Observations are pre-sorted by the handler (newest first via store query).
 templ ProjectListPage(project string, rows []ObservationRow) {
 	<section>
@@ -26,29 +28,85 @@ templ ProjectListPage(project string, rows []ObservationRow) {
 			<p class="empty-state">No observations found for this project.</p>
 		} else {
 			<p class="triage-subtitle">{ fmt.Sprintf("%d observation(s)", len(rows)) }</p>
+			<div class="bulk-actions">
+				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/share-all") }>
+					<button type="submit" class="btn-bulk-share">Mark all as shared…</button>
+				</form>
+				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
+					<input type="hidden" name="scope" value="shared"/>
+					<button type="submit" class="btn-classify">Set default: shared</button>
+				</form>
+				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
+					<input type="hidden" name="scope" value="personal"/>
+					<button type="submit" class="btn-classify">Set default: personal</button>
+				</form>
+			</div>
 			<div class="obs-list">
 				for _, row := range rows {
-					@ObsRowView(row)
+					@ObsRowView(row, project)
 				}
 			</div>
 		}
 		<p class="triage-warning-notice">
-			Toggle controls (scope mutation) are available in the next version (WU-5). This is a read-only view.
+			Scope changes apply to new observations saved after this toggle. Pre-sync observations already sent cannot be recalled (Gate A is v1.5).
 		</p>
 	</section>
 }
 
-// ObsRowView renders a single observation row with its scope badge.
-templ ObsRowView(row ObservationRow) {
+// ObsRowView renders a single observation row with its scope badge and inline toggle.
+templ ObsRowView(row ObservationRow, project string) {
 	<div class="obs-row">
 		<span class="obs-title">{ row.Obs.Title }</span>
 		if row.NeedsTriage {
 			<span class="badge badge-triage">needs triage</span>
+			<span class="obs-toggle">
+				<form method="POST" action={ templ.SafeURL("/observations/" + strconv.FormatInt(row.Obs.ID, 10) + "/scope") }>
+					<input type="hidden" name="scope" value="shared"/>
+					<button type="submit" class="btn-toggle">→ shared</button>
+				</form>
+				<form method="POST" action={ templ.SafeURL("/observations/" + strconv.FormatInt(row.Obs.ID, 10) + "/scope") }>
+					<input type="hidden" name="scope" value="personal"/>
+					<button type="submit" class="btn-toggle">→ personal</button>
+				</form>
+			</span>
 		} else if row.UIScope == "shared" {
 			<span class="badge badge-shared">shared</span>
+			<span class="obs-toggle">
+				<form method="POST" action={ templ.SafeURL("/observations/" + strconv.FormatInt(row.Obs.ID, 10) + "/scope") }>
+					<input type="hidden" name="scope" value="personal"/>
+					<button type="submit" class="btn-toggle">→ personal</button>
+				</form>
+			</span>
 		} else {
 			<span class="badge badge-personal">personal</span>
+			<span class="obs-toggle">
+				<form method="POST" action={ templ.SafeURL("/observations/" + strconv.FormatInt(row.Obs.ID, 10) + "/scope") }>
+					<input type="hidden" name="scope" value="shared"/>
+					<button type="submit" class="btn-toggle">→ shared</button>
+				</form>
+			</span>
 		}
 		<span class="obs-meta">{ row.Obs.Type }</span>
 	</div>
+}
+
+// ShareAllConfirmPage renders the bulk-share confirmation prompt with item count.
+// It is displayed when POST /project/{name}/share-all is called without confirm=1.
+templ ShareAllConfirmPage(project string, count int) {
+	<section>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="back-link">← Back to { project }</a>
+		<h2>Confirm bulk share</h2>
+		<p>
+			You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> in
+			<strong>{ project }</strong> as <em>shared</em>.
+		</p>
+		<p class="triage-warning-notice">
+			This moves the project backlog to the shared tier. Observations already sent cannot be recalled (Gate A is v1.5).
+		</p>
+		<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/share-all") }>
+			<input type="hidden" name="confirm" value="1"/>
+			<button type="submit" class="btn-confirm-share">Yes, mark { fmt.Sprintf("%d", count) } as shared</button>
+		</form>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="btn-cancel">Cancel</a>
+	</section>
 }

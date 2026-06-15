@@ -3,6 +3,7 @@ package cloudstore
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,75 @@ func TestInsertMutationBatchAttributionStamp(t *testing.T) {
 	}
 	if auditCount < 1 {
 		t.Errorf("expected at least 1 audit log entry for rejected_personal_scope, got %d", auditCount)
+	}
+}
+
+// TestInsertMutationBatchChunkCreatedByAuthenticatedUser verifies that when an
+// authenticated user pushes a mutation batch, the resulting cloud_chunks row has
+// created_by set to the user's email — NOT the generic label "mutation-push".
+func TestInsertMutationBatchChunkCreatedByAuthenticatedUser(t *testing.T) {
+	_, cs, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	attr := Attribution{
+		UserEmail:  "mpradas@vivastudios.com",
+		UserName:   "Mario",
+		Department: "qa",
+	}
+
+	project := "chunk-created-by-test-" + uniqueTestSuffix(t)
+
+	entry := makeObsMutationEntry(project, "obs-created-by-1", "project")
+	if _, err := cs.InsertMutationBatch(ctx, []MutationEntry{entry}, attr); err != nil {
+		t.Fatalf("InsertMutationBatch: %v", err)
+	}
+
+	var createdBy string
+	err := cs.db.QueryRowContext(ctx,
+		`SELECT created_by FROM cloud_chunks WHERE project_name = $1 LIMIT 1`, project,
+	).Scan(&createdBy)
+	if err != nil {
+		t.Fatalf("query chunk created_by: %v", err)
+	}
+	if createdBy == "mutation-push" {
+		t.Errorf("chunk created_by must NOT be the generic label %q when an authenticated user pushes; got %q", "mutation-push", createdBy)
+	}
+	if createdBy != attr.UserEmail {
+		t.Errorf("chunk created_by: got %q, want %q", createdBy, attr.UserEmail)
+	}
+}
+
+// TestInsertMutationBatchChunkCreatedByFallsBackWhenNoIdentity verifies that
+// when no authenticated identity is available (zero Attribution), the chunk
+// created_by falls back to "mutation-push" — preserving the original behaviour
+// for insecure/no-auth deployments.
+func TestInsertMutationBatchChunkCreatedByFallsBackWhenNoIdentity(t *testing.T) {
+	_, cs, cleanup := openTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	project := "chunk-created-by-noauth-" + uniqueTestSuffix(t)
+
+	entry := makeObsMutationEntry(project, "obs-noauth-1", "project")
+	if _, err := cs.InsertMutationBatch(ctx, []MutationEntry{entry}, Attribution{}); err != nil {
+		t.Fatalf("InsertMutationBatch (no auth): %v", err)
+	}
+
+	var createdBy string
+	err := cs.db.QueryRowContext(ctx,
+		`SELECT created_by FROM cloud_chunks WHERE project_name = $1 LIMIT 1`, project,
+	).Scan(&createdBy)
+	if err != nil {
+		t.Fatalf("query chunk created_by (no auth): %v", err)
+	}
+	if strings.TrimSpace(createdBy) == "" {
+		t.Errorf("chunk created_by must have a non-empty fallback when no identity is present")
+	}
+	// Acceptable values for no-auth: "mutation-push" or any non-empty sentinel.
+	// Must NOT be an email that was never supplied.
+	if strings.Contains(createdBy, "@") {
+		t.Errorf("chunk created_by must not look like an email when no identity was provided, got %q", createdBy)
 	}
 }
 

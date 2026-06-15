@@ -926,12 +926,19 @@ func (cs *CloudStore) InsertMutationBatch(ctx context.Context, batch []MutationE
 		}
 	}
 
+	// Stamp the authenticated user's email as created_by so the dashboard
+	// "Contributor" column reflects who pushed the chunk. Fall back to the
+	// generic label only when no identity is available (insecure/no-auth mode).
+	chunkCreatedBy := strings.TrimSpace(attr.UserEmail)
+	if chunkCreatedBy == "" {
+		chunkCreatedBy = "mutation-push"
+	}
 	for _, chunk := range chunks {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO cloud_chunks (project_name, chunk_id, created_by, payload, sessions_count, observations_count, prompts_count)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (project_name, chunk_id) DO NOTHING`,
-			chunk.project, chunk.id, "mutation-push", chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
+			chunk.project, chunk.id, chunkCreatedBy, chunk.payload, chunk.counts.sessions, chunk.counts.observations, chunk.counts.prompts,
 		); err != nil {
 			return nil, fmt.Errorf("cloudstore: materialize mutation batch chunk: %w", err)
 		}

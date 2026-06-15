@@ -44,16 +44,17 @@ type BrowserOpener func(url string) error
 // Server is the local triage HTTP server. It owns its own ServeMux and is
 // independent of internal/server.Server (the main Engram API daemon).
 type Server struct {
-	store         *store.Store
-	triageStore   TriageStore        // narrow interface; set by NewWithStore or derived from store
-	mutableStore  MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
-	port          int
-	mux           *http.ServeMux
-	listen        func(network, address string) (net.Listener, error)
-	ln            net.Listener // pre-injected listener (for tests); overrides listen
-	browser       BrowserOpener
-	cwdDir        string // filesystem path of the project directory at launch (for ResolveDefaultScope)
-	cwdProject    string // project name matching cwdDir (Option A: cwd-only default badge)
+	store          *store.Store
+	triageStore    TriageStore        // narrow interface; set by NewWithStore or derived from store
+	mutableStore   MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
+	port           int
+	trustedOrigins map[string]struct{} // CSRF: allowed Origin values, derived from port at construction
+	mux            *http.ServeMux
+	listen         func(network, address string) (net.Listener, error)
+	ln             net.Listener // pre-injected listener (for tests); overrides listen
+	browser        BrowserOpener
+	cwdDir         string // filesystem path of the project directory at launch (for ResolveDefaultScope)
+	cwdProject     string // project name matching cwdDir (Option A: cwd-only default badge)
 }
 
 // StoreAdapter wraps *store.Store to satisfy MutableTriageStore.
@@ -99,10 +100,11 @@ func New(s *store.Store, port int) *Server {
 		ts = s
 	}
 	srv := &Server{
-		store:       s,
-		triageStore: ts,
-		port:        port,
-		listen:      net.Listen,
+		store:          s,
+		triageStore:    ts,
+		port:           port,
+		trustedOrigins: buildTrustedOrigins(port),
+		listen:         net.Listen,
 	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
@@ -118,11 +120,12 @@ func NewWithStore(s *store.Store, ts TriageStore, port int, cwdDir string) *Serv
 		port = resolvePort()
 	}
 	srv := &Server{
-		store:       s,
-		triageStore: ts,
-		port:        port,
-		listen:      net.Listen,
-		cwdDir:      cwdDir,
+		store:          s,
+		triageStore:    ts,
+		port:           port,
+		trustedOrigins: buildTrustedOrigins(port),
+		listen:         net.Listen,
+		cwdDir:         cwdDir,
 	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
@@ -139,12 +142,13 @@ func NewWithMutableStore(s *store.Store, ms MutableTriageStore, port int, cwdDir
 		port = resolvePort()
 	}
 	srv := &Server{
-		store:        s,
-		triageStore:  ms,
-		mutableStore: ms,
-		port:         port,
-		listen:       net.Listen,
-		cwdDir:       cwdDir,
+		store:          s,
+		triageStore:    ms,
+		mutableStore:   ms,
+		port:           port,
+		trustedOrigins: buildTrustedOrigins(port),
+		listen:         net.Listen,
+		cwdDir:         cwdDir,
 	}
 	srv.mux = http.NewServeMux()
 	srv.routes()
@@ -156,6 +160,16 @@ func NewWithMutableStore(s *store.Store, ms MutableTriageStore, port int, cwdDir
 // This is called by cmdTriage after project detection (Option A boundary).
 func (s *Server) SetCwdProject(project string) {
 	s.cwdProject = project
+}
+
+// buildTrustedOrigins returns the set of Origin header values that the CSRF
+// middleware accepts for a server bound to port p. Both the 127.0.0.1 and
+// localhost forms are included because browsers may send either.
+func buildTrustedOrigins(p int) map[string]struct{} {
+	return map[string]struct{}{
+		fmt.Sprintf("http://127.0.0.1:%d", p): {},
+		fmt.Sprintf("http://localhost:%d", p):  {},
+	}
 }
 
 // resolvePort reads ENGRAM_TRIAGE_PORT or falls back to DefaultPort.
@@ -224,26 +238,20 @@ func (s *Server) Start() error {
 	return http.Serve(ln, s.mux) //nolint:gosec // intentionally loopback-only
 }
 
-// trustedOrigins is the set of allowed Origin header values for loopback
-// CSRF protection. Only exact matches are accepted. An empty/absent Origin
-// header is allowed (curl, direct nav, same-origin form without CORS).
-var trustedOrigins = map[string]bool{
-	"http://127.0.0.1:7438": true,
-	"http://localhost:7438": true,
-}
-
-// originCheckMiddleware rejects cross-origin requests to state-changing
-// endpoints. If the request carries an Origin header that is NOT in
-// trustedOrigins, it responds with 403 Forbidden.
+// originCheckMiddleware returns an http.HandlerFunc that rejects cross-origin
+// requests to state-changing endpoints. If the request carries an Origin
+// header that is NOT in s.trustedOrigins (derived from the server's runtime
+// port at construction), it responds with 403 Forbidden.
 //
 // Rationale: the loopback triage server has no authentication. An attacker's
 // web page could make cross-origin POST requests (CSRF) if there were no
 // check. Same-origin forms and curl do not send an Origin header, so they
-// are unaffected.
-func originCheckMiddleware(next http.HandlerFunc) http.HandlerFunc {
+// are unaffected. The allowed set is built per-server from the actual port so
+// that servers running on any port other than 7438 are not falsely blocked.
+func (s *Server) originCheckMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if !trustedOrigins[origin] {
+			if _, ok := s.trustedOrigins[origin]; !ok {
 				http.Error(w,
 					"forbidden: cross-origin requests are not allowed on the loopback triage server",
 					http.StatusForbidden)
@@ -267,11 +275,11 @@ func (s *Server) routes() {
 
 	// WU-5 mutation endpoints — wrapped with origin-check CSRF middleware.
 	// Per-item scope toggle: sets the scope of one observation directly.
-	s.mux.HandleFunc("POST /observations/{id}/scope", originCheckMiddleware(s.handleToggleScope))
+	s.mux.HandleFunc("POST /observations/{id}/scope", s.originCheckMiddleware(s.handleToggleScope))
 	// Bulk share-all: with confirm=1 moves the project backlog to shared.
-	s.mux.HandleFunc("POST /project/{name}/share-all", originCheckMiddleware(s.handleShareAll))
+	s.mux.HandleFunc("POST /project/{name}/share-all", s.originCheckMiddleware(s.handleShareAll))
 	// Classify: sets the project default_scope in config.json (cwd project only).
-	s.mux.HandleFunc("POST /project/{name}/classify", originCheckMiddleware(s.handleClassify))
+	s.mux.HandleFunc("POST /project/{name}/classify", s.originCheckMiddleware(s.handleClassify))
 
 	// Static assets: pico.min.css, htmx.min.js, triage.css.
 	// Served under /triage/static/ to avoid collisions with any future API prefix.

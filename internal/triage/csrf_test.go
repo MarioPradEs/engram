@@ -83,6 +83,53 @@ func TestCSRF_SameOriginAllowed(t *testing.T) {
 	}
 }
 
+// TestCSRF_PortDerivedOrigins verifies that the CSRF middleware derives its
+// trusted-origin set from the server's actual runtime port rather than a
+// hardcoded constant. A server constructed on port P must:
+//   - allow  Origin: http://127.0.0.1:P  (200/not-403)
+//   - allow  Origin: http://localhost:P   (200/not-403)
+//   - reject Origin: http://127.0.0.1:<P+1> (403)
+func TestCSRF_PortDerivedOrigins(t *testing.T) {
+	const testPort = 19999 // arbitrary non-default port
+	fs := &fakeMutableStore{}
+	srv := triage.NewWithMutableStore(nil, fs, testPort, "")
+	h := srv.Handler()
+
+	postToggle := func(origin string) int {
+		form := url.Values{"scope": {"shared"}}
+		req := httptest.NewRequest(http.MethodPost, "/observations/1/scope",
+			strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("allows_127_own_port", func(t *testing.T) {
+		code := postToggle("http://127.0.0.1:19999")
+		if code == http.StatusForbidden {
+			t.Errorf("http://127.0.0.1:19999 on port-19999 server: want allowed, got 403")
+		}
+	})
+
+	t.Run("allows_localhost_own_port", func(t *testing.T) {
+		code := postToggle("http://localhost:19999")
+		if code == http.StatusForbidden {
+			t.Errorf("http://localhost:19999 on port-19999 server: want allowed, got 403")
+		}
+	})
+
+	t.Run("rejects_different_port", func(t *testing.T) {
+		code := postToggle("http://127.0.0.1:20000")
+		if code != http.StatusForbidden {
+			t.Errorf("http://127.0.0.1:20000 on port-19999 server: want 403, got %d", code)
+		}
+	})
+}
+
 // TestCSRF_NoOriginAllowed verifies that requests without an Origin header
 // (curl, direct browser navigation) are allowed through.
 func TestCSRF_NoOriginAllowed(t *testing.T) {

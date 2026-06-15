@@ -34,11 +34,14 @@ const (
 	// obsPerProjectLimit is the maximum observations loaded per project page (read view).
 	obsPerProjectLimit = 200
 
-	// obsShareAllLimit is the upper bound used by handleShareAll to fetch ALL
-	// observations for a project before bulk-updating them. Using a very large
-	// sentinel avoids silent truncation (W-2) while keeping the existing
-	// RecentObservations interface unchanged.
-	// In practice, no project is expected to reach 10 million observations.
+	// obsShareAllLimit is a practical sentinel passed to RecentObservations by
+	// handleShareAll to bypass the 200-row read-view cap (obsPerProjectLimit)
+	// and materialize ALL project rows into memory before bulk-updating them.
+	// 10 million is far beyond any realistic local observation count, so the
+	// store effectively returns every row. This is acceptable for a loopback
+	// tool where the entire dataset lives on localhost; it is NOT a streaming
+	// solution and should not be reused in contexts where dataset size is
+	// unbounded or latency is user-facing.
 	obsShareAllLimit = 10_000_000
 )
 

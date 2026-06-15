@@ -1,4 +1,4 @@
-[← Codebase Guide](../CODEBASE-GUIDE.md) | [← Previous: Sync and Cloud](sync-and-cloud.md) | [Next: Integrations →](integrations.md)
+[← Codebase Guide](../CODEBASE-GUIDE.md) | [← Previous: Sync and Cloud](sync-and-cloud.md) | [Next: Triage →](triage.md)
 
 # Cloud Dashboard
 
@@ -57,4 +57,4 @@ The UI cannot lie. If it shows “sync paused”, every push path must be blocke
 
 ---
 
-[← Previous: Sync and Cloud](sync-and-cloud.md) | [Next: Integrations →](integrations.md)
+[← Previous: Sync and Cloud](sync-and-cloud.md) | [Next: Triage →](triage.md)

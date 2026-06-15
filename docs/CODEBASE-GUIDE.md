@@ -52,9 +52,10 @@ The sentence that organizes the whole repo:
 | 4 | [Interfaces](codebase/interfaces.md) | You are changing CLI, MCP, local API, or TUI behavior. |
 | 5 | [Sync and Cloud](codebase/sync-and-cloud.md) | You are changing chunks, remote sync, autosync, transport, or cloud persistence. |
 | 6 | [Dashboard](codebase/dashboard.md) | You are changing browser UI, HTMX partials, cloud dashboard routes, or dashboard policy controls. |
-| 7 | [Integrations](codebase/integrations.md) | You are changing agent setup, plugins, or MCP configuration docs. |
-| 8 | [Maintainer Playbook](codebase/maintainer-playbook.md) | You are reviewing a PR or planning a large change. |
-| 9 | [Reference Map](codebase/reference-map.md) | You need a traceable appendix from docs/source files to purpose. |
+| 7 | [Triage](codebase/triage.md) | You are changing the local triage UI, scope mapping, per-item toggles, bulk share, or classify flow. |
+| 8 | [Integrations](codebase/integrations.md) | You are changing agent setup, plugins, or MCP configuration docs. |
+| 9 | [Maintainer Playbook](codebase/maintainer-playbook.md) | You are reviewing a PR or planning a large change. |
+| 10 | [Reference Map](codebase/reference-map.md) | You need a traceable appendix from docs/source files to purpose. |
 
 ## Quick map: if you need X, read Y
 
@@ -68,6 +69,7 @@ The sentence that organizes the whole repo:
 | Change chunk sync | `internal/sync/sync.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/sync/*_test.go`, `README.md#git-sync` |
 | Change cloud autosync | `internal/cloud/autosync/manager.go` | [Sync and Cloud](codebase/sync-and-cloud.md), `internal/cloud/remote/transport.go`, `DOCS.md#cloud-autosync` |
 | Change the dashboard | `internal/cloud/dashboard/dashboard.go` | [Dashboard](codebase/dashboard.md), `internal/cloud/dashboard/*_templ.go`, `internal/cloud/dashboard/static/styles.css` |
+| Change triage UI | `internal/triage/server.go` | [Triage](codebase/triage.md), `internal/triage/handlers.go`, `internal/triage/*.templ` |
 | Change agent setup | `internal/setup/setup.go` | [Integrations](codebase/integrations.md), `plugin/`, `docs/AGENT-SETUP.md`, `docs/PLUGINS.md` |
 | Prepare or review a large feature | `openspec/changes/*` | [Maintainer Playbook](codebase/maintainer-playbook.md), `openspec/specs/*`, `CONTRIBUTING.md` |
 

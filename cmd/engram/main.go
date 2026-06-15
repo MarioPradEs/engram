@@ -676,6 +676,8 @@ func main() {
 		cmdCloud(cfg)
 	case "reclassify":
 		cmdReclassify(cfg)
+	case "triage":
+		cmdTriage(cfg)
 	case "login":
 		cmdLogin(cfg)
 	case "obsidian-export":
@@ -2487,6 +2489,7 @@ Commands:
                        Example: engram mcp --tools=agent
                        --project NAME  Set process-level default project (overrides cwd detection).
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
+  triage             Start local triage UI (browser, 127.0.0.1:7438)
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
   save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
@@ -2548,6 +2551,9 @@ Commands:
 Environment:
   ENGRAM_DATA_DIR    Override data directory (default: ~/.engram)
   ENGRAM_PORT        Override HTTP server port (default: 7437)
+  ENGRAM_TRIAGE_PORT Override triage UI port (default: 7438)
+  ENGRAM_TRIAGE_NO_BROWSER
+                     Set to 1 to suppress browser auto-open on triage start
   ENGRAM_PROJECT     Process-level default project override.
                      For "engram serve": fallback for GET /sync/status with no project param.
                      For "engram mcp": sets DefaultProject, overriding cwd detection for all tools.

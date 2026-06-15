@@ -173,7 +173,8 @@ basename:
 }
 
 type configFile struct {
-	ProjectName string `json:"project_name"`
+	ProjectName  string `json:"project_name"`
+	DefaultScope string `json:"default_scope,omitempty"`
 }
 
 func detectFromConfig(dir string) (DetectionResult, bool) {

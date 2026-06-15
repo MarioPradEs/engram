@@ -13,6 +13,8 @@ import (
 // triage package dependency-free from the project detection logic.
 // json.Unmarshal silently ignores unknown fields, so this struct is
 // non-breaking against config.json files written by older binaries (REQ-27).
+//
+// NOTE: keep the default_scope JSON tag in sync with internal/project.configFile — divergence is silent.
 type triageConfigFile struct {
 	ProjectName  string `json:"project_name"`
 	DefaultScope string `json:"default_scope,omitempty"`
@@ -20,6 +22,10 @@ type triageConfigFile struct {
 
 // ResolveDefaultScope reads the project's .engram/config.json and returns the
 // effective UI-vocabulary default scope for the project: "shared" or "personal".
+//
+// The projectDir argument MUST be the project git-root (nearest-config dir),
+// NOT an arbitrary subdirectory — callers should resolve it via the
+// project-detection logic first (e.g. internal/project.DetectProject).
 //
 // Fail-safe rules (REQ-20, REQ-21):
 //   - config.json absent → "personal"
@@ -37,6 +43,10 @@ func ResolveDefaultScope(projectDir string) string {
 
 // ResolveDefaultScopeWithPresence is like ResolveDefaultScope but also returns
 // whether the field was explicitly set to a recognised value.
+//
+// The projectDir argument MUST be the project git-root (nearest-config dir),
+// NOT an arbitrary subdirectory — callers should resolve it via the
+// project-detection logic first (e.g. internal/project.DetectProject).
 //
 //   - hasExplicit=true  → the field contained a valid, recognised value ("shared" or "personal")
 //   - hasExplicit=false → the field was absent, empty, unrecognised, or the file was missing/malformed

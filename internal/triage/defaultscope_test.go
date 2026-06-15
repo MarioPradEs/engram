@@ -10,10 +10,9 @@ import (
 // All cases use t.TempDir() fixture files — no real home directory is touched.
 func TestResolveDefaultScope(t *testing.T) {
 	tests := []struct {
-		name     string
-		setup    func(t *testing.T) string // returns projectDir
-		wantUI   string
-		wantHas  bool // wantHas=true means config.json was present with a recognised value
+		name   string
+		setup  func(t *testing.T) string // returns projectDir
+		wantUI string
 	}{
 		{
 			name: "shared value returns shared",
@@ -23,8 +22,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{"project_name":"alpha","default_scope":"shared"}`)
 				return dir
 			},
-			wantUI:  "shared",
-			wantHas: true,
+			wantUI: "shared",
 		},
 		{
 			name: "personal value returns personal",
@@ -34,8 +32,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{"project_name":"alpha","default_scope":"personal"}`)
 				return dir
 			},
-			wantUI:  "personal",
-			wantHas: true,
+			wantUI: "personal",
 		},
 		{
 			name: "missing default_scope field is fail-safe personal",
@@ -45,8 +42,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{"project_name":"alpha"}`)
 				return dir
 			},
-			wantUI:  "personal",
-			wantHas: false,
+			wantUI: "personal",
 		},
 		{
 			name: "absent config.json is fail-safe personal",
@@ -54,8 +50,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				t.Helper()
 				return t.TempDir() // no .engram/config.json
 			},
-			wantUI:  "personal",
-			wantHas: false,
+			wantUI: "personal",
 		},
 		{
 			name: "invalid JSON in config.json is fail-safe personal",
@@ -65,8 +60,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{not valid json`)
 				return dir
 			},
-			wantUI:  "personal",
-			wantHas: false,
+			wantUI: "personal",
 		},
 		{
 			name: "unrecognised value is fail-safe personal",
@@ -76,8 +70,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{"project_name":"alpha","default_scope":"unknown_value"}`)
 				return dir
 			},
-			wantUI:  "personal",
-			wantHas: false,
+			wantUI: "personal",
 		},
 		{
 			name: "empty string value is fail-safe personal",
@@ -87,8 +80,7 @@ func TestResolveDefaultScope(t *testing.T) {
 				writeConfig(t, dir, `{"project_name":"alpha","default_scope":""}`)
 				return dir
 			},
-			wantUI:  "personal",
-			wantHas: false,
+			wantUI: "personal",
 		},
 	}
 

@@ -1324,16 +1324,30 @@ func TestStoreLocalSyncFoundationEnqueuesCoreMutations(t *testing.T) {
 	if state.Lifecycle != SyncLifecyclePending {
 		t.Fatalf("expected pending lifecycle after local writes, got %q", state.Lifecycle)
 	}
+	// Gate B: session (×2) and prompt (×1) rows are enqueued locally but not
+	// exported. The sync_state.last_enqueued_seq still counts all 6 local
+	// mutations (session, obs-insert, obs-update, obs-delete, prompt, session-end).
 	if state.LastEnqueuedSeq != 6 {
-		t.Fatalf("expected 6 enqueued mutations, got %d", state.LastEnqueuedSeq)
+		t.Fatalf("expected 6 enqueued mutations (including local-only session/prompt), got %d", state.LastEnqueuedSeq)
 	}
 
+	// Verify all 6 rows are present in the raw sync_mutations table.
+	var rawTotal int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE acked_at IS NULL`).Scan(&rawTotal); err != nil {
+		t.Fatalf("count raw sync_mutations: %v", err)
+	}
+	if rawTotal != 6 {
+		t.Fatalf("expected 6 raw sync_mutations rows, got %d", rawTotal)
+	}
+
+	// Gate B: ListPendingSyncMutations returns only observation mutations (3).
+	// Session and prompt rows exist locally but are excluded from cloud export.
 	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
 	if err != nil {
 		t.Fatalf("list pending sync mutations: %v", err)
 	}
-	if len(mutations) != 6 {
-		t.Fatalf("expected 6 pending mutations, got %d", len(mutations))
+	if len(mutations) != 3 {
+		t.Fatalf("expected 3 cloud-eligible mutations (observations only), got %d: %+v", len(mutations), mutations)
 	}
 
 	var observationSyncID string
@@ -1352,27 +1366,19 @@ func TestStoreLocalSyncFoundationEnqueuesCoreMutations(t *testing.T) {
 		t.Fatalf("expected prompt sync id to be persisted")
 	}
 
-	if mutations[0].Entity != SyncEntitySession || mutations[0].EntityKey != "sync-session" || mutations[0].Op != SyncOpUpsert {
-		t.Fatalf("unexpected session mutation: %+v", mutations[0])
+	// Verify the 3 cloud-eligible mutations are the 3 observation mutations.
+	if mutations[0].Entity != SyncEntityObservation || mutations[0].EntityKey != observationSyncID || mutations[0].Op != SyncOpUpsert {
+		t.Fatalf("unexpected first cloud mutation (expected obs insert): %+v", mutations[0])
 	}
 	if mutations[1].Entity != SyncEntityObservation || mutations[1].EntityKey != observationSyncID || mutations[1].Op != SyncOpUpsert {
-		t.Fatalf("unexpected observation insert mutation: %+v", mutations[1])
+		t.Fatalf("unexpected second cloud mutation (expected obs update): %+v", mutations[1])
 	}
-	if mutations[2].Entity != SyncEntityObservation || mutations[2].EntityKey != observationSyncID || mutations[2].Op != SyncOpUpsert {
-		t.Fatalf("unexpected observation update mutation: %+v", mutations[2])
-	}
-	if mutations[3].Entity != SyncEntityObservation || mutations[3].EntityKey != observationSyncID || mutations[3].Op != SyncOpDelete {
-		t.Fatalf("unexpected observation delete mutation: %+v", mutations[3])
-	}
-	if mutations[4].Entity != SyncEntityPrompt || mutations[4].EntityKey != promptSyncID || mutations[4].Op != SyncOpUpsert {
-		t.Fatalf("unexpected prompt mutation: %+v", mutations[4])
-	}
-	if mutations[5].Entity != SyncEntitySession || mutations[5].EntityKey != "sync-session" || mutations[5].Op != SyncOpUpsert {
-		t.Fatalf("unexpected end session mutation: %+v", mutations[5])
+	if mutations[2].Entity != SyncEntityObservation || mutations[2].EntityKey != observationSyncID || mutations[2].Op != SyncOpDelete {
+		t.Fatalf("unexpected third cloud mutation (expected obs delete): %+v", mutations[2])
 	}
 
 	var deletedPayload map[string]any
-	if err := json.Unmarshal([]byte(mutations[3].Payload), &deletedPayload); err != nil {
+	if err := json.Unmarshal([]byte(mutations[2].Payload), &deletedPayload); err != nil {
 		t.Fatalf("decode delete payload: %v", err)
 	}
 	if deletedPayload["sync_id"] != observationSyncID {
@@ -1382,15 +1388,33 @@ func TestStoreLocalSyncFoundationEnqueuesCoreMutations(t *testing.T) {
 		t.Fatalf("expected delete payload to mark deleted=true, got %#v", deletedPayload["deleted"])
 	}
 
-	if err := s.AckSyncMutations(DefaultSyncTargetKey, mutations[3].Seq); err != nil {
+	// Verify session and prompt rows exist in raw table (local machinery must work).
+	var sessionMuts, promptMuts int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ?`, SyncEntitySession).Scan(&sessionMuts); err != nil {
+		t.Fatalf("count session mutations: %v", err)
+	}
+	if sessionMuts == 0 {
+		t.Fatal("session mutations must exist in sync_mutations for local machinery")
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE entity = ?`, SyncEntityPrompt).Scan(&promptMuts); err != nil {
+		t.Fatalf("count prompt mutations: %v", err)
+	}
+	if promptMuts == 0 {
+		t.Fatal("prompt mutations must exist in sync_mutations for local machinery")
+	}
+
+	// Ack the obs-delete mutation (seq of mutations[2]).
+	if err := s.AckSyncMutations(DefaultSyncTargetKey, mutations[2].Seq); err != nil {
 		t.Fatalf("ack sync mutations: %v", err)
 	}
 	remaining, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
 	if err != nil {
 		t.Fatalf("list remaining sync mutations: %v", err)
 	}
-	if len(remaining) != 2 || remaining[0].Entity != SyncEntityPrompt || remaining[1].Entity != SyncEntitySession {
-		t.Fatalf("expected prompt and end-session mutations to remain pending, got %+v", remaining)
+	// After acking through the obs-delete seq, the first two obs mutations
+	// are acked too. No more cloud-eligible mutations remain.
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 cloud-eligible mutations remaining after acking obs-delete, got %d: %+v", len(remaining), remaining)
 	}
 }
 
@@ -1493,8 +1517,10 @@ func TestAckSyncMutationSeqsRefreshesProjectScopedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list pending mutations: %v", err)
 	}
-	if len(mutations) < 2 {
-		t.Fatalf("expected at least session + observation mutations, got %+v", mutations)
+	// Gate B: session mutations are local-only and excluded from ListPendingSyncMutations.
+	// Only the observation mutation is cloud-eligible.
+	if len(mutations) < 1 {
+		t.Fatalf("expected at least observation mutation, got %+v", mutations)
 	}
 
 	projectTarget := syncTargetKeyForProject("proj-a")
@@ -4791,31 +4817,59 @@ func TestEnrollProjectBackfillsHistoricalMutations(t *testing.T) {
 		t.Fatalf("enroll project: %v", err)
 	}
 
-	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
-	if err != nil {
-		t.Fatalf("list pending: %v", err)
+	// Gate B: session and prompt mutations are stored locally (for machinery) but
+	// excluded from cloud export. Verify the raw table has 3 backfilled rows.
+	var rawTotal int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations WHERE project = ?`, "legacy-proj").Scan(&rawTotal); err != nil {
+		t.Fatalf("count raw mutations: %v", err)
 	}
-	if len(mutations) != 3 {
-		t.Fatalf("expected 3 backfilled mutations, got %d", len(mutations))
+	if rawTotal != 3 {
+		t.Fatalf("expected 3 backfilled mutations in sync_mutations, got %d", rawTotal)
 	}
 
+	// Verify each entity's key and project in the raw table.
 	expected := map[string]string{
 		SyncEntitySession:     "legacy-session",
 		SyncEntityObservation: "obs-legacy",
 		SyncEntityPrompt:      "prompt-legacy",
 	}
-	for _, mutation := range mutations {
-		entityKey, ok := expected[mutation.Entity]
+	rows, err := s.db.Query(`SELECT entity, entity_key, project FROM sync_mutations WHERE project = ?`, "legacy-proj")
+	if err != nil {
+		t.Fatalf("query mutations: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entity, entityKey, project string
+		if err := rows.Scan(&entity, &entityKey, &project); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		wantKey, ok := expected[entity]
 		if !ok {
-			t.Fatalf("unexpected mutation entity %q", mutation.Entity)
+			t.Fatalf("unexpected mutation entity %q", entity)
 		}
-		if mutation.EntityKey != entityKey {
-			t.Fatalf("expected entity_key %q for %s, got %q", entityKey, mutation.Entity, mutation.EntityKey)
+		if entityKey != wantKey {
+			t.Fatalf("expected entity_key %q for %s, got %q", wantKey, entity, entityKey)
 		}
-		if mutation.Project != "legacy-proj" {
-			t.Fatalf("expected project legacy-proj, got %q", mutation.Project)
+		if project != "legacy-proj" {
+			t.Fatalf("expected project legacy-proj, got %q", project)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	// ListPendingSyncMutations (cloud export) returns only the observation (Gate B excludes session+prompt).
+	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(mutations) != 1 {
+		t.Fatalf("expected 1 cloud-eligible mutation (observation only), got %d", len(mutations))
+	}
+	if mutations[0].Entity != SyncEntityObservation || mutations[0].EntityKey != "obs-legacy" {
+		t.Fatalf("expected obs-legacy observation mutation, got %+v", mutations[0])
+	}
+
 	state, err := s.GetSyncState(DefaultSyncTargetKey)
 	if err != nil {
 		t.Fatalf("get sync state: %v", err)
@@ -4920,20 +4974,32 @@ func TestEnrollProjectBackfillsSessionOwnedEntitiesWithEmptyProject(t *testing.T
 		t.Fatalf("enroll project: %v", err)
 	}
 
-	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	// Gate B: session and prompt mutations are stored locally but excluded from
+	// cloud export. Verify all 3 rows are in the raw sync_mutations table.
+	rawRows, err := s.db.Query(
+		`SELECT entity, entity_key, project FROM sync_mutations WHERE acked_at IS NULL ORDER BY seq`,
+	)
 	if err != nil {
-		t.Fatalf("list pending: %v", err)
+		t.Fatalf("query raw mutations: %v", err)
 	}
-	if len(mutations) != 3 {
-		t.Fatalf("expected session + observation + prompt backfilled, got %d", len(mutations))
-	}
-
 	byEntity := map[string]string{}
-	for _, mutation := range mutations {
-		byEntity[mutation.Entity] = mutation.EntityKey
-		if mutation.Project != "legacy-proj" {
-			t.Fatalf("expected derived project legacy-proj for backfilled mutation, got %q", mutation.Project)
+	for rawRows.Next() {
+		var entity, entityKey, project string
+		if err := rawRows.Scan(&entity, &entityKey, &project); err != nil {
+			rawRows.Close()
+			t.Fatalf("scan: %v", err)
 		}
+		byEntity[entity] = entityKey
+		if project != "legacy-proj" {
+			t.Fatalf("expected derived project legacy-proj, got %q", project)
+		}
+	}
+	rawRows.Close()
+	if err := rawRows.Err(); err != nil {
+		t.Fatalf("raw rows: %v", err)
+	}
+	if len(byEntity) != 3 {
+		t.Fatalf("expected session + observation + prompt backfilled in sync_mutations, got %d entities: %v", len(byEntity), byEntity)
 	}
 	if byEntity[SyncEntitySession] != "legacy-empty-project" {
 		t.Fatalf("expected session backfill for legacy-empty-project, got %q", byEntity[SyncEntitySession])
@@ -4943,6 +5009,15 @@ func TestEnrollProjectBackfillsSessionOwnedEntitiesWithEmptyProject(t *testing.T
 	}
 	if byEntity[SyncEntityPrompt] != "prompt-empty-project" {
 		t.Fatalf("expected prompt backfill for empty-project entity, got %q", byEntity[SyncEntityPrompt])
+	}
+
+	// ListPendingSyncMutations (cloud export) returns only the observation.
+	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(mutations) != 1 || mutations[0].Entity != SyncEntityObservation || mutations[0].EntityKey != "obs-empty-project" {
+		t.Fatalf("expected 1 cloud-eligible mutation (obs-empty-project), got %d: %+v", len(mutations), mutations)
 	}
 
 	var obsPayloadRaw string
@@ -5031,25 +5106,20 @@ func TestEnrollProjectBackfillsPromptDeleteTombstonesWithDerivedProject(t *testi
 		t.Fatalf("enroll project: %v", err)
 	}
 
-	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
-	if err != nil {
-		t.Fatalf("list pending: %v", err)
+	// Gate B: prompt mutations are local-only (excluded from ListPendingSyncMutations).
+	// Verify the tombstone delete row exists directly in sync_mutations.
+	var op, project string
+	if err := s.db.QueryRow(
+		`SELECT op, project FROM sync_mutations WHERE entity = ? AND entity_key = ?`,
+		SyncEntityPrompt, "prompt-soft-delete",
+	).Scan(&op, &project); err != nil {
+		t.Fatalf("expected prompt tombstone delete mutation to be backfilled in sync_mutations, got: %v", err)
 	}
-
-	var foundDelete bool
-	for _, mutation := range mutations {
-		if mutation.Entity == SyncEntityPrompt && mutation.EntityKey == "prompt-soft-delete" {
-			if mutation.Op != SyncOpDelete {
-				t.Fatalf("expected prompt tombstone backfill op=delete, got %q", mutation.Op)
-			}
-			if mutation.Project != "legacy-proj" {
-				t.Fatalf("expected project derived from session to be legacy-proj, got %q", mutation.Project)
-			}
-			foundDelete = true
-		}
+	if op != SyncOpDelete {
+		t.Fatalf("expected prompt tombstone backfill op=delete, got %q", op)
 	}
-	if !foundDelete {
-		t.Fatalf("expected prompt tombstone delete mutation to be backfilled")
+	if project != "legacy-proj" {
+		t.Fatalf("expected project derived from session to be legacy-proj, got %q", project)
 	}
 }
 
@@ -5267,14 +5337,27 @@ func TestNewRepairsAlreadyEnrolledProjectsMissingHistoricalSyncMutations(t *test
 		t.Fatalf("new store after enrolled legacy state: %v", err)
 	}
 
+	// Gate B: session and prompt are stored locally but excluded from cloud export.
+	// The raw table must have all 3 repaired mutations (session, obs, prompt).
+	var rawCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sync_mutations`).Scan(&rawCount); err != nil {
+		_ = s.Close()
+		t.Fatalf("count raw sync_mutations after repair: %v", err)
+	}
+	if rawCount != 3 {
+		_ = s.Close()
+		t.Fatalf("expected 3 repaired mutations in sync_mutations, got %d", rawCount)
+	}
+
+	// ListPendingSyncMutations returns only the observation (cloud-eligible).
 	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
 	if err != nil {
 		_ = s.Close()
 		t.Fatalf("list pending after repair: %v", err)
 	}
-	if len(mutations) != 3 {
+	if len(mutations) != 1 || mutations[0].Entity != SyncEntityObservation {
 		_ = s.Close()
-		t.Fatalf("expected 3 repaired mutations, got %d", len(mutations))
+		t.Fatalf("expected 1 cloud-eligible mutation (observation), got %d: %+v", len(mutations), mutations)
 	}
 
 	state, err := s.GetSyncState(DefaultSyncTargetKey)
@@ -5786,6 +5869,19 @@ func TestListPendingFiltersNonEnrolledProjects(t *testing.T) {
 	if err := s.CreateSession("s-enrolled", "enrolled-proj", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	// Add an observation for enrolled-proj so it has a cloud-eligible mutation.
+	// Gate B excludes session mutations from ListPendingSyncMutations, so an
+	// observation is required to verify enrolled-proj appears in the export list.
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-enrolled",
+		Type:      "note",
+		Title:     "enrolled obs",
+		Content:   "content",
+		Project:   "enrolled-proj",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
 	if err := s.CreateSession("s-not-enrolled", "other-proj", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -5800,7 +5896,7 @@ func TestListPendingFiltersNonEnrolledProjects(t *testing.T) {
 		t.Fatalf("list pending: %v", err)
 	}
 
-	// Only enrolled-proj mutations should appear.
+	// Only enrolled-proj mutations should appear (observation, not session/prompt).
 	for _, m := range mutations {
 		if m.Project == "other-proj" {
 			t.Fatalf("non-enrolled project 'other-proj' should not appear in pending mutations")
@@ -5875,6 +5971,18 @@ func TestSkipAckPreservesEnrolledProjectMutations(t *testing.T) {
 	if err := s.CreateSession("s-enrolled", "enrolled", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	// Add an observation so enrolled project has a cloud-eligible mutation.
+	// Gate B excludes session mutations, so only observations appear in ListPending.
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-enrolled",
+		Type:      "note",
+		Title:     "skip-ack obs",
+		Content:   "content",
+		Project:   "enrolled",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
 	if err := s.CreateSession("s-not-enrolled", "not-enrolled", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -5891,7 +5999,7 @@ func TestSkipAckPreservesEnrolledProjectMutations(t *testing.T) {
 		t.Fatal("expected at least one mutation to be skip-acked for 'not-enrolled'")
 	}
 
-	// Remaining pending should be only "enrolled" mutations.
+	// Remaining pending should be only "enrolled" mutations (observation only, Gate B).
 	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
@@ -5902,7 +6010,7 @@ func TestSkipAckPreservesEnrolledProjectMutations(t *testing.T) {
 		}
 	}
 	if len(mutations) == 0 {
-		t.Fatal("expected enrolled-project mutations to remain")
+		t.Fatal("expected enrolled-project observation mutation to remain after skip-ack")
 	}
 }
 
@@ -5915,21 +6023,36 @@ func TestEmptyProjectMutationsAlwaysSync(t *testing.T) {
 	if err := s.CreateSession("global-session", "", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
+	// Gate B: session mutations are local-only and excluded from ListPendingSyncMutations.
+	// Add an observation with empty project to verify empty-project obs always syncs.
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "global-session",
+		Type:      "note",
+		Title:     "global obs",
+		Content:   "content",
+		Project:   "",
+		Scope:     "team",
+	}); err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
 
-	// No projects enrolled, but empty-project mutations should still appear.
+	// No projects enrolled, but empty-project observation mutations should still appear.
 	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
 
 	if len(mutations) == 0 {
-		t.Fatal("expected empty-project mutations to always sync regardless of enrollment")
+		t.Fatal("expected empty-project observation mutations to always sync regardless of enrollment")
 	}
 
-	// Verify they have project = ''.
+	// Verify they have project = '' and are observations.
 	for _, m := range mutations {
 		if m.Project != "" {
 			t.Fatalf("expected empty project, got %q", m.Project)
+		}
+		if m.Entity != SyncEntityObservation {
+			t.Fatalf("expected only observation entities from Gate B, got %q", m.Entity)
 		}
 	}
 }
@@ -5986,12 +6109,35 @@ func TestMixedEnrolledAndEmptyProjectMutations(t *testing.T) {
 		t.Fatalf("create unenrolled session: %v", err)
 	}
 
+	// Gate B: session mutations are excluded from ListPendingSyncMutations.
+	// Add observations so enrolled-mix and global (empty-project) appear in cloud export.
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "mix-enrolled",
+		Type:      "note",
+		Title:     "enrolled obs",
+		Content:   "content",
+		Project:   "enrolled-mix",
+		Scope:     "project",
+	}); err != nil {
+		t.Fatalf("add enrolled observation: %v", err)
+	}
+	if _, err := s.AddObservation(AddObservationParams{
+		SessionID: "mix-global",
+		Type:      "note",
+		Title:     "global obs",
+		Content:   "content",
+		Project:   "",
+		Scope:     "team",
+	}); err != nil {
+		t.Fatalf("add global observation: %v", err)
+	}
+
 	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 100)
 	if err != nil {
 		t.Fatalf("list pending: %v", err)
 	}
 
-	// Should have enrolled-mix and empty-project mutations, but NOT unenrolled-mix.
+	// Should have enrolled-mix and empty-project observations, but NOT unenrolled-mix.
 	var hasEnrolled, hasGlobal bool
 	for _, m := range mutations {
 		if m.Project == "unenrolled-mix" {
@@ -6791,19 +6937,17 @@ func TestDeleteSession_EnrolledProjectEnqueuesSyncDeleteMutation(t *testing.T) {
 		t.Fatalf("expected prompt rows to be removed with enrolled delete, got %d", len(prompts))
 	}
 
-	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
-	if err != nil {
-		t.Fatalf("list pending mutations: %v", err)
-	}
-	if len(mutations) == 0 {
-		t.Fatal("expected session delete mutation to be enqueued")
-	}
-	last := mutations[len(mutations)-1]
-	if last.Entity != SyncEntitySession || last.EntityKey != "sess-enrolled" || last.Op != SyncOpDelete {
-		t.Fatalf("expected final mutation session/delete for sess-enrolled, got %+v", last)
+	// Gate B: session mutations are local-only and excluded from ListPendingSyncMutations.
+	// Verify the session delete row exists directly in sync_mutations (local machinery).
+	var rawPayload string
+	if err := s.db.QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ? AND op = ? ORDER BY seq DESC LIMIT 1`,
+		SyncEntitySession, "sess-enrolled", SyncOpDelete,
+	).Scan(&rawPayload); err != nil {
+		t.Fatalf("expected session delete mutation in sync_mutations, got: %v", err)
 	}
 	var payload map[string]any
-	if err := json.Unmarshal([]byte(last.Payload), &payload); err != nil {
+	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
 		t.Fatalf("decode session delete payload: %v", err)
 	}
 	if payload["id"] != "sess-enrolled" {
@@ -6814,6 +6958,17 @@ func TestDeleteSession_EnrolledProjectEnqueuesSyncDeleteMutation(t *testing.T) {
 	}
 	if _, ok := payload["deleted_at"]; !ok {
 		t.Fatalf("expected delete payload to include deleted_at, got %#v", payload)
+	}
+
+	// ListPendingSyncMutations must not return any session mutation.
+	mutations, err := s.ListPendingSyncMutations(DefaultSyncTargetKey, 10)
+	if err != nil {
+		t.Fatalf("list pending mutations: %v", err)
+	}
+	for _, m := range mutations {
+		if m.Entity == SyncEntitySession {
+			t.Fatalf("Gate B: session mutation must not appear in ListPendingSyncMutations, got %+v", m)
+		}
 	}
 }
 

@@ -3613,12 +3613,14 @@ func (s *Store) ListPendingSyncMutations(targetKey string, limit int) ([]SyncMut
 	}
 	// Only return mutations for enrolled projects or empty-project (global) mutations.
 	// Empty-project mutations always sync regardless of enrollment.
+	// Gate B: prompt and session entities are local-only — excluded from export.
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.seq, sm.target_key, sm.entity, sm.entity_key, sm.op, sm.payload, sm.source, sm.project, sm.occurred_at, sm.acked_at
 		FROM sync_mutations sm
 		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
 		WHERE sm.target_key = ? AND sm.acked_at IS NULL
 		  AND (sm.project = '' OR sep.project IS NOT NULL)
+		  AND sm.entity NOT IN ('prompt', 'session')
 		ORDER BY sm.seq ASC
 		LIMIT ?`, targetKey, limit)
 	if err != nil {
@@ -3642,6 +3644,7 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 	if limit <= 0 {
 		limit = 100
 	}
+	// Gate B: prompt and session entities are local-only — excluded from export.
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.seq, sm.target_key, sm.entity, sm.entity_key, sm.op, sm.payload, sm.source, sm.project, sm.occurred_at, sm.acked_at
 		FROM sync_mutations sm
@@ -3649,6 +3652,7 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 		WHERE sm.target_key = ? AND sm.acked_at IS NULL
 		  AND sm.seq > ?
 		  AND (sm.project = '' OR sep.project IS NOT NULL)
+		  AND sm.entity NOT IN ('prompt', 'session')
 		ORDER BY sm.seq ASC
 		LIMIT ?`, targetKey, afterSeq, limit)
 	if err != nil {
@@ -3669,6 +3673,8 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 
 func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
+	// Gate B: prompt and session entities are local-only — excluded from export
+	// count so they do not block sync readiness or enrollment checks.
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.project, COUNT(*)
 		FROM sync_mutations sm
@@ -3677,6 +3683,7 @@ func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]Pendin
 		  AND sm.acked_at IS NULL
 		  AND sm.project != ''
 		  AND sep.project IS NULL
+		  AND sm.entity NOT IN ('prompt', 'session')
 		GROUP BY sm.project
 		ORDER BY sm.project ASC`, targetKey)
 	if err != nil {
@@ -3897,9 +3904,12 @@ func (s *Store) HasPendingSyncMutationsForProject(project string) (bool, error) 
 		return false, nil
 	}
 
+	// Gate B: prompt and session entities are local-only; exclude them so they
+	// do not report as blocking pending cloud mutations for the project.
 	var count int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND project = ? AND acked_at IS NULL`,
+		`SELECT COUNT(*) FROM sync_mutations WHERE target_key = ? AND project = ? AND acked_at IS NULL
+		 AND entity NOT IN ('prompt', 'session')`,
 		DefaultSyncTargetKey,
 		project,
 	).Scan(&count)
@@ -3949,11 +3959,14 @@ func (s *Store) refreshProjectSyncStateTx(tx *sql.Tx, project string) error {
 		maxEnqueuedSeq = state.LastEnqueuedSeq
 	}
 
+	// Gate B: prompt and session entities are local-only; exclude them from the
+	// pending count so they do not keep the project lifecycle in "pending" state.
 	var pendingCount int
 	if err := tx.QueryRow(
 		`SELECT COUNT(*)
 		 FROM sync_mutations
-		 WHERE target_key = ? AND project = ? AND acked_at IS NULL`,
+		 WHERE target_key = ? AND project = ? AND acked_at IS NULL
+		   AND entity NOT IN ('prompt', 'session')`,
 		DefaultSyncTargetKey,
 		project,
 	).Scan(&pendingCount); err != nil {

@@ -35,7 +35,7 @@ internal/triage/server.go
       ├── GET /                 index: all projects + stats
       ├── GET /project/{name}   per-project observation list
       ├── POST /observations/{id}/scope   per-item scope toggle
-      ├── POST /project/{name}/share-all  bulk move to shared (confirm gate)
+      ├── POST /project/{name}/set-scope   bidirectional bulk set-scope (confirm gate)
       ├── POST /project/{name}/classify   set project default_scope (cwd only)
       └── GET /triage/static/   embedded pico.min.css + htmx.min.js + triage.css
             │
@@ -59,7 +59,7 @@ internal/triage/server.go
 | `internal/triage/configwrite.go` | `WriteProjectDefaultScope` — atomic temp+rename write to config.json. |
 | `internal/triage/layout.templ` | Top-level HTML layout (pico + htmx + triage.css). |
 | `internal/triage/projects.templ` | Index page: project cards with stats. |
-| `internal/triage/projectlist.templ` | Per-project list: per-row toggle forms, bulk share-all, classify controls. |
+| `internal/triage/projectlist.templ` | Per-project list: per-row toggle forms, bidirectional bulk set-scope, classify controls. |
 | `internal/triage/embed.go` | Embedded static assets via `//go:embed`. |
 | `internal/triage/static/` | `triage.css`, `pico.min.css`, `htmx.min.js`. |
 
@@ -71,7 +71,7 @@ Loopback-only, no authentication. Access is controlled by network position: only
 
 ### CSRF mitigation
 
-State-changing POST endpoints (`/observations/{id}/scope`, `/project/{name}/share-all`, `/project/{name}/classify`) are wrapped with an **Origin-check middleware**. If a request carries an `Origin` header that is not one of the trusted loopback origins (`http://127.0.0.1:7438`, `http://localhost:7438`), the server responds `403 Forbidden`.
+State-changing POST endpoints (`/observations/{id}/scope`, `/project/{name}/set-scope`, `/project/{name}/classify`) are wrapped with an **Origin-check middleware**. If a request carries an `Origin` header that is not one of the trusted loopback origins (`http://127.0.0.1:7438`, `http://localhost:7438`), the server responds `403 Forbidden`.
 
 This prevents a malicious web page from making cross-origin requests to the triage server on behalf of the local user. Requests without an `Origin` header (curl, direct browser navigation, same-origin form submissions) pass through unchanged.
 

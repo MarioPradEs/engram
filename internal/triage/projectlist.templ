@@ -8,6 +8,110 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
+// ─── PR#3 / E2b: Tag-scope template functions ─────────────────────────────────
+
+// TagScopeConfirmPage renders the direction-sensitive confirmation prompt for
+// bulk-by-tag scope actions (REQ-55, D7). Displayed when POST /project/{name}/tag-scope
+// is called without confirm=1 and at least one matching observation exists.
+//
+// scope=="shared": includes sync-risk warning (observations already sent cannot be recalled).
+// scope=="personal": lighter copy, no sync-risk warning.
+templ TagScopeConfirmPage(project, facet, value string, count int, scope string) {
+	<section>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="back-link">← Back to { project }</a>
+		if scope == "shared" {
+			<h2>Confirm: mark { facet }={ value } as shared</h2>
+			<p>
+				You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> with
+				<strong>{ facet }={ value }</strong> in <strong>{ project }</strong> as <em>shared</em>.
+			</p>
+			<p class="triage-warning-notice">
+				This moves the matched observations to the shared tier. Observations already sent cannot be recalled (Gate A is v1.5).
+			</p>
+		} else {
+			<h2>Confirm: mark { facet }={ value } as personal</h2>
+			<p>
+				You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> with
+				<strong>{ facet }={ value }</strong> in <strong>{ project }</strong> as <em>personal</em>.
+			</p>
+			<p>These observations will no longer be shared with the team.</p>
+		}
+		<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/tag-scope") }>
+			<input type="hidden" name="facet" value={ facet }/>
+			<input type="hidden" name="value" value={ value }/>
+			<input type="hidden" name="scope" value={ scope }/>
+			<input type="hidden" name="confirm" value="1"/>
+			<button type="submit" class="btn-confirm-share">Yes, mark { fmt.Sprintf("%d", count) } as { scope }</button>
+		</form>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="btn-cancel">Cancel</a>
+	</section>
+}
+
+// TagScopeEmptyPage is rendered when ObservationsByTag returns no matching results
+// (REQ-53, D5; Scenario B-07). No confirmation button is shown — the action is blocked.
+templ TagScopeEmptyPage(project, facet, value string) {
+	<section>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="back-link">← Back to { project }</a>
+		<h2>No observations found</h2>
+		<p class="empty-state">
+			No observations found for <strong>{ facet }={ value }</strong> in project <strong>{ project }</strong>.
+		</p>
+		<p>Try a different facet or value, or check that observations have been tagged.</p>
+		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="btn-cancel">Back</a>
+	</section>
+}
+
+// TagValuesFragment renders <option> elements for the value <select> in the tag-picker form.
+// It is designed for htmx swap into #tag-values when the facet select changes (AD2, REQ-52).
+// Empty values renders a single disabled hint option (Scenario B-06).
+templ TagValuesFragment(values []string) {
+	if len(values) == 0 {
+		<option value="" disabled>No values for this facet</option>
+	} else {
+		for _, v := range values {
+			<option value={ v }>{ v }</option>
+		}
+	}
+}
+
+// TagPickerForm renders the bulk-by-tag picker form on the per-project page (AD2, AD3).
+// It is embedded in ProjectListPage when there are observations.
+// project is the URL-safe project name.
+// initialValues is the pre-rendered initial set of values for the default facet (juego).
+// If nil, the value <select> starts empty and is populated via htmx on load.
+templ TagPickerForm(project string, initialValues []string) {
+	<div class="tag-scope-picker">
+		<h3>Bulk by tag</h3>
+		<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/tag-scope") }>
+			<label for="tag-facet">Facet</label>
+			<select id="tag-facet" name="facet"
+				hx-get={ string(templ.SafeURL("/project/" + url.PathEscape(project) + "/tag-values")) }
+				hx-target="#tag-values"
+				hx-trigger="change"
+				hx-include="[name='facet']">
+				<option value="juego">juego</option>
+				<option value="tipo">tipo</option>
+			</select>
+			<label for="tag-values">Value</label>
+			<select id="tag-values" name="value">
+				if len(initialValues) == 0 {
+					<option value="" disabled>No values for this facet</option>
+				} else {
+					for _, v := range initialValues {
+						<option value={ v }>{ v }</option>
+					}
+				}
+			</select>
+			<label for="tag-scope-select">Scope</label>
+			<select id="tag-scope-select" name="scope">
+				<option value="shared">shared</option>
+				<option value="personal">personal</option>
+			</select>
+			<button type="submit" class="btn-bulk-share">Apply to tag</button>
+		</form>
+	</div>
+}
+
 // ObservationRow is the view model for a single observation in the project list.
 // It carries the pre-computed UI scope and needs-triage flag.
 type ObservationRow struct {
@@ -20,7 +124,9 @@ type ObservationRow struct {
 // Observations are pre-sorted by the handler (newest first via store query).
 // cwdProject is the project name that matches the cwd at server launch time;
 // classify controls are only rendered when project == cwdProject (Option A, W-1).
-templ ProjectListPage(project string, rows []ObservationRow, cwdProject string) {
+// tagInitialValues is the initial value list for the tag-picker (juego facet);
+// nil or empty results in a disabled "No values" option.
+templ ProjectListPage(project string, rows []ObservationRow, cwdProject string, tagInitialValues []string) {
 	<section>
 		<a href="/" class="back-link">← All Projects</a>
 		<h2>
@@ -49,6 +155,7 @@ templ ProjectListPage(project string, rows []ObservationRow, cwdProject string) 
 						<button type="submit" class="btn-classify">Set default: personal</button>
 					</form>
 				}
+				@TagPickerForm(project, tagInitialValues)
 			</div>
 			<div class="obs-list">
 				for _, row := range rows {

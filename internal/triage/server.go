@@ -292,6 +292,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /project/{name}/set-scope", s.originCheckMiddleware(s.handleSetProjectScope))
 	// Classify: sets the project default_scope in config.json (cwd project only).
 	s.mux.HandleFunc("POST /project/{name}/classify", s.originCheckMiddleware(s.handleClassify))
+	// PR#3 / E2b: bulk-by-tag scope action (REQ-50, D2, D3, D5, D7; AD1).
+	s.mux.HandleFunc("POST /project/{name}/tag-scope", s.originCheckMiddleware(s.handleTagScope))
+	// PR#3 / E2b: htmx tag-values fragment — populates value <select> on facet change (REQ-52, AD2).
+	s.mux.HandleFunc("GET /project/{name}/tag-values", s.handleTagValues)
 
 	// Static assets: pico.min.css, htmx.min.js, triage.css.
 	// Served under /triage/static/ to avoid collisions with any future API prefix.

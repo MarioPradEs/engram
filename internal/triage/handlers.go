@@ -125,7 +125,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	ts := s.triageStore
 	if ts == nil {
 		// No store — render empty project page for tests.
-		page := ProjectListPage(projectName, nil, s.cwdProject)
+		page := ProjectListPage(projectName, nil, s.cwdProject, nil)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := TriageLayout(projectName, page).Render(context.Background(), w); err != nil {
 			log.Printf("[triage] handleProject render error: %v", err)
@@ -151,9 +151,19 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Pre-load initial tag values for the juego facet (tag-picker, PR#3 / E2b).
+	// If the mutable store is available, fetch distinct juego values for the picker.
+	// On failure, fall back to nil (picker shows "No values" hint — non-fatal).
+	var tagInitialValues []string
+	if ms := s.mutableStore; ms != nil {
+		if vals, err := ms.DistinctTagValues(projectName, "juego"); err == nil {
+			tagInitialValues = vals
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Pass cwdProject so the template gates classify controls to the cwd project (W-1).
-	page := ProjectListPage(projectName, rows, s.cwdProject)
+	page := ProjectListPage(projectName, rows, s.cwdProject, tagInitialValues)
 	if err := TriageLayout(projectName, page).Render(context.Background(), w); err != nil {
 		log.Printf("[triage] handleProject render error: %v", err)
 	}
@@ -307,6 +317,185 @@ func (s *Server) handleSetProjectScope(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/project/"+url.PathEscape(projectName), http.StatusSeeOther)
+}
+
+// tagScopeFacetAllowList is the closed set of facets accepted by handleTagScope
+// and handleTagValues. Mirrors the store-level allow-list (tagFacetAllowList in store.go)
+// so that invalid facets are rejected at the handler boundary before any store call.
+var tagScopeFacetAllowList = map[string]bool{
+	"juego": true,
+	"tipo":  true,
+}
+
+// handleTagScope bulk-sets the scope of all observations in a project that match
+// a given tag facet/value pair.
+// POST /project/{name}/tag-scope
+//
+// Form fields:
+//
+//	facet   — "juego" or "tipo" (required; 400 otherwise — REQ-51, D3)
+//	value   — tag value to match (required)
+//	scope   — "shared" or "personal" (required; 400 otherwise)
+//	confirm — "1" to execute; absent to show confirmation page first
+//
+// Without confirm=1:
+//   - Zero matches → renders TagScopeEmptyPage (inline message; no confirm button — D5, REQ-53).
+//   - One or more matches → renders TagScopeConfirmPage (D7, REQ-55):
+//   - → shared: sync-risk warning.
+//   - → personal: lighter copy.
+//
+// With confirm=1: updates matching observations to the chosen scope, skipping those
+// already at the target (same guard as handleSetProjectScope). Does NOT write
+// default_scope to config.json — tag-scope is a subset action, not a project-wide
+// default change (D4; only handleSetProjectScope writes config.json).
+//
+// CSRF: must be wrapped in originCheckMiddleware (see routes()).
+// Per-project only (D2): the project name comes from the URL segment {name}.
+func (s *Server) handleTagScope(w http.ResponseWriter, r *http.Request) {
+	rawName := r.PathValue("name")
+	if rawName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	projectName, err := url.PathUnescape(rawName)
+	if err != nil || projectName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	// Validate facet (allow-list: juego, tipo only — REQ-51, D3).
+	facet := r.FormValue("facet")
+	if !tagScopeFacetAllowList[facet] {
+		http.Error(w,
+			fmt.Sprintf("invalid facet %q: must be one of {juego, tipo}", facet),
+			http.StatusBadRequest)
+		return
+	}
+
+	// Validate scope.
+	uiScope := r.FormValue("scope")
+	if uiScope != "shared" && uiScope != "personal" {
+		http.Error(w,
+			fmt.Sprintf("invalid scope %q: must be 'shared' or 'personal'", uiScope),
+			http.StatusBadRequest)
+		return
+	}
+
+	value := r.FormValue("value")
+
+	ms := s.mutableStore
+	if ms == nil {
+		http.Error(w, "store not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Fetch matching observations via the tag-index method (PR#2 / E2a).
+	obs, err := ms.ObservationsByTag(projectName, facet, value, obsBulkScopeLimit)
+	if err != nil {
+		log.Printf("[triage] handleTagScope %q %s=%s: ObservationsByTag: %v", projectName, facet, value, err)
+		http.Error(w, "failed to query observations by tag", http.StatusInternalServerError)
+		return
+	}
+
+	// D5 zero-match guard: block confirmation and show inline message.
+	if len(obs) == 0 {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		page := TagScopeEmptyPage(projectName, facet, value)
+		if err := TriageLayout("No observations found", page).Render(context.Background(), w); err != nil {
+			log.Printf("[triage] handleTagScope empty render: %v", err)
+		}
+		return
+	}
+
+	confirmed := r.FormValue("confirm") == "1"
+	if !confirmed {
+		// Return direction-sensitive confirmation page (D7, REQ-55).
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		page := TagScopeConfirmPage(projectName, facet, value, len(obs), uiScope)
+		title := "Confirm bulk tag-scope"
+		if err := TriageLayout(title, page).Render(context.Background(), w); err != nil {
+			log.Printf("[triage] handleTagScope confirm render: %v", err)
+		}
+		return
+	}
+
+	// Execute the bulk update, skipping observations already at the target scope.
+	// Same guard as handleSetProjectScope — avoids spurious store mutations.
+	internalScope := ToInternalScope(uiScope)
+	for _, o := range obs {
+		if o.Scope == internalScope {
+			continue
+		}
+		if err := ms.UpdateObservationScope(o.ID, internalScope); err != nil {
+			log.Printf("[triage] handleTagScope %q %s=%s: UpdateObservationScope id=%d: %v",
+				projectName, facet, value, o.ID, err)
+			http.Error(w, "partial update — some items may not have been updated", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// DO NOT write config.json here (D4: only handleSetProjectScope writes default_scope;
+	// tag-scope is a per-subset action and must not change the whole-project default).
+
+	http.Redirect(w, r, "/project/"+url.PathEscape(projectName), http.StatusSeeOther)
+}
+
+// handleTagValues returns an htmx fragment of <option> elements for the value
+// <select> in the tag-picker form. Called when the facet select changes.
+// GET /project/{name}/tag-values?facet=X
+//
+// Query params:
+//
+//	facet — "juego" or "tipo" (required; 400 otherwise — REQ-51, D3)
+//
+// Response: an HTML fragment (no full HTML shell) containing <option> elements
+// suitable for htmx swap into #tag-values. Empty values → single disabled hint.
+func (s *Server) handleTagValues(w http.ResponseWriter, r *http.Request) {
+	rawName := r.PathValue("name")
+	if rawName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	projectName, err := url.PathUnescape(rawName)
+	if err != nil || projectName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	facet := r.URL.Query().Get("facet")
+	if !tagScopeFacetAllowList[facet] {
+		http.Error(w,
+			fmt.Sprintf("invalid facet %q: must be one of {juego, tipo}", facet),
+			http.StatusBadRequest)
+		return
+	}
+
+	ms := s.mutableStore
+	if ms == nil {
+		// Graceful degradation: no store → empty fragment.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := TagValuesFragment(nil).Render(context.Background(), w); err != nil {
+			log.Printf("[triage] handleTagValues no-store render: %v", err)
+		}
+		return
+	}
+
+	values, err := ms.DistinctTagValues(projectName, facet)
+	if err != nil {
+		log.Printf("[triage] handleTagValues %q %s: DistinctTagValues: %v", projectName, facet, err)
+		http.Error(w, "failed to fetch tag values", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := TagValuesFragment(values).Render(context.Background(), w); err != nil {
+		log.Printf("[triage] handleTagValues render: %v", err)
+	}
 }
 
 // handleClassify sets the default_scope for the cwd project in config.json.

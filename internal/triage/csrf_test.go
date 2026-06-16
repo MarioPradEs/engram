@@ -32,7 +32,7 @@ func TestCSRF_CrossOriginRejected(t *testing.T) {
 		body   url.Values
 	}{
 		{http.MethodPost, "/observations/1/scope", url.Values{"scope": {"shared"}}},
-		{http.MethodPost, "/project/proj/share-all", url.Values{}},
+		{http.MethodPost, "/project/proj/set-scope", url.Values{"scope": {"shared"}}},
 		{http.MethodPost, "/project/proj/classify", url.Values{"scope": {"shared"}}},
 	}
 

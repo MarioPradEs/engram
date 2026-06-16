@@ -20,7 +20,7 @@ type TriageStore interface {
 }
 
 // MutableTriageStore extends TriageStore with the mutation methods required by
-// WU-5 handlers (toggle, bulk share-all). The single mutation method wraps
+// WU-5 handlers (toggle, bulk set-scope). The single mutation method wraps
 // store.UpdateObservation to set only the scope field.
 type MutableTriageStore interface {
 	TriageStore
@@ -35,7 +35,7 @@ const (
 	obsPerProjectLimit = 200
 
 	// obsShareAllLimit is a practical sentinel passed to RecentObservations by
-	// handleShareAll to bypass the 200-row read-view cap (obsPerProjectLimit)
+	// handleSetProjectScope to bypass the 200-row read-view cap (obsPerProjectLimit)
 	// and materialize ALL project rows into memory before bulk-updating them.
 	// 10 million is far beyond any realistic local observation count, so the
 	// store effectively returns every row. This is acceptable for a loopback
@@ -200,16 +200,25 @@ func (s *Server) handleToggleScope(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ref, http.StatusSeeOther)
 }
 
-// handleShareAll bulk-shares all observations in a project.
-// POST /project/{name}/share-all
+// handleSetProjectScope bulk-sets the scope of all observations in a project.
+// POST /project/{name}/set-scope
 //
-// Without confirm=1: returns a confirmation page showing the item count.
-// With confirm=1:   updates every observation in the project to scope=team,
-// then writes default_scope="shared" to the project's config.json (cwd only).
+// Form fields:
+//
+//	scope   — UI vocabulary: "shared" or "personal" (required)
+//	confirm — "1" to execute; absent to show confirmation page first
+//
+// Without confirm=1: returns a direction-sensitive confirmation page (D7).
+//   - → shared: shows sync-risk warning (REQ-36).
+//   - → personal: lighter copy, no sync-risk warning (REQ-36).
+//
+// With confirm=1: updates every observation in the project to the chosen scope,
+// then writes default_scope to config.json for the cwd project in both directions (D4, REQ-42).
 //
 // Decision #937.3: the bulk action MUST require a confirmation step.
 // Decision #939/#940 (Option A): config.json is only written for the cwd project.
-func (s *Server) handleShareAll(w http.ResponseWriter, r *http.Request) {
+// REQ-35: bidirectional (→ shared AND → personal).
+func (s *Server) handleSetProjectScope(w http.ResponseWriter, r *http.Request) {
 	rawName := r.PathValue("name")
 	if rawName == "" {
 		http.NotFound(w, r)
@@ -226,6 +235,13 @@ func (s *Server) handleShareAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate scope — only "shared" and "personal" are accepted (REQ-35).
+	uiScope := r.FormValue("scope")
+	if uiScope != "shared" && uiScope != "personal" {
+		http.Error(w, fmt.Sprintf("invalid scope %q: must be 'shared' or 'personal'", uiScope), http.StatusBadRequest)
+		return
+	}
+
 	ms := s.mutableStore
 	if ms == nil {
 		http.Error(w, "store not available", http.StatusServiceUnavailable)
@@ -233,39 +249,41 @@ func (s *Server) handleShareAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch ALL observations for the project — no cap (W-2).
-	// obsShareAllLimit is a very large sentinel so that the share-all action never
+	// obsShareAllLimit is a very large sentinel so the bulk action never
 	// silently truncates projects with more than obsPerProjectLimit (200) items.
 	observations, err := ms.RecentObservations(projectName, "", obsShareAllLimit)
 	if err != nil {
-		log.Printf("[triage] handleShareAll %q: RecentObservations: %v", projectName, err)
+		log.Printf("[triage] handleSetProjectScope %q: RecentObservations: %v", projectName, err)
 		http.Error(w, "failed to load observations", http.StatusInternalServerError)
 		return
 	}
 
 	confirmed := r.FormValue("confirm") == "1"
 	if !confirmed {
-		// Return a confirmation page with the item count.
+		// Return a direction-sensitive confirmation page (D7, REQ-36).
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		page := ShareAllConfirmPage(projectName, len(observations))
-		if err := TriageLayout("Confirm share", page).Render(context.Background(), w); err != nil {
-			log.Printf("[triage] handleShareAll confirm render: %v", err)
+		page := SetScopeConfirmPage(projectName, len(observations), uiScope)
+		title := "Confirm bulk scope"
+		if err := TriageLayout(title, page).Render(context.Background(), w); err != nil {
+			log.Printf("[triage] handleSetProjectScope confirm render: %v", err)
 		}
 		return
 	}
 
 	// Execute the bulk update.
+	internalScope := ToInternalScope(uiScope)
 	for _, obs := range observations {
-		if err := ms.UpdateObservationScope(obs.ID, "team"); err != nil {
-			log.Printf("[triage] handleShareAll %q: UpdateObservationScope id=%d: %v", projectName, obs.ID, err)
+		if err := ms.UpdateObservationScope(obs.ID, internalScope); err != nil {
+			log.Printf("[triage] handleSetProjectScope %q: UpdateObservationScope id=%d: %v", projectName, obs.ID, err)
 			http.Error(w, "partial update — some items may not have been updated", http.StatusInternalServerError)
 			return
 		}
 	}
 
-	// Option A (#939/#940): write config.json only for the cwd project.
+	// Option A (D4, REQ-42): write config.json for both directions, cwd project only.
 	if s.cwdDir != "" && s.cwdProject == projectName {
-		if err := WriteProjectDefaultScope(s.cwdDir, "shared"); err != nil {
-			log.Printf("[triage] handleShareAll %q: WriteProjectDefaultScope: %v", projectName, err)
+		if err := WriteProjectDefaultScope(s.cwdDir, uiScope); err != nil {
+			log.Printf("[triage] handleSetProjectScope %q: WriteProjectDefaultScope: %v", projectName, err)
 			// Non-fatal — the rows are updated; only the default badge is affected.
 		}
 	}

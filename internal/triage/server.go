@@ -168,7 +168,7 @@ func (s *Server) SetCwdProject(project string) {
 func buildTrustedOrigins(p int) map[string]struct{} {
 	return map[string]struct{}{
 		fmt.Sprintf("http://127.0.0.1:%d", p): {},
-		fmt.Sprintf("http://localhost:%d", p):  {},
+		fmt.Sprintf("http://localhost:%d", p): {},
 	}
 }
 
@@ -276,8 +276,8 @@ func (s *Server) routes() {
 	// WU-5 mutation endpoints — wrapped with origin-check CSRF middleware.
 	// Per-item scope toggle: sets the scope of one observation directly.
 	s.mux.HandleFunc("POST /observations/{id}/scope", s.originCheckMiddleware(s.handleToggleScope))
-	// Bulk share-all: with confirm=1 moves the project backlog to shared.
-	s.mux.HandleFunc("POST /project/{name}/share-all", s.originCheckMiddleware(s.handleShareAll))
+	// Bulk set-scope: bidirectional — scope=shared or scope=personal; confirm=1 to execute (REQ-35, AD1).
+	s.mux.HandleFunc("POST /project/{name}/set-scope", s.originCheckMiddleware(s.handleSetProjectScope))
 	// Classify: sets the project default_scope in config.json (cwd project only).
 	s.mux.HandleFunc("POST /project/{name}/classify", s.originCheckMiddleware(s.handleClassify))
 
@@ -298,4 +298,3 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, `{"status":"ok","service":"triage"}`)
 }
-

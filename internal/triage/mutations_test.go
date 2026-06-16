@@ -144,11 +144,11 @@ func TestHandleToggleScope_RejectsBadScope(t *testing.T) {
 	}
 }
 
-// ─── Bulk: POST /project/{name}/share-all ────────────────────────────────────
+// ─── Bulk: POST /project/{name}/set-scope ────────────────────────────────────
 
-// TestHandleShareAll_RequiresConfirm verifies that without the confirm param,
+// TestHandleSetScope_RequiresConfirm verifies that without the confirm param,
 // the handler returns a confirmation page (200) but does NOT mutate the store.
-func TestHandleShareAll_RequiresConfirm(t *testing.T) {
+func TestHandleSetScope_RequiresConfirm(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
 		{ID: 1, Title: "A", Scope: "personal", Project: ptrStr("proj")},
@@ -158,9 +158,9 @@ func TestHandleShareAll_RequiresConfirm(t *testing.T) {
 	srv := triage.NewWithMutableStore(nil, fs, 0, "")
 	h := srv.Handler()
 
-	// POST without confirm field.
-	form := url.Values{}
-	req := httptest.NewRequest(http.MethodPost, "/project/proj/share-all",
+	// POST with scope=shared but without confirm field.
+	form := url.Values{"scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
 		strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -179,9 +179,9 @@ func TestHandleShareAll_RequiresConfirm(t *testing.T) {
 	}
 }
 
-// TestHandleShareAll_WithConfirmUpdatesAll verifies that confirming the bulk
-// share-all action updates all project observations to scope=team.
-func TestHandleShareAll_WithConfirmUpdatesAll(t *testing.T) {
+// TestHandleSetScope_WithConfirmUpdatesAll verifies that confirming scope=shared
+// updates all project observations to internal scope=team.
+func TestHandleSetScope_WithConfirmUpdatesAll(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
 		{ID: 10, Title: "A", Scope: "personal", Project: ptrStr("proj")},
@@ -198,8 +198,8 @@ func TestHandleShareAll_WithConfirmUpdatesAll(t *testing.T) {
 	srv.SetCwdProject("proj")
 	h := srv.Handler()
 
-	form := url.Values{"confirm": {"1"}}
-	req := httptest.NewRequest(http.MethodPost, "/project/proj/share-all",
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
 		strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -219,9 +219,9 @@ func TestHandleShareAll_WithConfirmUpdatesAll(t *testing.T) {
 	}
 }
 
-// TestHandleShareAll_ReportsCount verifies the confirmation page shows the
+// TestHandleSetScope_ReportsCount verifies the confirmation page shows the
 // correct item count.
-func TestHandleShareAll_ReportsCount(t *testing.T) {
+func TestHandleSetScope_ReportsCount(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
 		{ID: 1, Title: "X", Scope: "personal", Project: ptrStr("p")},
@@ -234,8 +234,8 @@ func TestHandleShareAll_ReportsCount(t *testing.T) {
 	srv := triage.NewWithMutableStore(nil, fs, 0, "")
 	h := srv.Handler()
 
-	form := url.Values{}
-	req := httptest.NewRequest(http.MethodPost, "/project/p/share-all",
+	form := url.Values{"scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/p/set-scope",
 		strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -248,7 +248,7 @@ func TestHandleShareAll_ReportsCount(t *testing.T) {
 }
 
 // limitEnforcingStore is a MutableTriageStore that enforces a limit parameter,
-// unlike fakeMutableStore which ignores it. Used to verify W-2: share-all must
+// unlike fakeMutableStore which ignores it. Used to verify W-2: set-scope must
 // not be capped at obsPerProjectLimit.
 type limitEnforcingStore struct {
 	fakeMutableStore
@@ -260,11 +260,11 @@ func (f *limitEnforcingStore) RecentObservations(project, scope string, limit in
 	return f.fakeMutableStore.RecentObservations(project, scope, limit)
 }
 
-// TestHandleShareAll_SharesAllBeyondLimit verifies that share-all operates on
+// TestHandleSetScope_SetsAllBeyondLimit verifies that set-scope operates on
 // ALL observations in a project, not just the first obsPerProjectLimit (200).
 // W-2: the handler must pass a limit > obsPerProjectLimit (200) to the store so
 // that projects with >200 observations are not silently truncated.
-func TestHandleShareAll_SharesAllBeyondLimit(t *testing.T) {
+func TestHandleSetScope_SetsAllBeyondLimit(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	const total = 250
 	obs := make([]store.Observation, total)
@@ -277,8 +277,8 @@ func TestHandleShareAll_SharesAllBeyondLimit(t *testing.T) {
 	srv := triage.NewWithMutableStore(nil, ls, 0, "")
 	h := srv.Handler()
 
-	formNoConfirm := url.Values{}
-	req := httptest.NewRequest(http.MethodPost, "/project/bigproject/share-all",
+	formNoConfirm := url.Values{"scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/bigproject/set-scope",
 		strings.NewReader(formNoConfirm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -290,7 +290,7 @@ func TestHandleShareAll_SharesAllBeyondLimit(t *testing.T) {
 	// The limit passed to RecentObservations must be well above 200 (W-2: no cap).
 	const oldCap = 200
 	if ls.lastLimit <= oldCap {
-		t.Errorf("W-2: share-all passed limit=%d to store (must be > %d to avoid silent truncation)", ls.lastLimit, oldCap)
+		t.Errorf("W-2: set-scope passed limit=%d to store (must be > %d to avoid silent truncation)", ls.lastLimit, oldCap)
 	}
 }
 

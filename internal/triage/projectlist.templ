@@ -31,8 +31,13 @@ templ ProjectListPage(project string, rows []ObservationRow, cwdProject string) 
 		} else {
 			<p class="triage-subtitle">{ fmt.Sprintf("%d observation(s)", len(rows)) }</p>
 			<div class="bulk-actions">
-				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/share-all") }>
-					<button type="submit" class="btn-bulk-share">Mark all as shared…</button>
+				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/set-scope") }>
+					<input type="hidden" name="scope" value="shared"/>
+					<button type="submit" class="btn-bulk-share">Mark all as shared</button>
+				</form>
+				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/set-scope") }>
+					<input type="hidden" name="scope" value="personal"/>
+					<button type="submit" class="btn-bulk-personal">Mark all as personal</button>
 				</form>
 				if project == cwdProject {
 					<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/classify") }>
@@ -94,22 +99,36 @@ templ ObsRowView(row ObservationRow, project string) {
 	</div>
 }
 
-// ShareAllConfirmPage renders the bulk-share confirmation prompt with item count.
-// It is displayed when POST /project/{name}/share-all is called without confirm=1.
-templ ShareAllConfirmPage(project string, count int) {
+// SetScopeConfirmPage renders the direction-sensitive bulk set-scope confirmation
+// prompt (D7, REQ-36). It is displayed when POST /project/{name}/set-scope is
+// called without confirm=1.
+//
+// scope=="shared": includes sync-risk warning (observations already sent cannot be recalled).
+// scope=="personal": lighter copy, no sync-risk warning.
+templ SetScopeConfirmPage(project string, count int, scope string) {
 	<section>
 		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="back-link">← Back to { project }</a>
-		<h2>Confirm bulk share</h2>
-		<p>
-			You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> in
-			<strong>{ project }</strong> as <em>shared</em>.
-		</p>
-		<p class="triage-warning-notice">
-			This moves the project backlog to the shared tier. Observations already sent cannot be recalled (Gate A is v1.5).
-		</p>
-		<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/share-all") }>
+		if scope == "shared" {
+			<h2>Confirm: mark all as shared</h2>
+			<p>
+				You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> in
+				<strong>{ project }</strong> as <em>shared</em>.
+			</p>
+			<p class="triage-warning-notice">
+				This moves the project backlog to the shared tier. Observations already sent cannot be recalled (Gate A is v1.5).
+			</p>
+		} else {
+			<h2>Confirm: mark all as personal</h2>
+			<p>
+				You are about to mark <strong>{ fmt.Sprintf("%d", count) } observation(s)</strong> in
+				<strong>{ project }</strong> as <em>personal</em>.
+			</p>
+			<p>These observations will no longer be shared with the team.</p>
+		}
+		<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(project) + "/set-scope") }>
+			<input type="hidden" name="scope" value={ scope }/>
 			<input type="hidden" name="confirm" value="1"/>
-			<button type="submit" class="btn-confirm-share">Yes, mark { fmt.Sprintf("%d", count) } as shared</button>
+			<button type="submit" class="btn-confirm-share">Yes, mark { fmt.Sprintf("%d", count) } as { scope }</button>
 		</form>
 		<a href={ templ.SafeURL("/project/" + url.PathEscape(project)) } class="btn-cancel">Cancel</a>
 	</section>

@@ -8453,3 +8453,459 @@ func TestMostRecentActiveSessionScopedByProject(t *testing.T) {
 		t.Fatalf("expected no active session for engram when only 'other' has one, got ok=%v", ok)
 	}
 }
+
+// ── tags_json wiring tests (PR#2 Round 2) ────────────────────────────────────
+
+// TestGetObservationReturnsTags verifies that the public GetObservation path
+// returns Tags populated when the row has tags_json set.
+// RED before the fix: GetObservation did not select tags_json.
+func TestGetObservationReturnsTags(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-tags", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "chess", "tipo": "decision"}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-tags",
+		Type:      "decision",
+		Title:     "tagged obs",
+		Content:   "some content",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation: %v", err)
+	}
+	if obs.Tags == nil {
+		t.Fatal("GetObservation: expected Tags to be non-nil for tagged observation")
+	}
+	if obs.Tags["juego"] != "chess" {
+		t.Fatalf("GetObservation: expected Tags[juego]=chess, got %q", obs.Tags["juego"])
+	}
+	if obs.Tags["tipo"] != "decision" {
+		t.Fatalf("GetObservation: expected Tags[tipo]=decision, got %q", obs.Tags["tipo"])
+	}
+}
+
+// TestGetObservationBySyncIDReturnsTags verifies the public GetObservationBySyncID
+// path returns Tags populated.
+// RED before the fix: GetObservationBySyncID did not select tags_json.
+func TestGetObservationBySyncIDReturnsTags(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-syncid-tags", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "darts", "tipo": "bugfix"}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-syncid-tags",
+		Type:      "bugfix",
+		Title:     "tagged by syncid",
+		Content:   "content for syncid",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	obs, err := s.GetObservation(id)
+	if err != nil {
+		t.Fatalf("GetObservation for syncID: %v", err)
+	}
+
+	bySync, err := s.GetObservationBySyncID(obs.SyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID: %v", err)
+	}
+	if bySync.Tags == nil {
+		t.Fatal("GetObservationBySyncID: expected Tags to be non-nil")
+	}
+	if bySync.Tags["juego"] != "darts" {
+		t.Fatalf("GetObservationBySyncID: expected Tags[juego]=darts, got %q", bySync.Tags["juego"])
+	}
+}
+
+// TestSearchReturnsTagsTopicKey verifies that a topic-key direct hit in Search
+// returns Tags populated.
+// RED before the fix: Search topic-key path did not select tags_json.
+func TestSearchReturnsTagsTopicKey(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-search-tk", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "poker", "tipo": "architecture"}
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-search-tk",
+		Type:      "architecture",
+		Title:     "topic key search test",
+		Content:   "architecture decision for topic key",
+		Project:   "proj",
+		Scope:     "project",
+		TopicKey:  "arch/main-decision",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// A query containing "/" triggers the topic-key direct path.
+	results, err := s.Search("arch/main-decision", SearchOptions{Project: "proj", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search (topic-key): %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("Search (topic-key): expected at least 1 result")
+	}
+	hit := results[0]
+	if hit.Tags == nil {
+		t.Fatal("Search (topic-key): expected Tags to be non-nil")
+	}
+	if hit.Tags["juego"] != "poker" {
+		t.Fatalf("Search (topic-key): expected Tags[juego]=poker, got %q", hit.Tags["juego"])
+	}
+}
+
+// TestSearchReturnsTagsFTS5 verifies that an FTS5 search hit returns Tags populated.
+// RED before the fix: Search FTS5 path did not select tags_json.
+func TestSearchReturnsTagsFTS5(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-search-fts", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "chess", "tipo": "pattern"}
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-search-fts",
+		Type:      "pattern",
+		Title:     "FTS5 unique token zyx987",
+		Content:   "full text search with tagged observation",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// FTS5 path: query without "/" hits the full-text index.
+	results, err := s.Search("zyx987", SearchOptions{Project: "proj", Limit: 5})
+	if err != nil {
+		t.Fatalf("Search (FTS5): %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("Search (FTS5): expected at least 1 result")
+	}
+	hit := results[0]
+	if hit.Tags == nil {
+		t.Fatal("Search (FTS5): expected Tags to be non-nil")
+	}
+	if hit.Tags["juego"] != "chess" {
+		t.Fatalf("Search (FTS5): expected Tags[juego]=chess, got %q", hit.Tags["juego"])
+	}
+}
+
+// TestAllObservationsFullReturnsTags verifies that AllObservationsFull returns Tags.
+// RED before the fix: AllObservationsFull did not select tags_json.
+func TestAllObservationsFullReturnsTags(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-full", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "go", "tipo": "decision"}
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-full",
+		Type:      "decision",
+		Title:     "full obs",
+		Content:   "full observation content",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	all, err := s.AllObservationsFull()
+	if err != nil {
+		t.Fatalf("AllObservationsFull: %v", err)
+	}
+	var found bool
+	for _, o := range all {
+		if o.Title == "full obs" {
+			found = true
+			if o.Tags == nil {
+				t.Fatal("AllObservationsFull: expected Tags to be non-nil for tagged observation")
+			}
+			if o.Tags["juego"] != "go" {
+				t.Fatalf("AllObservationsFull: expected Tags[juego]=go, got %q", o.Tags["juego"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("AllObservationsFull: did not find the inserted observation")
+	}
+}
+
+// TestBackfillObservationSyncMutationsCarriesTags verifies that after enrolling a
+// project, the backfill-enqueued sync_mutations payload for a tagged observation
+// carries the tags key.
+// RED before the fix: backfillObservationSyncMutationsTx did not select or forward tags_json.
+func TestBackfillObservationSyncMutationsCarriesTags(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"sess-backfill-tags", "proj-tags", "/tmp/proj",
+	); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+
+	tagsJSON := `{"juego":"chess","tipo":"pattern"}`
+	if _, err := s.db.Exec(
+		`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, tags_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?)`,
+		"obs-tags-backfill", "sess-backfill-tags", "pattern", "Tagged backfill obs", "content with tags",
+		"proj-tags", "project", hashNormalized("content with tags"), tagsJSON,
+	); err != nil {
+		t.Fatalf("insert tagged observation: %v", err)
+	}
+
+	if err := s.EnrollProject("proj-tags"); err != nil {
+		t.Fatalf("EnrollProject: %v", err)
+	}
+
+	var payloadRaw string
+	if err := s.db.QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity = ? AND entity_key = ?`,
+		SyncEntityObservation, "obs-tags-backfill",
+	).Scan(&payloadRaw); err != nil {
+		t.Fatalf("query backfill payload: %v", err)
+	}
+
+	var payload syncObservationPayload
+	if err := decodeSyncPayload([]byte(payloadRaw), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Tags == nil {
+		t.Fatal("backfill payload: expected Tags to be non-nil (was tagless before fix)")
+	}
+	if payload.Tags["juego"] != "chess" {
+		t.Fatalf("backfill payload: expected Tags[juego]=chess, got %q", payload.Tags["juego"])
+	}
+	if payload.Tags["tipo"] != "pattern" {
+		t.Fatalf("backfill payload: expected Tags[tipo]=pattern, got %q", payload.Tags["tipo"])
+	}
+}
+
+// TestAddObservationRevisionReplacesTagsSemantics verifies the revision branch:
+// writing a new observation to an existing topic-key with fresh tags REPLACES
+// the old tags entirely (full replace semantics, not merge).
+func TestAddObservationRevisionReplacesTagsSemantics(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-rev", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// First write: old tags.
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-rev",
+		Type:      "decision",
+		Title:     "revision topic test",
+		Content:   "original content",
+		Project:   "proj",
+		Scope:     "project",
+		TopicKey:  "rev/topic-replace",
+		Tags:      map[string]string{"juego": "chess", "tipo": "decision"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first): %v", err)
+	}
+
+	// Second write with new tags — triggers revision branch.
+	id2, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-rev",
+		Type:      "decision",
+		Title:     "revision topic test",
+		Content:   "revised content",
+		Project:   "proj",
+		Scope:     "project",
+		TopicKey:  "rev/topic-replace",
+		Tags:      map[string]string{"juego": "poker"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (revision): %v", err)
+	}
+
+	obs, err := s.GetObservation(id2)
+	if err != nil {
+		t.Fatalf("GetObservation after revision: %v", err)
+	}
+
+	// Revision semantics: new tags REPLACE old tags entirely.
+	if obs.Tags == nil {
+		t.Fatal("expected Tags after revision to be non-nil")
+	}
+	if obs.Tags["juego"] != "poker" {
+		t.Fatalf("expected Tags[juego]=poker after revision, got %q", obs.Tags["juego"])
+	}
+	// The old "tipo" key must be absent after revision (full replace, not merge).
+	if _, hasOld := obs.Tags["tipo"]; hasOld {
+		t.Fatalf("revision must REPLACE tags entirely; old key 'tipo' must be absent, got tags=%v", obs.Tags)
+	}
+}
+
+// TestAddObservationRevisionToNilTagsSemantics verifies that revising a tagged
+// observation with nil tags replaces with nil (old tags are gone).
+func TestAddObservationRevisionToNilTagsSemantics(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-rev-nil", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// First write: has tags.
+	_, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-rev-nil",
+		Type:      "decision",
+		Title:     "revision nil tags test",
+		Content:   "original content with tags",
+		Project:   "proj",
+		Scope:     "project",
+		TopicKey:  "rev/topic-nil",
+		Tags:      map[string]string{"juego": "chess"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first): %v", err)
+	}
+
+	// Second write with nil tags — revision replaces tags_json with NULL.
+	id2, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-rev-nil",
+		Type:      "decision",
+		Title:     "revision nil tags test",
+		Content:   "revised content without tags",
+		Project:   "proj",
+		Scope:     "project",
+		TopicKey:  "rev/topic-nil",
+		Tags:      nil, // explicit nil — revision semantics: replace → clear
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (revision nil): %v", err)
+	}
+
+	obs, err := s.GetObservation(id2)
+	if err != nil {
+		t.Fatalf("GetObservation after revision-nil: %v", err)
+	}
+
+	// Revision branch sets tags_json = tagsJSONValue(nil) = SQL NULL → Tags must be nil.
+	if obs.Tags != nil {
+		t.Fatalf("revision with nil tags must clear tags entirely; got Tags=%v", obs.Tags)
+	}
+}
+
+// TestAddObservationDedupePreservesExistingTagsWhenNilSent verifies the dedupe branch:
+// a deduped call with nil tags preserves the existing tags on the row (COALESCE semantics).
+func TestAddObservationDedupePreservesExistingTagsWhenNilSent(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-dedup-tags", "proj", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// First write: identical content, has tags.
+	firstID, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-dedup-tags",
+		Type:      "decision",
+		Title:     "dedupe preserve tags",
+		Content:   "identical dedup content",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      map[string]string{"juego": "chess", "tipo": "decision"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first): %v", err)
+	}
+
+	// Second write: identical content, nil tags → triggers dedupe, COALESCE preserves old tags.
+	_, err = s.AddObservation(AddObservationParams{
+		SessionID: "sess-dedup-tags",
+		Type:      "decision",
+		Title:     "dedupe preserve tags",
+		Content:   "identical dedup content",
+		Project:   "proj",
+		Scope:     "project",
+		Tags:      nil,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (dedupe): %v", err)
+	}
+
+	obs, err := s.GetObservation(firstID)
+	if err != nil {
+		t.Fatalf("GetObservation after dedupe: %v", err)
+	}
+	// COALESCE semantics: nil incoming → old tags preserved.
+	if obs.Tags == nil {
+		t.Fatal("dedupe with nil incoming tags must preserve existing tags via COALESCE")
+	}
+	if obs.Tags["juego"] != "chess" {
+		t.Fatalf("dedupe: expected Tags[juego]=chess preserved, got %q", obs.Tags["juego"])
+	}
+	// Both old keys must still be present (no merge loss, no strip).
+	if obs.Tags["tipo"] != "decision" {
+		t.Fatalf("dedupe: expected Tags[tipo]=decision preserved, got %q", obs.Tags["tipo"])
+	}
+	if len(obs.Tags) != 2 {
+		t.Fatalf("dedupe: expected exactly 2 tag keys preserved, got %d: %v", len(obs.Tags), obs.Tags)
+	}
+}
+
+// TestParseTagsJSONMalformedDegradesToNil verifies that a row with invalid JSON
+// in tags_json returns Tags=nil (graceful degradation, not a fatal scan error).
+func TestParseTagsJSONMalformedDegradesToNil(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions (id, project, directory) VALUES (?, ?, ?)`,
+		"sess-malformed-json", "proj", "/tmp/proj",
+	); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+
+	// Insert a row with intentionally malformed tags_json directly via SQL.
+	if _, err := s.db.Exec(
+		`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at, tags_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'), ?)`,
+		"obs-malformed-json", "sess-malformed-json", "decision", "Malformed tags obs", "content",
+		"proj", "project", hashNormalized("content"), `{not valid json`,
+	); err != nil {
+		t.Fatalf("insert malformed tags row: %v", err)
+	}
+
+	obs, err := s.GetObservationBySyncID("obs-malformed-json")
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID with malformed tags: %v", err)
+	}
+	// Malformed JSON must degrade to nil Tags, not panic or fail.
+	if obs.Tags != nil {
+		t.Fatalf("expected Tags=nil for malformed tags_json, got %v", obs.Tags)
+	}
+}

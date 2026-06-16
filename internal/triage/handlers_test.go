@@ -451,9 +451,12 @@ func TestSetProjectScope_SharedNoConfirm(t *testing.T) {
 		t.Errorf("want 200 confirmation page, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	// Must show sync-risk warning for → shared direction (D7, REQ-36).
-	if !strings.Contains(body, "sync") && !strings.Contains(body, "cannot be recalled") {
-		t.Errorf("want sync-risk warning in shared confirm page; body excerpt: %s", body[:min(500, len(body))])
+	// Must show the canonical sync-risk phrase for → shared direction (D7, REQ-36).
+	// The golden (set_scope_confirm_shared.html) uses the exact phrase below.
+	// Both conditions must hold independently — the previous && allowed a single
+	// keyword to satisfy the check; we now require the precise phrase.
+	if !strings.Contains(body, "cannot be recalled") {
+		t.Errorf("want canonical sync-risk phrase 'cannot be recalled' in shared confirm page; body excerpt: %s", body[:min(500, len(body))])
 	}
 	// Must show observation count.
 	if !strings.Contains(body, "2") {
@@ -683,10 +686,15 @@ func TestSetProjectScope_PartialFailure(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	// On update error the handler must report failure (non-2xx or error body).
-	if rec.Code == http.StatusOK && !strings.Contains(rec.Body.String(), "error") &&
-		!strings.Contains(rec.Body.String(), "partial") && !strings.Contains(rec.Body.String(), "fail") {
-		t.Errorf("want error indication on partial failure, got %d body: %s", rec.Code, rec.Body.String()[:min(300, len(rec.Body.String()))])
+	// The handler returns 500 on a store error (partial update).
+	// Assert the status is explicitly non-2xx; body content is a secondary check.
+	if rec.Code >= http.StatusOK && rec.Code < http.StatusMultipleChoices {
+		t.Errorf("want non-2xx status on partial failure, got %d; body: %s",
+			rec.Code, rec.Body.String()[:min(300, len(rec.Body.String()))])
+	}
+	// Secondary: body should contain a hint about the failure.
+	if !strings.Contains(rec.Body.String(), "partial") && !strings.Contains(rec.Body.String(), "update") {
+		t.Errorf("want partial-update hint in body on failure, got: %s", rec.Body.String()[:min(300, len(rec.Body.String()))])
 	}
 }
 

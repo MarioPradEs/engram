@@ -74,6 +74,113 @@ func seedStoreForSync(t *testing.T, s *store.Store) {
 	}
 }
 
+func seedRelationForProject(t *testing.T, s *store.Store, project, sessionID, relationID string) (sourceSyncID, targetSyncID string) {
+	t.Helper()
+	if err := s.CreateSession(sessionID, project, "/tmp/"+project); err != nil {
+		t.Fatalf("create session %s: %v", sessionID, err)
+	}
+	sourceID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     project + " source",
+		Content:   project + " source content",
+		Project:   project,
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add source observation: %v", err)
+	}
+	targetID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     project + " target",
+		Content:   project + " target content",
+		Project:   project,
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add target observation: %v", err)
+	}
+	source, err := s.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get source observation: %v", err)
+	}
+	target, err := s.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get target observation: %v", err)
+	}
+	if _, err := s.SaveRelation(store.SaveRelationParams{SyncID: relationID, SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
+		t.Fatalf("save relation: %v", err)
+	}
+	reason := "deterministic test relation"
+	confidence := 0.95
+	if _, err := s.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID:    relationID,
+		Relation:      store.RelationCompatible,
+		Reason:        &reason,
+		Confidence:    &confidence,
+		MarkedByActor: "test",
+		MarkedByKind:  "system",
+	}); err != nil {
+		t.Fatalf("judge relation: %v", err)
+	}
+	return source.SyncID, target.SyncID
+}
+
+func seedRelationWithSessionInheritedProject(t *testing.T, s *store.Store, project, sessionID, relationID string) (sourceSyncID, targetSyncID string) {
+	t.Helper()
+	if err := s.CreateSession(sessionID, project, "/tmp/"+project); err != nil {
+		t.Fatalf("create session %s: %v", sessionID, err)
+	}
+	sourceID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     project + " inherited source",
+		Content:   project + " inherited source content",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add inherited source observation: %v", err)
+	}
+	targetID, err := s.AddObservation(store.AddObservationParams{
+		SessionID: sessionID,
+		Type:      "decision",
+		Title:     project + " inherited target",
+		Content:   project + " inherited target content",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add inherited target observation: %v", err)
+	}
+	source, err := s.GetObservation(sourceID)
+	if err != nil {
+		t.Fatalf("get inherited source observation: %v", err)
+	}
+	target, err := s.GetObservation(targetID)
+	if err != nil {
+		t.Fatalf("get inherited target observation: %v", err)
+	}
+	if source.Project != nil || target.Project != nil {
+		t.Fatalf("expected observations to inherit project from session, got source=%v target=%v", source.Project, target.Project)
+	}
+	if _, err := s.SaveRelation(store.SaveRelationParams{SyncID: relationID, SourceID: source.SyncID, TargetID: target.SyncID}); err != nil {
+		t.Fatalf("save inherited relation: %v", err)
+	}
+	reason := "deterministic inherited project relation"
+	confidence := 0.95
+	if _, err := s.JudgeRelation(store.JudgeRelationParams{
+		JudgmentID:    relationID,
+		Relation:      store.RelationCompatible,
+		Reason:        &reason,
+		Confidence:    &confidence,
+		MarkedByActor: "test",
+		MarkedByKind:  "system",
+	}); err != nil {
+		t.Fatalf("judge inherited relation: %v", err)
+	}
+	return source.SyncID, target.SyncID
+}
+
 func writeManifestFile(t *testing.T, dir string, m *Manifest) {
 	t.Helper()
 	data, err := json.Marshal(m)
@@ -113,6 +220,7 @@ func resetSyncTestHooks(t *testing.T) {
 	origStoreGetSynced := storeGetSynced
 	origStoreExportData := storeExportData
 	origStoreExportDataForProject := storeExportDataForProject
+	origStoreExportRelations := storeExportRelations
 	origStoreListMutationsAfterSeq := storeListMutationsAfterSeq
 	origStoreAckMutationSeq := storeAckMutationSeq
 	origStoreApplyPulledChunk := storeApplyPulledChunk
@@ -127,6 +235,7 @@ func resetSyncTestHooks(t *testing.T) {
 		storeGetSynced = origStoreGetSynced
 		storeExportData = origStoreExportData
 		storeExportDataForProject = origStoreExportDataForProject
+		storeExportRelations = origStoreExportRelations
 		storeListMutationsAfterSeq = origStoreListMutationsAfterSeq
 		storeAckMutationSeq = origStoreAckMutationSeq
 		storeApplyPulledChunk = origStoreApplyPulledChunk
@@ -317,6 +426,256 @@ func TestExportImportFlowWithProjectFilter(t *testing.T) {
 	}
 	if len(dstData.Sessions) != 1 || dstData.Sessions[0].Project != "proj-a" {
 		t.Fatalf("unexpected destination sessions: %+v", dstData.Sessions)
+	}
+}
+
+func TestLocalChunkExportIncludesProjectRelations(t *testing.T) {
+	s := newTestStore(t)
+	seedRelationForProject(t, s, "proj-a", "sess-rel-a", "rel-proj-a")
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected relation export to create a chunk")
+	}
+
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 {
+		t.Fatalf("expected one relation mutation, got %+v", chunk.Mutations)
+	}
+	mutation := chunk.Mutations[0]
+	if mutation.Entity != store.SyncEntityRelation || mutation.EntityKey != "rel-proj-a" || mutation.Op != store.SyncOpUpsert {
+		t.Fatalf("unexpected relation mutation: %+v", mutation)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+		t.Fatalf("unmarshal relation payload: %v", err)
+	}
+	if payload["project"] != "proj-a" || payload["relation"] != store.RelationCompatible {
+		t.Fatalf("unexpected relation payload: %+v", payload)
+	}
+}
+
+func TestLocalChunkExportIncludesRelationsForObservationsInheritingSessionProject(t *testing.T) {
+	s := newTestStore(t)
+	seedRelationWithSessionInheritedProject(t, s, "proj-a", "sess-rel-inherited", "rel-inherited-proj-a")
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if result.IsEmpty {
+		t.Fatal("expected inherited project relation export to create a chunk")
+	}
+
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+	if len(chunk.Observations) != 2 {
+		t.Fatalf("expected project export to include inherited observations, got %+v", chunk.Observations)
+	}
+	if len(chunk.Mutations) != 1 {
+		t.Fatalf("expected one inherited project relation mutation, got %+v", chunk.Mutations)
+	}
+	mutation := chunk.Mutations[0]
+	if mutation.Entity != store.SyncEntityRelation || mutation.EntityKey != "rel-inherited-proj-a" || mutation.Project != "proj-a" {
+		t.Fatalf("unexpected inherited project relation mutation: %+v", mutation)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+		t.Fatalf("unmarshal relation payload: %v", err)
+	}
+	if payload["project"] != "proj-a" || payload["relation"] != store.RelationCompatible {
+		t.Fatalf("unexpected inherited project relation payload: %+v", payload)
+	}
+}
+
+func TestLocalChunkImportRestoresRelationsAfterObservations(t *testing.T) {
+	src := newTestStore(t)
+	sourceSyncID, targetSyncID := seedRelationForProject(t, src, "proj-a", "sess-rel-import", "rel-import")
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	if _, err := New(src, syncDir).Export("alice", "proj-a"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	dst := newTestStore(t)
+	result, err := New(dst, syncDir).Import()
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.ChunksImported != 1 || result.ObservationsImported != 2 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+	relation, err := dst.GetRelation("rel-import")
+	if err != nil {
+		t.Fatalf("get imported relation: %v", err)
+	}
+	if relation.SourceID != sourceSyncID || relation.TargetID != targetSyncID || relation.Relation != store.RelationCompatible {
+		t.Fatalf("unexpected imported relation: %+v", relation)
+	}
+
+	importAgain, err := New(dst, syncDir).Import()
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if importAgain.ChunksImported != 0 || importAgain.ChunksSkipped != 1 {
+		t.Fatalf("unexpected second import result: %+v", importAgain)
+	}
+	relationAgain, err := dst.GetRelation("rel-import")
+	if err != nil {
+		t.Fatalf("get relation after second import: %v", err)
+	}
+	if relationAgain.SourceID != sourceSyncID || relationAgain.TargetID != targetSyncID || relationAgain.Relation != store.RelationCompatible {
+		t.Fatalf("unexpected relation after second import: %+v", relationAgain)
+	}
+}
+
+func TestLocalChunkImportOldChunkWithoutRelationsStillWorks(t *testing.T) {
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	chunkID := "oldchunk"
+	writeLocalChunkFile(t, syncDir, chunkID, ChunkData{
+		Sessions: []store.Session{{ID: "sess-old", Project: "proj-a", Directory: "/tmp/proj-a", StartedAt: "2025-01-01 00:00:00"}},
+		Observations: []store.Observation{{
+			SyncID:    "obs-old",
+			SessionID: "sess-old",
+			Type:      "decision",
+			Title:     "old chunk observation",
+			Content:   "old chunk content",
+			Scope:     "project",
+			CreatedAt: "2025-01-01 00:00:01",
+			UpdatedAt: "2025-01-01 00:00:01",
+		}},
+	})
+	writeManifestFile(t, syncDir, &Manifest{Version: 1, Chunks: []ChunkEntry{{ID: chunkID, CreatedBy: "legacy", CreatedAt: "2025-01-01T00:00:00Z", Sessions: 1, Memories: 1}}})
+
+	result, err := New(newTestStore(t), syncDir).Import()
+	if err != nil {
+		t.Fatalf("import old chunk: %v", err)
+	}
+	if result.ChunksImported != 1 || result.SessionsImported != 1 || result.ObservationsImported != 1 {
+		t.Fatalf("unexpected import result: %+v", result)
+	}
+}
+
+func TestLocalChunkExportExcludesOtherProjectRelations(t *testing.T) {
+	s := newTestStore(t)
+	seedRelationForProject(t, s, "proj-a", "sess-rel-a", "rel-proj-a")
+	seedRelationForProject(t, s, "proj-b", "sess-rel-b", "rel-proj-b")
+
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+	result, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	chunkJSON, err := readGzip(filepath.Join(syncDir, "chunks", result.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk ChunkData
+	if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+	got := []string{}
+	for _, mutation := range chunk.Mutations {
+		if mutation.Entity == store.SyncEntityRelation {
+			got = append(got, mutation.EntityKey)
+		}
+	}
+	if len(got) != 1 || got[0] != "rel-proj-a" {
+		t.Fatalf("expected only proj-a relation, got %v", got)
+	}
+}
+
+// TestIncrementalRelationExport verifies that successive exports only carry new
+// relation mutations in each chunk and that a third export with no new data
+// produces an empty (IsEmpty) result.
+//
+// Timing is controlled explicitly: rel-inc-1 is backdated to 2025-01-01, the
+// manifest records the first chunk at 2025-06-01 (after rel-inc-1), and
+// rel-inc-2 is seeded after the manifest is written so its updated_at is a
+// real "now" timestamp strictly after the manifest's CreatedAt.
+func TestIncrementalRelationExport(t *testing.T) {
+	s := newTestStore(t)
+	syncDir := filepath.Join(t.TempDir(), ".engram")
+
+	// Seed rel-inc-1 with an explicit past updated_at so the time filter places
+	// it before the simulated "last chunk" time.
+	seedRelationForProject(t, s, "proj-a", "sess-inc-1", "rel-inc-1")
+	if _, err := s.DB().Exec(
+		`UPDATE memory_relations SET updated_at='2025-01-01 00:00:00', created_at='2025-01-01 00:00:00' WHERE sync_id='rel-inc-1'`,
+	); err != nil {
+		t.Fatalf("backdate rel-inc-1: %v", err)
+	}
+
+	// Write a manifest whose most-recent chunk CreatedAt sits between the
+	// backdated relation (2025-01-01) and "now", so the incremental filter will
+	// treat rel-inc-1 as already exported and rel-inc-2 as new.
+	chunksDir := filepath.Join(syncDir, "chunks")
+	if err := os.MkdirAll(chunksDir, 0o755); err != nil {
+		t.Fatalf("mkdir chunks: %v", err)
+	}
+	pastChunkID := "pastchunk00"
+	writeLocalChunkFile(t, syncDir, pastChunkID, ChunkData{})
+	writeManifestFile(t, syncDir, &Manifest{
+		Version: 1,
+		Chunks:  []ChunkEntry{{ID: pastChunkID, CreatedBy: "alice", CreatedAt: "2025-06-01T00:00:00Z"}},
+	})
+
+	// Seed rel-inc-2 now so its updated_at is the real current time (after 2025-06-01).
+	seedRelationForProject(t, s, "proj-a", "sess-inc-2", "rel-inc-2")
+
+	// First export in this test — should carry ONLY rel-inc-2 (rel-inc-1 is before cutoff).
+	result1, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	if result1.IsEmpty {
+		t.Fatal("expected export to produce a chunk with rel-inc-2")
+	}
+
+	chunkJSON1, err := readGzip(filepath.Join(syncDir, "chunks", result1.ChunkID+".jsonl.gz"))
+	if err != nil {
+		t.Fatalf("read chunk: %v", err)
+	}
+	var chunk1 ChunkData
+	if err := json.Unmarshal(chunkJSON1, &chunk1); err != nil {
+		t.Fatalf("unmarshal chunk: %v", err)
+	}
+
+	// Only the new relation must appear.
+	if len(chunk1.Mutations) != 1 || chunk1.Mutations[0].EntityKey != "rel-inc-2" {
+		t.Fatalf("expected only rel-inc-2 in chunk, got %+v", chunk1.Mutations)
+	}
+	for _, m := range chunk1.Mutations {
+		if m.EntityKey == "rel-inc-1" {
+			t.Fatal("previously-exported rel-inc-1 must NOT appear in incremental chunk")
+		}
+	}
+
+	// Second export — no new data — must be empty (IsEmpty guard against double-export).
+	result2, err := New(s, syncDir).Export("alice", "proj-a")
+	if err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	if !result2.IsEmpty {
+		t.Fatal("expected second export (no new data) to be empty")
 	}
 }
 
@@ -798,6 +1157,21 @@ func TestExportErrors(t *testing.T) {
 
 		if _, err := sy.Export("alice", ""); err == nil || !strings.Contains(err.Error(), "record synced chunk") {
 			t.Fatalf("expected record synced chunk error, got %v", err)
+		}
+	})
+
+	t.Run("store export relations error", func(t *testing.T) {
+		resetSyncTestHooks(t)
+		s := newTestStore(t)
+		seedStoreForSync(t, s)
+		sy := New(s, t.TempDir())
+
+		storeExportRelations = func(_ *store.Store, _ string) ([]store.SyncMutation, error) {
+			return nil, errors.New("boom relations")
+		}
+
+		if _, err := sy.Export("alice", ""); err == nil || !strings.Contains(err.Error(), "export relations") {
+			t.Fatalf("expected export relations error, got %v", err)
 		}
 	})
 }

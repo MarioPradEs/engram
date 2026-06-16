@@ -82,7 +82,7 @@ const claudeCodeMarketplace = "Gentleman-Programming/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 
-const piGentleEngramPackage = "npm:gentle-engram@0.1.7"
+const piGentleEngramPackage = "npm:gentle-engram@0.1.8"
 const piMCPAdapterPackage = "npm:pi-mcp-adapter"
 
 // claudeCodeMCPTools are the MCP tool permission names for the agent profile

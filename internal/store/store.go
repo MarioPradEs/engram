@@ -99,6 +99,8 @@ type Observation struct {
 	RevisionCount  int     `json:"revision_count"`
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
+	ReviewAfter    *string `json:"review_after,omitempty"`
+	Pinned         bool    `json:"-"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`
@@ -113,6 +115,26 @@ type Observation struct {
 	// omitempty omits the key when nil; callers must set nil (not empty map) for
 	// untagged observations so legacy serialization stays key-absent (RD4).
 	Tags map[string]string `json:"tags,omitempty"`
+}
+
+const (
+	ObservationStateActive      = "active"
+	ObservationStateNeedsReview = "needs_review"
+)
+
+// State returns the virtual lifecycle state derived from review_after.
+func (o Observation) State() string {
+	if o.ReviewAfter == nil || strings.TrimSpace(*o.ReviewAfter) == "" {
+		return ObservationStateActive
+	}
+	reviewAfter, err := parseObservationTime(*o.ReviewAfter)
+	if err != nil {
+		return ObservationStateActive
+	}
+	if !reviewAfter.After(time.Now().UTC()) {
+		return ObservationStateNeedsReview
+	}
+	return ObservationStateActive
 }
 
 type SearchResult struct {
@@ -244,6 +266,24 @@ var decayReviewAfterMonths = map[string]int{
 	"policy":     decayPolicyMonths,
 	"preference": decayPreferenceMonths,
 }
+
+// observationSelectColumns is the canonical observation column list shared by
+// every SELECT/scan site (upstream's single-source-of-truth, extended for the
+// viva fork). Order is load-bearing: scanObservationRow scans in exactly this
+// order. It includes upstream's review_after/pinned AND viva's tags_json.
+// classified_by_v2 is NOT included here — the four classification-reading sites
+// append it explicitly (see observationSelectColumnsWithClassification).
+const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
+	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at,
+	       tags_json`
+
+// observationSelectColumnsWithClassification extends observationSelectColumns
+// with the viva classified_by_v2 marker for the four single-observation read
+// sites (GetObservation, GetObservationBySyncID, getObservationTx,
+// getObservationBySyncIDTx). scanObservationRowWithClassification scans these
+// columns in order.
+const observationSelectColumnsWithClassification = observationSelectColumns + `,
+	       coalesce(classified_by_v2, 0) as classified_by_v2`
 
 type SyncState struct {
 	TargetKey           string  `json:"target_key"`
@@ -714,6 +754,7 @@ func (s *Store) migrate() error {
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
 			last_seen_at TEXT,
+			pinned     BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
@@ -825,6 +866,7 @@ func (s *Store) migrate() error {
 		{name: "revision_count", definition: "INTEGER NOT NULL DEFAULT 1"},
 		{name: "duplicate_count", definition: "INTEGER NOT NULL DEFAULT 1"},
 		{name: "last_seen_at", definition: "TEXT"},
+		{name: "pinned", definition: "BOOLEAN NOT NULL DEFAULT 0"},
 		{name: "updated_at", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "deleted_at", definition: "TEXT"},
 	}
@@ -2314,9 +2356,7 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 	}
 
 	query := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
-		       o.tags_json
+		SELECT ` + observationSelectColumns + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -2380,9 +2420,7 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 	}
 
 	query := `
-		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		       tags_json
+		SELECT ` + observationSelectColumns + `
 		FROM observations
 		WHERE session_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -2574,9 +2612,7 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	}
 
 	query := `
-		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
-		       o.tags_json
+		SELECT ` + observationSelectColumns + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -2595,6 +2631,130 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	args = append(args, limit)
 
 	return s.queryObservations(query, args...)
+}
+
+func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
+	project, _ = NormalizeProject(project)
+
+	query := `
+		SELECT ` + observationSelectColumns + `
+		FROM observations o
+		WHERE o.deleted_at IS NULL AND o.pinned = 1
+	`
+	args := []any{}
+
+	if project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, project)
+	}
+	if scope != "" {
+		query += " AND o.scope = ?"
+		args = append(args, normalizeScope(scope))
+	}
+
+	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC"
+	return s.queryObservations(query, args...)
+}
+
+func (s *Store) PinObservation(id int64) error {
+	return s.setObservationPinned(id, true)
+}
+
+func (s *Store) UnpinObservation(id int64) error {
+	return s.setObservationPinned(id, false)
+}
+
+func (s *Store) setObservationPinned(id int64, pinned bool) error {
+	value := 0
+	if pinned {
+		value = 1
+	}
+	res, err := s.execHook(s.db, `UPDATE observations SET pinned = ? WHERE id = ? AND deleted_at IS NULL`, value, id)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrObservationNotFound
+	}
+	return nil
+}
+
+func (s *Store) recentUnpinnedObservations(project, scope string, limit int) ([]Observation, error) {
+	project, _ = NormalizeProject(project)
+	if limit <= 0 {
+		limit = s.cfg.MaxContextResults
+	}
+
+	query := `
+		SELECT ` + observationSelectColumns + `
+		FROM observations o
+		WHERE o.deleted_at IS NULL AND o.pinned = 0
+	`
+	args := []any{}
+	if project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, project)
+	}
+	if scope != "" {
+		query += " AND o.scope = ?"
+		args = append(args, normalizeScope(scope))
+	}
+	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC LIMIT ?"
+	args = append(args, limit)
+	return s.queryObservations(query, args...)
+}
+
+// ObservationsNeedingReview returns non-deleted observations whose review_after has passed.
+// An empty project searches all projects, matching existing browse/search conventions.
+func (s *Store) ObservationsNeedingReview(project string, limit int) ([]Observation, error) {
+	project, _ = NormalizeProject(project)
+	if limit <= 0 {
+		limit = s.cfg.MaxContextResults
+	}
+	query := `
+		SELECT ` + observationSelectColumns + `
+		FROM observations o
+		WHERE o.deleted_at IS NULL
+		  AND o.review_after IS NOT NULL
+		  AND datetime(o.review_after) <= datetime('now')
+	`
+	args := []any{}
+	if project != "" {
+		query += " AND LOWER(o.project) = ?"
+		args = append(args, project)
+	}
+	query += " ORDER BY datetime(o.review_after) ASC, o.id ASC LIMIT ?"
+	args = append(args, limit)
+
+	return s.queryObservations(query, args...)
+}
+
+// MarkReviewed resets an observation's review_after using its type's configured decay offset.
+// Types without a decay offset return to a NULL review_after value.
+// This lifecycle reset is intentionally local-only until the sync wire format includes review_after.
+func (s *Store) MarkReviewed(id int64) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		obs, err := s.getObservationTx(tx, id)
+		if err == sql.ErrNoRows {
+			return ErrObservationNotFound
+		}
+		if err != nil {
+			return err
+		}
+
+		var reviewAfter any
+		if months, ok := decayReviewAfterMonths[obs.Type]; ok {
+			reviewAfter = time.Now().UTC().AddDate(0, months, 0).Format("2006-01-02 15:04:05")
+		}
+		if _, err := s.execHook(tx, `UPDATE observations SET review_after = ?, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`, reviewAfter, id); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 // ─── User Prompts ────────────────────────────────────────────────────────────
@@ -2904,23 +3064,13 @@ func (s *Store) DeletePrompt(id int64) error {
 
 func (s *Store) GetObservation(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
-		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
+		`SELECT `+observationSelectColumnsWithClassification+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
-	var classifiedByV2Int int
-	var tagsJSON sql.NullString
-	if err := row.Scan(
-		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
-	); err != nil {
+	if err := scanObservationRowWithClassification(row, &o); err != nil {
 		return nil, err
 	}
-	o.ClassifiedByV2 = classifiedByV2Int != 0
-	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -3188,9 +3338,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	var directResults []SearchResult
 	if strings.Contains(query, "/") {
 		tkSQL := `
-			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-			       tags_json
+			SELECT ` + observationSelectColumns + `
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
@@ -3221,7 +3369,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 				if err := tkRows.Scan(
 					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-					&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &tagsJSON,
+					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &tagsJSON,
 				); err != nil {
 					break
 				}
@@ -3237,7 +3385,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.review_after, o.pinned, o.created_at, o.updated_at, o.deleted_at,
 		       o.tags_json, fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
@@ -3282,7 +3430,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-			&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+			&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
 			&tagsJSON, &sr.Rank,
 		); err != nil {
 			return nil, err
@@ -3368,7 +3516,12 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
-	observations, err := s.RecentObservations(project, scope, s.cfg.MaxContextResults)
+	pinned, err := s.PinnedObservations(project, scope)
+	if err != nil {
+		return "", err
+	}
+
+	observations, err := s.recentUnpinnedObservations(project, scope, s.cfg.MaxContextResults)
 	if err != nil {
 		return "", err
 	}
@@ -3378,7 +3531,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
-	if len(sessions) == 0 && len(observations) == 0 && len(prompts) == 0 {
+	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
 		return "", nil
 	}
 
@@ -3402,6 +3555,15 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		b.WriteString("### Recent User Prompts\n")
 		for _, p := range prompts {
 			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
+		}
+		b.WriteString("\n")
+	}
+
+	if len(pinned) > 0 {
+		b.WriteString("### Pinned\n")
+		for _, obs := range pinned {
+			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
+				obs.Type, obs.Title, truncate(obs.Content, 300))
 		}
 		b.WriteString("\n")
 	}
@@ -3463,6 +3625,65 @@ func (s *Store) ExportProjectForCloud(project string) (*ExportData, error) {
 	return data, nil
 }
 
+// ExportRelationMutations returns relation upsert mutations for non-orphaned
+// relation rows whose source and target observations are available locally.
+func (s *Store) ExportRelationMutations(project string) ([]SyncMutation, error) {
+	normalizedProject, _ := NormalizeProject(project)
+	normalizedProject = strings.TrimSpace(normalizedProject)
+
+	query := `
+		SELECT r.sync_id, r.source_id, r.target_id, r.relation, r.reason, r.evidence, r.confidence,
+		       r.judgment_status, r.marked_by_actor, r.marked_by_kind, r.marked_by_model,
+		       r.session_id, coalesce(nullif(src.project, ''), src_s.project, ''), r.created_at, r.updated_at
+		FROM memory_relations r
+		JOIN observations src ON src.sync_id = r.source_id AND src.deleted_at IS NULL
+		JOIN observations tgt ON tgt.sync_id = r.target_id AND tgt.deleted_at IS NULL
+		LEFT JOIN sessions src_s ON src_s.id = src.session_id
+		LEFT JOIN sessions tgt_s ON tgt_s.id = tgt.session_id
+		WHERE r.judgment_status != ?`
+	args := []any{JudgmentStatusOrphaned}
+	if normalizedProject != "" {
+		query += ` AND coalesce(nullif(src.project, ''), src_s.project, '') = ?
+			AND coalesce(nullif(tgt.project, ''), tgt_s.project, '') = ?`
+		args = append(args, normalizedProject, normalizedProject)
+	}
+	query += ` ORDER BY r.created_at, r.sync_id`
+
+	rows, err := s.queryItHook(s.db, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("export relation mutations: %w", err)
+	}
+	defer rows.Close()
+
+	mutations := []SyncMutation{}
+	for rows.Next() {
+		var p syncRelationPayload
+		if err := rows.Scan(
+			&p.SyncID, &p.SourceID, &p.TargetID, &p.Relation, &p.Reason, &p.Evidence, &p.Confidence,
+			&p.JudgmentStatus, &p.MarkedByActor, &p.MarkedByKind, &p.MarkedByModel,
+			&p.SessionID, &p.Project, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("export relation mutations: scan: %w", err)
+		}
+		payload, err := json.Marshal(p)
+		if err != nil {
+			return nil, fmt.Errorf("export relation mutations: marshal %s: %w", p.SyncID, err)
+		}
+		mutations = append(mutations, SyncMutation{
+			Entity:     SyncEntityRelation,
+			EntityKey:  strings.TrimSpace(p.SyncID),
+			Op:         SyncOpUpsert,
+			Payload:    string(payload),
+			Project:    strings.TrimSpace(p.Project),
+			OccurredAt: p.UpdatedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("export relation mutations: rows: %w", err)
+	}
+	return mutations, nil
+}
+
 func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	data := &ExportData{
 		Version:    "0.1.0",
@@ -3508,9 +3729,7 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	}
 
 	// Observations
-	obsQuery := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-	        tags_json
+	obsQuery := `SELECT ` + observationSelectColumns + `
 	 FROM observations`
 	obsArgs := []any{}
 	if project != "" {
@@ -3527,16 +3746,9 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	defer obsRows.Close()
 	for obsRows.Next() {
 		var o Observation
-		var tagsJSON sql.NullString
-		if err := obsRows.Scan(
-			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
-			&tagsJSON,
-		); err != nil {
+		if err := scanObservationRow(obsRows, &o); err != nil {
 			return nil, err
 		}
-		o.Tags = parseTagsJSON(tagsJSON)
 		data.Observations = append(data.Observations, o)
 	}
 	if err := obsRows.Err(); err != nil {
@@ -3598,8 +3810,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT)
 	for _, obs := range data.Observations {
 		_, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			normalizeExistingSyncID(obs.SyncID, "obs"),
 			obs.SessionID,
 			obs.Type,
@@ -3614,6 +3826,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			maxInt(obs.RevisionCount, 1),
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
+			obs.ReviewAfter,
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
@@ -4387,24 +4600,14 @@ func (s *Store) ApplyPulledChunk(targetKey, chunkID string, mutations []SyncMuta
 
 func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
-		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
+		`SELECT `+observationSelectColumnsWithClassification+`
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
-	var classifiedByV2Int int
-	var tagsJSON sql.NullString
-	if err := row.Scan(
-		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount,
-		&o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
-	); err != nil {
+	if err := scanObservationRowWithClassification(row, &o); err != nil {
 		return nil, err
 	}
-	o.ClassifiedByV2 = classifiedByV2Int != 0
-	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -5754,26 +5957,18 @@ func decodeSyncPayload(payload []byte, dest any) error {
 
 func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
-		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
+		`SELECT `+observationSelectColumnsWithClassification+`
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
-	var classifiedByV2Int int
-	var tagsJSON sql.NullString
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON); err != nil {
+	if err := scanObservationRowWithClassification(row, &o); err != nil {
 		return nil, err
 	}
-	o.ClassifiedByV2 = classifiedByV2Int != 0
-	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
 func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDeleted bool) (*Observation, error) {
-	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
+	query := `SELECT ` + observationSelectColumnsWithClassification + `
 		 FROM observations WHERE sync_id = ?`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -5781,13 +5976,9 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 	query += ` ORDER BY id DESC LIMIT 1`
 	row := tx.QueryRow(query, syncID)
 	var o Observation
-	var classifiedByV2Int int
-	var tagsJSON sql.NullString
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON); err != nil {
+	if err := scanObservationRowWithClassification(row, &o); err != nil {
 		return nil, err
 	}
-	o.ClassifiedByV2 = classifiedByV2Int != 0
-	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -6050,6 +6241,55 @@ func normalizeComparableTimestamp(value string) string {
 	return trimmed
 }
 
+func parseObservationTime(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp")
+	}
+	formats := []string{"2006-01-02 15:04:05", time.RFC3339, time.RFC3339Nano, "2006-01-02"}
+	for _, layout := range formats {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported timestamp %q", value)
+}
+
+type observationScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanObservationRow(scanner observationScanner, o *Observation) error {
+	var tagsJSON sql.NullString
+	if err := scanner.Scan(
+		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON,
+	); err != nil {
+		return err
+	}
+	o.Tags = parseTagsJSON(tagsJSON)
+	return nil
+}
+
+// scanObservationRowWithClassification scans observationSelectColumnsWithClassification:
+// the base columns + tags_json + classified_by_v2 (in that order). Used by the
+// four single-observation read sites that also surface the classified_by_v2 marker.
+func scanObservationRowWithClassification(scanner observationScanner, o *Observation) error {
+	var tagsJSON sql.NullString
+	var classifiedByV2Int int
+	if err := scanner.Scan(
+		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
+		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON, &classifiedByV2Int,
+	); err != nil {
+		return err
+	}
+	o.Tags = parseTagsJSON(tagsJSON)
+	o.ClassifiedByV2 = classifiedByV2Int != 0
+	return nil
+}
+
 func (s *Store) queryObservations(query string, args ...any) ([]Observation, error) {
 	rows, err := s.queryItHook(s.db, query, args...)
 	if err != nil {
@@ -6060,15 +6300,9 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 	var results []Observation
 	for rows.Next() {
 		var o Observation
-		var tagsJSON sql.NullString
-		if err := rows.Scan(
-			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON,
-		); err != nil {
+		if err := scanObservationRow(rows, &o); err != nil {
 			return nil, err
 		}
-		o.Tags = parseTagsJSON(tagsJSON)
 		results = append(results, o)
 	}
 	return results, rows.Err()
@@ -6095,10 +6329,7 @@ func (s *Store) ObservationsByTag(project, facet, value string, limit int) ([]Ob
 	}
 	path := "$." + facet
 	query := `
-		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.session_id, o.type, o.title, o.content,
-		       o.tool_name, o.project, o.scope, o.topic_key, o.revision_count,
-		       o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
-		       o.tags_json
+		SELECT ` + observationSelectColumns + `
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 		  AND o.project = ?
@@ -6321,6 +6552,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
 			last_seen_at TEXT,
+			pinned     BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
@@ -6334,7 +6566,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		INSERT INTO observations_migrated (
 			id, sync_id, session_id, type, title, content, tool_name, project,
 			scope, topic_key, normalized_hash, revision_count, duplicate_count,
-			last_seen_at, created_at, updated_at, deleted_at
+			last_seen_at, pinned, created_at, updated_at, deleted_at
 		)
 		SELECT
 			CASE
@@ -6355,6 +6587,7 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			CASE WHEN revision_count IS NULL OR revision_count < 1 THEN 1 ELSE revision_count END,
 			CASE WHEN duplicate_count IS NULL OR duplicate_count < 1 THEN 1 ELSE duplicate_count END,
 			last_seen_at,
+			0,
 			COALESCE(NULLIF(created_at, ''), datetime('now')),
 			COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''), datetime('now')),
 			deleted_at

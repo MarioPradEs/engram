@@ -45,8 +45,11 @@ var (
 	storeGetSynced      = func(s *store.Store, targetKey string) (map[string]bool, error) {
 		return s.GetSyncedChunksForTarget(targetKey)
 	}
-	storeExportData            = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
-	storeExportDataForProject  = func(s *store.Store, project string) (*store.ExportData, error) { return s.ExportProject(project) }
+	storeExportData           = func(s *store.Store) (*store.ExportData, error) { return s.Export() }
+	storeExportDataForProject = func(s *store.Store, project string) (*store.ExportData, error) { return s.ExportProject(project) }
+	storeExportRelations      = func(s *store.Store, project string) ([]store.SyncMutation, error) {
+		return s.ExportRelationMutations(project)
+	}
 	storeListMutationsAfterSeq = func(s *store.Store, targetKey string, afterSeq int64, limit int) ([]store.SyncMutation, error) {
 		return s.ListPendingSyncMutationsAfterSeq(targetKey, afterSeq, limit)
 	}
@@ -383,7 +386,6 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("export data: %w", err)
 	}
-
 	chunk := &ChunkData{}
 	mutationSeqs := []int64{}
 	if sy.cloudMode {
@@ -400,11 +402,17 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		chunk.Sessions = nil
 		chunk.Prompts = nil
 	} else {
+		relationMutations, err := storeExportRelations(sy.store, project)
+		if err != nil {
+			return nil, fmt.Errorf("export relations: %w", err)
+		}
+
 		// Get the timestamp of the last chunk to filter "new" data
 		lastChunkTime := sy.lastChunkTime(manifest)
 
 		// Filter to only new data (created after last chunk)
 		chunk = sy.filterNewData(data, lastChunkTime)
+		chunk.Mutations = filterNewRelationMutations(relationMutations, lastChunkTime)
 	}
 
 	// Nothing new to export
@@ -1137,6 +1145,24 @@ func (sy *Syncer) filterNewData(data *store.ExportData, lastChunkTime string) *C
 	}
 
 	return chunk
+}
+
+func filterNewRelationMutations(mutations []store.SyncMutation, lastChunkTime string) []store.SyncMutation {
+	if len(mutations) == 0 {
+		return nil
+	}
+	if lastChunkTime == "" {
+		return mutations
+	}
+
+	cutoff := normalizeTime(lastChunkTime)
+	filtered := make([]store.SyncMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		if normalizeTime(mutation.OccurredAt) > cutoff {
+			filtered = append(filtered, mutation)
+		}
+	}
+	return filtered
 }
 
 func filterByProject(data *store.ExportData, project string) *store.ExportData {

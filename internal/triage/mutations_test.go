@@ -16,6 +16,8 @@ import (
 // ─── Mutation-capable fake store ────────────────────────────────────────────
 
 // fakeMutableStore implements triage.MutableTriageStore with mutation tracking.
+// It includes controllable returns for ObservationsByTag and DistinctTagValues
+// (added in WU-C2 for PR#3 / E2b bulk-by-tag handler tests).
 type fakeMutableStore struct {
 	projects     []store.ProjectStats
 	observations []store.Observation
@@ -23,6 +25,11 @@ type fakeMutableStore struct {
 	obsErr       error
 	updateCalls  []updateCall // records every UpdateObservationScope call
 	updateErr    error        // returned by UpdateObservationScope when non-nil
+	// PR#3 / E2b: tag query fakes
+	tagObs    []store.Observation // returned by ObservationsByTag
+	tagErr    error               // error returned by ObservationsByTag
+	tagValues []string            // returned by DistinctTagValues
+	tagValErr error               // error returned by DistinctTagValues
 }
 
 type updateCall struct {
@@ -44,6 +51,16 @@ func (f *fakeMutableStore) UpdateObservationScope(id int64, internalScope string
 	}
 	f.updateCalls = append(f.updateCalls, updateCall{ID: id, Scope: internalScope})
 	return nil
+}
+
+// ObservationsByTag returns the canned tagObs slice (PR#3 / WU-C2).
+func (f *fakeMutableStore) ObservationsByTag(project, facet, value string, limit int) ([]store.Observation, error) {
+	return f.tagObs, f.tagErr
+}
+
+// DistinctTagValues returns the canned tagValues slice (PR#3 / WU-C2).
+func (f *fakeMutableStore) DistinctTagValues(project, facet string) ([]string, error) {
+	return f.tagValues, f.tagValErr
 }
 
 // ─── Per-item toggle: POST /observations/{id}/scope ──────────────────────────

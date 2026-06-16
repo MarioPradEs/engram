@@ -20,14 +20,22 @@ type TriageStore interface {
 }
 
 // MutableTriageStore extends TriageStore with the mutation methods required by
-// WU-5 handlers (toggle, bulk set-scope). The single mutation method wraps
-// store.UpdateObservation to set only the scope field.
+// WU-5 handlers (toggle, bulk set-scope) and the tag-query methods added in
+// PR#3 (E2b: bulk-by-tag). All methods proxy to store.Store without re-implementing
+// store logic.
 type MutableTriageStore interface {
 	TriageStore
 	// UpdateObservationScope sets the internal scope of a single observation.
 	// internalScope must be one of the store's recognised values ("team", "personal", …).
 	// Callers should convert via ToInternalScope before calling this method.
 	UpdateObservationScope(id int64, internalScope string) error
+	// ObservationsByTag returns observations in the given project whose tags_json
+	// field matches the given facet/value pair. facet must be in {"juego","tipo"}.
+	ObservationsByTag(project, facet, value string, limit int) ([]store.Observation, error)
+	// DistinctTagValues returns the sorted, de-duplicated set of non-empty values
+	// for the given facet across all observations in the project.
+	// facet must be in {"juego","tipo"}.
+	DistinctTagValues(project, facet string) ([]string, error)
 }
 
 const (

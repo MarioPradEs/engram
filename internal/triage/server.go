@@ -88,6 +88,18 @@ func (a *StoreAdapter) UpdateObservationScope(id int64, internalScope string) er
 	return err
 }
 
+// ObservationsByTag proxies to store.ObservationsByTag (PR#2 / E2a).
+// facet must be in {"juego","tipo"} — allow-list enforced by the store method.
+func (a *StoreAdapter) ObservationsByTag(project, facet, value string, limit int) ([]store.Observation, error) {
+	return a.s.ObservationsByTag(project, facet, value, limit)
+}
+
+// DistinctTagValues proxies to store.DistinctTagValues (PR#2 / E2a).
+// facet must be in {"juego","tipo"} — allow-list enforced by the store method.
+func (a *StoreAdapter) DistinctTagValues(project, facet string) ([]string, error) {
+	return a.s.DistinctTagValues(project, facet)
+}
+
 // New creates a triage Server backed by a real *store.Store.
 // When port is 0 and no listener is pre-injected, Start will attempt to bind to DefaultPort.
 // s may be nil in unit tests that only exercise the HTTP handler layer.

@@ -100,7 +100,12 @@ type Observation struct {
 	DuplicateCount int     `json:"duplicate_count"`
 	LastSeenAt     *string `json:"last_seen_at,omitempty"`
 	ReviewAfter    *string `json:"review_after,omitempty"`
-	Pinned         bool    `json:"-"`
+	// Pinned is local-only: intentionally excluded from JSON export/import and
+	// from sync (upstream design — pinned state belongs to the device, not the
+	// backup or the network). SQL Import carries it for the in-memory
+	// (*ExportData) programmatic path only; the JSON file/HTTP backup path
+	// drops it because json:"-".
+	Pinned bool `json:"-"`
 	CreatedAt      string  `json:"created_at"`
 	UpdatedAt      string  `json:"updated_at"`
 	DeletedAt      *string `json:"deleted_at,omitempty"`

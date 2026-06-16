@@ -9264,11 +9264,14 @@ func TestAllObservationsFullReturnsPinnedAndReviewAfter(t *testing.T) {
 	}
 }
 
-// TestImportRoundTripPinned verifies that an observation with Pinned==true and
-// a ReviewAfter value round-trips correctly through Export+Import.
-// RED before fix: Import's INSERT omitted the pinned column, so restoring a
-// backup always produced Pinned==false.
-func TestImportRoundTripPinned(t *testing.T) {
+// TestImportRoundTripPinned_InMemory verifies that an observation with
+// Pinned==true round-trips correctly through the in-memory *ExportData path
+// (Export → Import without any JSON serialization). This exercises the
+// programmatic caller path where ExportData is passed directly between stores;
+// pinned IS carried here because the SQL INSERT includes the pinned column and
+// no JSON round-trip strips it. This does NOT cover the file/HTTP JSON backup
+// path — see TestImportPinned_LocalOnlyAcrossJSON for that behavior.
+func TestImportRoundTripPinned_InMemory(t *testing.T) {
 	src := newTestStore(t)
 	dst := newTestStore(t)
 
@@ -9344,5 +9347,87 @@ func TestImportRoundTripPinned(t *testing.T) {
 	}
 	if imported.Tags == nil || imported.Tags["juego"] != "go" {
 		t.Errorf("Import: expected Tags[juego]=go after round-trip, got %v", imported.Tags)
+	}
+}
+
+// TestImportPinned_LocalOnlyAcrossJSON documents and locks the upstream
+// local-only design for Observation.Pinned: because the field is tagged
+// json:"-", it is intentionally dropped during JSON marshal/unmarshal.
+// File backups and HTTP sync exports therefore never carry pinned state —
+// pinned belongs to the device, not the backup (upstream design decision).
+// This test asserts that imported.Pinned == false after a JSON round-trip,
+// making any future accidental change to json:"-" immediately visible.
+func TestImportPinned_LocalOnlyAcrossJSON(t *testing.T) {
+	src := newTestStore(t)
+	dst := newTestStore(t)
+
+	if err := src.CreateSession("sess-pinned-json", "proj-pinned-json", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := src.AddObservation(AddObservationParams{
+		SessionID: "sess-pinned-json",
+		Type:      "decision",
+		Title:     "pinned-json obs",
+		Content:   "local-only pinned test",
+		Project:   "proj-pinned-json",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if err := src.PinObservation(id); err != nil {
+		t.Fatalf("PinObservation: %v", err)
+	}
+
+	// Export produces an *ExportData where Observation.Pinned == true in memory.
+	data, err := src.Export()
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	// JSON marshal → unmarshal simulates the file/HTTP backup path.
+	// Observation.Pinned is json:"-", so it is dropped by json.Marshal.
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	var restored ExportData
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	// Confirm the JSON round-trip stripped Pinned (upstream local-only design).
+	var restoredObs *Observation
+	for i := range restored.Observations {
+		if restored.Observations[i].Title == "pinned-json obs" {
+			restoredObs = &restored.Observations[i]
+			break
+		}
+	}
+	if restoredObs == nil {
+		t.Fatal("restored ExportData: observation not found after JSON round-trip")
+	}
+	if restoredObs.Pinned {
+		t.Error("JSON round-trip: expected Pinned==false after marshal/unmarshal (json:\"-\" design), got true — do NOT change Observation.Pinned json tag without a conscious upstream decision")
+	}
+
+	// Import into a fresh store and verify the same: Pinned stays false.
+	result, err := dst.Import(&restored)
+	if err != nil {
+		t.Fatalf("Import after JSON round-trip: %v", err)
+	}
+	if result.ObservationsImported == 0 {
+		t.Fatal("Import: no observations were imported")
+	}
+
+	imported, err := dst.GetObservationBySyncID(restoredObs.SyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID: %v", err)
+	}
+	// This is the intended behavior: pinned is local-only and does not survive
+	// a JSON backup/restore cycle. Assert false to lock this contract.
+	if imported.Pinned {
+		t.Error("Import after JSON round-trip: expected Pinned==false (local-only design), got true")
 	}
 }

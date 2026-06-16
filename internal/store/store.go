@@ -754,6 +754,7 @@ func (s *Store) migrate() error {
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
 			last_seen_at TEXT,
+			review_after TEXT,
 			pinned     BOOLEAN NOT NULL DEFAULT 0,
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -2382,9 +2383,7 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 // Unlike AllObservations, this has no limit and always includes the classification marker.
 func (s *Store) AllObservationsFull() ([]Observation, error) {
 	rows, err := s.queryItHook(s.db,
-		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
+		`SELECT `+observationSelectColumnsWithClassification+`
 		 FROM observations
 		 WHERE deleted_at IS NULL
 		 ORDER BY id ASC`,
@@ -2397,17 +2396,9 @@ func (s *Store) AllObservationsFull() ([]Observation, error) {
 	var results []Observation
 	for rows.Next() {
 		var o Observation
-		var classifiedByV2Int int
-		var tagsJSON sql.NullString
-		if err := rows.Scan(
-			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
-			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
-		); err != nil {
+		if err := scanObservationRowWithClassification(rows, &o); err != nil {
 			return nil, err
 		}
-		o.ClassifiedByV2 = classifiedByV2Int != 0
-		o.Tags = parseTagsJSON(tagsJSON)
 		results = append(results, o)
 	}
 	return results, rows.Err()
@@ -3810,8 +3801,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT)
 	for _, obs := range data.Observations {
 		_, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, review_after, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			normalizeExistingSyncID(obs.SyncID, "obs"),
 			obs.SessionID,
 			obs.Type,
@@ -3827,6 +3818,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
 			obs.ReviewAfter,
+			obs.Pinned,
 			obs.CreatedAt,
 			obs.UpdatedAt,
 			obs.DeletedAt,
@@ -6552,7 +6544,9 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			revision_count INTEGER NOT NULL DEFAULT 1,
 			duplicate_count INTEGER NOT NULL DEFAULT 1,
 			last_seen_at TEXT,
+			review_after TEXT,
 			pinned     BOOLEAN NOT NULL DEFAULT 0,
+			tags_json  TEXT,
 			created_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
 			deleted_at TEXT,
@@ -6562,11 +6556,16 @@ func (s *Store) migrateLegacyObservationsTable() error {
 		return fmt.Errorf("migrate legacy observations: create table: %w", err)
 	}
 
+	// review_after and tags_json are added to the source observations table by
+	// addColumnIfNotExists AFTER this migration runs, so they are not yet present
+	// on the truly-ancient source table. We carry NULL for both columns here;
+	// the subsequent addColumnIfNotExists calls become harmless no-ops because the
+	// renamed table already has those columns from the DDL above.
 	if _, err := s.execHook(tx, `
 		INSERT INTO observations_migrated (
 			id, sync_id, session_id, type, title, content, tool_name, project,
 			scope, topic_key, normalized_hash, revision_count, duplicate_count,
-			last_seen_at, pinned, created_at, updated_at, deleted_at
+			last_seen_at, review_after, pinned, tags_json, created_at, updated_at, deleted_at
 		)
 		SELECT
 			CASE
@@ -6587,7 +6586,9 @@ func (s *Store) migrateLegacyObservationsTable() error {
 			CASE WHEN revision_count IS NULL OR revision_count < 1 THEN 1 ELSE revision_count END,
 			CASE WHEN duplicate_count IS NULL OR duplicate_count < 1 THEN 1 ELSE duplicate_count END,
 			last_seen_at,
+			NULL,
 			0,
+			NULL,
 			COALESCE(NULLIF(created_at, ''), datetime('now')),
 			COALESCE(NULLIF(updated_at, ''), NULLIF(created_at, ''), datetime('now')),
 			deleted_at

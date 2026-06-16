@@ -9196,3 +9196,153 @@ func TestParseTagsJSONMalformedDegradesToNil(t *testing.T) {
 		t.Fatalf("expected Tags=nil for malformed tags_json, got %v", obs.Tags)
 	}
 }
+
+// TestAllObservationsFullReturnsPinnedAndReviewAfter verifies that AllObservationsFull
+// returns Pinned==true and ReviewAfter populated for an observation that has those fields
+// set, as well as Tags still populated.
+// RED before fix: AllObservationsFull used a hand-rolled SELECT that omitted
+// review_after and pinned, so Pinned was always false and ReviewAfter always nil.
+func TestAllObservationsFullReturnsPinnedAndReviewAfter(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("sess-pinned-full", "proj-pinned", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	wantTags := map[string]string{"juego": "go", "tipo": "bugfix"}
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "sess-pinned-full",
+		Type:      "bugfix",
+		Title:     "pinned-full obs",
+		Content:   "pinned observation content",
+		Project:   "proj-pinned",
+		Scope:     "project",
+		Tags:      wantTags,
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// Pin the observation.
+	if err := s.PinObservation(id); err != nil {
+		t.Fatalf("PinObservation: %v", err)
+	}
+
+	// Set a review_after directly to avoid relying on decay config.
+	reviewAfterVal := "2099-01-01T00:00:00Z"
+	if _, err := s.db.Exec(
+		`UPDATE observations SET review_after = ? WHERE id = ?`,
+		reviewAfterVal, id,
+	); err != nil {
+		t.Fatalf("set review_after: %v", err)
+	}
+
+	all, err := s.AllObservationsFull()
+	if err != nil {
+		t.Fatalf("AllObservationsFull: %v", err)
+	}
+
+	var found bool
+	for _, o := range all {
+		if o.Title == "pinned-full obs" {
+			found = true
+			if !o.Pinned {
+				t.Error("AllObservationsFull: expected Pinned==true, got false")
+			}
+			if o.ReviewAfter == nil {
+				t.Error("AllObservationsFull: expected ReviewAfter to be non-nil")
+			} else if *o.ReviewAfter != reviewAfterVal {
+				t.Errorf("AllObservationsFull: expected ReviewAfter=%q, got %q", reviewAfterVal, *o.ReviewAfter)
+			}
+			if o.Tags == nil || o.Tags["juego"] != "go" {
+				t.Errorf("AllObservationsFull: expected Tags[juego]=go, got %v", o.Tags)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("AllObservationsFull: did not find the inserted observation")
+	}
+}
+
+// TestImportRoundTripPinned verifies that an observation with Pinned==true and
+// a ReviewAfter value round-trips correctly through Export+Import.
+// RED before fix: Import's INSERT omitted the pinned column, so restoring a
+// backup always produced Pinned==false.
+func TestImportRoundTripPinned(t *testing.T) {
+	src := newTestStore(t)
+	dst := newTestStore(t)
+
+	if err := src.CreateSession("sess-imp-pinned", "proj-imp", "/tmp/proj"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	id, err := src.AddObservation(AddObservationParams{
+		SessionID: "sess-imp-pinned",
+		Type:      "decision",
+		Title:     "import-pinned obs",
+		Content:   "content of pinned import obs",
+		Project:   "proj-imp",
+		Scope:     "project",
+		Tags:      map[string]string{"juego": "go", "tipo": "decision"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	if err := src.PinObservation(id); err != nil {
+		t.Fatalf("PinObservation: %v", err)
+	}
+
+	reviewAfterVal := "2099-06-01T00:00:00Z"
+	if _, err := src.db.Exec(
+		`UPDATE observations SET review_after = ? WHERE id = ?`,
+		reviewAfterVal, id,
+	); err != nil {
+		t.Fatalf("set review_after: %v", err)
+	}
+
+	data, err := src.Export()
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	// Confirm exported observation carries Pinned and ReviewAfter.
+	var exported *Observation
+	for i := range data.Observations {
+		if data.Observations[i].Title == "import-pinned obs" {
+			exported = &data.Observations[i]
+			break
+		}
+	}
+	if exported == nil {
+		t.Fatal("Export: did not find the exported observation")
+	}
+	if !exported.Pinned {
+		t.Error("Export: expected exported observation Pinned==true")
+	}
+
+	result, err := dst.Import(data)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if result.ObservationsImported == 0 {
+		t.Fatal("Import: no observations were imported")
+	}
+
+	// Fetch by sync_id to find the imported observation.
+	imported, err := dst.GetObservationBySyncID(exported.SyncID)
+	if err != nil {
+		t.Fatalf("GetObservationBySyncID after Import: %v", err)
+	}
+	if !imported.Pinned {
+		t.Error("Import: expected imported observation Pinned==true, got false")
+	}
+	if imported.ReviewAfter == nil {
+		t.Error("Import: expected ReviewAfter to be non-nil after round-trip")
+	} else if *imported.ReviewAfter != reviewAfterVal {
+		t.Errorf("Import: expected ReviewAfter=%q, got %q", reviewAfterVal, *imported.ReviewAfter)
+	}
+	if imported.Tags == nil || imported.Tags["juego"] != "go" {
+		t.Errorf("Import: expected Tags[juego]=go after round-trip, got %v", imported.Tags)
+	}
+}

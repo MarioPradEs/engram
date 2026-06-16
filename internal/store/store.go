@@ -986,6 +986,13 @@ func (s *Store) migrate() error {
 	// Idempotent via WHERE tags_json IS NULL.
 	// Already-personal observations (sync_id=NULL, no mutation row) remain NULL —
 	// accepted limitation per REQ-57 / decision #964.
+	//
+	// Note: the "AND sync_id IS NOT NULL" guard below is belt-and-suspenders only.
+	// The synthetic sync_id assignment that runs earlier in migrate() means every
+	// observation already has a non-NULL sync_id by this point. The real isolation
+	// that prevents updating observations with no tagged history is the EXISTS
+	// correlated subquery — it ensures we only set tags_json when at least one
+	// matching sync_mutations row carries a $.tags value.
 	if _, err := s.execHook(s.db, `
 		UPDATE observations
 		SET tags_json = (
@@ -1024,6 +1031,7 @@ func (s *Store) migrate() error {
 	if _, err := s.execHook(s.db, `
 		CREATE INDEX IF NOT EXISTS idx_cloud_upgrade_state_stage ON cloud_upgrade_state(stage);
 		CREATE INDEX IF NOT EXISTS idx_sync_mutations_lookup ON sync_mutations(target_key, entity, entity_key, source);
+		CREATE INDEX IF NOT EXISTS idx_sync_mutations_entity_key ON sync_mutations(entity, entity_key);
 	`); err != nil {
 		return err
 	}
@@ -2307,7 +2315,8 @@ func (s *Store) AllObservations(project, scope string, limit int) ([]Observation
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+		       o.tags_json
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -2370,7 +2379,8 @@ func (s *Store) SessionObservations(sessionID string, limit int) ([]Observation,
 
 	query := `
 		SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+		       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+		       tags_json
 		FROM observations
 		WHERE session_id = ? AND deleted_at IS NULL
 		ORDER BY created_at ASC
@@ -2553,7 +2563,8 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 
 	query := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
-		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+		       o.tags_json
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 	`
@@ -5713,22 +5724,29 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 	row := tx.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2
+		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
 	var classifiedByV2Int int
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int); err != nil {
+	var tagsJSON sql.NullString
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON); err != nil {
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
+	if tagsJSON.Valid && tagsJSON.String != "" {
+		var tags map[string]string
+		if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
+			o.Tags = tags
+		}
+	}
 	return &o, nil
 }
 
 func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDeleted bool) (*Observation, error) {
 	query := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2
+		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
 		 FROM observations WHERE sync_id = ?`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -5737,10 +5755,17 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 	row := tx.QueryRow(query, syncID)
 	var o Observation
 	var classifiedByV2Int int
-	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int); err != nil {
+	var tagsJSON sql.NullString
+	if err := row.Scan(&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content, &o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON); err != nil {
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
+	if tagsJSON.Valid && tagsJSON.String != "" {
+		var tags map[string]string
+		if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
+			o.Tags = tags
+		}
+	}
 	return &o, nil
 }
 
@@ -5824,8 +5849,8 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -5836,6 +5861,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			normalizeScope(payload.Scope),
 			payload.TopicKey,
 			hashNormalized(payload.Content),
+			tagsJSONValue(payload.Tags),
 			revisionCount,
 			duplicateCount,
 			payload.LastSeenAt,
@@ -5866,7 +5892,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, tags_json = COALESCE(?, tags_json), revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,
@@ -5877,6 +5903,7 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		normalizeScope(payload.Scope),
 		payload.TopicKey,
 		hashNormalized(payload.Content),
+		tagsJSONValue(payload.Tags),
 		revisionCount,
 		duplicateCount,
 		payload.LastSeenAt,
@@ -6007,12 +6034,19 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 	var results []Observation
 	for rows.Next() {
 		var o Observation
+		var tagsJSON sql.NullString
 		if err := rows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON,
 		); err != nil {
 			return nil, err
+		}
+		if tagsJSON.Valid && tagsJSON.String != "" {
+			var tags map[string]string
+			if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
+				o.Tags = tags
+			}
 		}
 		results = append(results, o)
 	}
@@ -6035,11 +6069,15 @@ func (s *Store) ObservationsByTag(project, facet, value string, limit int) ([]Ob
 	if !tagFacetAllowList[facet] {
 		return nil, fmt.Errorf("store.ObservationsByTag: facet %q is not in the allow-list {juego, tipo}", facet)
 	}
+	if limit <= 0 {
+		limit = s.cfg.MaxContextResults
+	}
 	path := "$." + facet
 	query := `
 		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.session_id, o.type, o.title, o.content,
 		       o.tool_name, o.project, o.scope, o.topic_key, o.revision_count,
-		       o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		       o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
+		       o.tags_json
 		FROM observations o
 		WHERE o.deleted_at IS NULL
 		  AND o.project = ?

@@ -270,15 +270,25 @@ func (s *Server) handleSetProjectScope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Execute the bulk update.
+	// Execute the bulk update, skipping observations already at the target scope.
+	// Skipping avoids spurious sync mutations and revision bumps (store.UpdateObservation
+	// always increments revision_count + updated_at, even when the value is unchanged).
+	// Scenario C-06: rows already at internalScope must be left untouched.
 	internalScope := ToInternalScope(uiScope)
+	updatedCount := 0
 	for _, obs := range observations {
+		if obs.Scope == internalScope {
+			// Already at target — do not re-write; do not enqueue a sync mutation.
+			continue
+		}
 		if err := ms.UpdateObservationScope(obs.ID, internalScope); err != nil {
 			log.Printf("[triage] handleSetProjectScope %q: UpdateObservationScope id=%d: %v", projectName, obs.ID, err)
 			http.Error(w, "partial update — some items may not have been updated", http.StatusInternalServerError)
 			return
 		}
+		updatedCount++
 	}
+	_ = updatedCount // available for future C-08 count reporting
 
 	// Option A (D4, REQ-42): write config.json for both directions, cwd project only.
 	if s.cwdDir != "" && s.cwdProject == projectName {

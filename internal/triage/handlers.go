@@ -34,7 +34,7 @@ const (
 	// obsPerProjectLimit is the maximum observations loaded per project page (read view).
 	obsPerProjectLimit = 200
 
-	// obsShareAllLimit is a practical sentinel passed to RecentObservations by
+	// obsBulkScopeLimit is a practical sentinel passed to RecentObservations by
 	// handleSetProjectScope to bypass the 200-row read-view cap (obsPerProjectLimit)
 	// and materialize ALL project rows into memory before bulk-updating them.
 	// 10 million is far beyond any realistic local observation count, so the
@@ -42,7 +42,7 @@ const (
 	// tool where the entire dataset lives on localhost; it is NOT a streaming
 	// solution and should not be reused in contexts where dataset size is
 	// unbounded or latency is user-facing.
-	obsShareAllLimit = 10_000_000
+	obsBulkScopeLimit = 10_000_000
 )
 
 // handleIndex renders the landing page grouped by project.
@@ -249,9 +249,9 @@ func (s *Server) handleSetProjectScope(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch ALL observations for the project — no cap (W-2).
-	// obsShareAllLimit is a very large sentinel so the bulk action never
+	// obsBulkScopeLimit is a very large sentinel so the bulk action never
 	// silently truncates projects with more than obsPerProjectLimit (200) items.
-	observations, err := ms.RecentObservations(projectName, "", obsShareAllLimit)
+	observations, err := ms.RecentObservations(projectName, "", obsBulkScopeLimit)
 	if err != nil {
 		log.Printf("[triage] handleSetProjectScope %q: RecentObservations: %v", projectName, err)
 		http.Error(w, "failed to load observations", http.StatusInternalServerError)

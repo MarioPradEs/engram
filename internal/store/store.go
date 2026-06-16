@@ -108,8 +108,8 @@ type Observation struct {
 	Department     string `json:"department,omitempty"`
 	UserDeleted    bool   `json:"user_deleted,omitempty"`
 	ClassifiedByV2 bool   `json:"classified_by_v2,omitempty"`
-	// Tags is the four-facet knowledge tag set (knowledge-tags-foundation).
-	// It lives exclusively in the JSONB payload — no SQL column.
+	// Tags is the flat knowledge tag set (knowledge-tags-foundation, e.g. juego/tipo).
+	// Stored in the observations.tags_json column as {"juego":"X","tipo":"Y"}.
 	// omitempty omits the key when nil; callers must set nil (not empty map) for
 	// untagged observations so legacy serialization stays key-absent (RD4).
 	Tags map[string]string `json:"tags,omitempty"`
@@ -2344,7 +2344,7 @@ func (s *Store) AllObservationsFull() ([]Observation, error) {
 	rows, err := s.queryItHook(s.db,
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2
+		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
 		 FROM observations
 		 WHERE deleted_at IS NULL
 		 ORDER BY id ASC`,
@@ -2358,14 +2358,16 @@ func (s *Store) AllObservationsFull() ([]Observation, error) {
 	for rows.Next() {
 		var o Observation
 		var classifiedByV2Int int
+		var tagsJSON sql.NullString
 		if err := rows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
+			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
 		); err != nil {
 			return nil, err
 		}
 		o.ClassifiedByV2 = classifiedByV2Int != 0
+		o.Tags = parseTagsJSON(tagsJSON)
 		results = append(results, o)
 	}
 	return results, rows.Err()
@@ -2457,8 +2459,12 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 				if err != nil {
 					return err
 				}
-				// Tags are not stored in the SQL row; carry them from params
-				// so they reach the sync payload (knowledge-tags-foundation WU1).
+				// Revision branch (topic-key match, content changed):
+				// tags_json was already replaced with the fresh incoming tags above
+				// (tags_json = ?), so we re-read the row from the DB via
+				// getObservationTx and assign obs.Tags here to ensure the sync
+				// payload carries the updated tags without a second DB round-trip.
+				// Semantics: revision = full replace; old tags are gone, new tags win.
 				obs.Tags = tags
 				observationID = existingID
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
@@ -2500,9 +2506,14 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			if err != nil {
 				return err
 			}
-			// Tags are not stored in the SQL row; carry them from params
-			// so they reach the sync payload (knowledge-tags-foundation WU1).
-			obs.Tags = tags
+			// Dedupe branch (identical content within the time window):
+			// COALESCE(?, tags_json) preserves existing tags when the incoming
+			// call supplies no tags (tags=nil → SQL NULL → COALESCE keeps old).
+			// If the caller supplies tags, COALESCE takes the new value, replacing
+			// existing tags. This means dedupe never silently strips tags that were
+			// already recorded on the row; it only adds/replaces when explicitly sent.
+			// obs.Tags is already populated by getObservationTx (which reads tags_json
+			// back from the DB), so the sync payload reflects whatever tags_json holds.
 			observationID = existingID
 			return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
 		}
@@ -2894,19 +2905,21 @@ func (s *Store) GetObservation(id int64) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2
+		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
 		 FROM observations WHERE id = ? AND deleted_at IS NULL`, id,
 	)
 	var o Observation
 	var classifiedByV2Int int
+	var tagsJSON sql.NullString
 	if err := row.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
-		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
+		&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
 	); err != nil {
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
+	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -3175,7 +3188,8 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	if strings.Contains(query, "/") {
 		tkSQL := `
 			SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+			       scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+			       tags_json
 			FROM observations
 			WHERE topic_key = ? AND deleted_at IS NULL
 		`
@@ -3202,13 +3216,15 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			defer tkRows.Close()
 			for tkRows.Next() {
 				var sr SearchResult
+				var tagsJSON sql.NullString
 				if err := tkRows.Scan(
 					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-					&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
+					&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &tagsJSON,
 				); err != nil {
 					break
 				}
+				sr.Tags = parseTagsJSON(tagsJSON)
 				sr.Rank = -1000
 				directResults = append(directResults, sr)
 			}
@@ -3221,7 +3237,7 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	sqlQ := `
 		SELECT o.id, ifnull(o.sync_id, '') as sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project,
 		       o.scope, o.topic_key, o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at,
-		       fts.rank
+		       o.tags_json, fts.rank
 		FROM observations_fts fts
 		JOIN observations o ON o.id = fts.rowid
 		WHERE observations_fts MATCH ? AND o.deleted_at IS NULL
@@ -3261,14 +3277,16 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 	results = append(results, directResults...)
 	for rows.Next() {
 		var sr SearchResult
+		var tagsJSON sql.NullString
 		if err := rows.Scan(
 			&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
 			&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
 			&sr.LastSeenAt, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt,
-			&sr.Rank,
+			&tagsJSON, &sr.Rank,
 		); err != nil {
 			return nil, err
 		}
+		sr.Tags = parseTagsJSON(tagsJSON)
 		if !seen[sr.ID] {
 			results = append(results, sr)
 		}
@@ -4365,20 +4383,22 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 	row := s.db.QueryRow(
 		`SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 		        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
-		        coalesce(classified_by_v2, 0) as classified_by_v2
+		        coalesce(classified_by_v2, 0) as classified_by_v2, tags_json
 		 FROM observations WHERE sync_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1`,
 		syncID,
 	)
 	var o Observation
 	var classifiedByV2Int int
+	var tagsJSON sql.NullString
 	if err := row.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount,
-		&o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int,
+		&o.LastSeenAt, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &classifiedByV2Int, &tagsJSON,
 	); err != nil {
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
+	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -5220,7 +5240,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	// ── Live observations ─────────────────────────────────────────────────────
 	rows, err := s.queryItHook(tx, `
 		SELECT o.sync_id, o.session_id, o.type, o.title, o.content, o.tool_name, o.project, o.scope, o.topic_key,
-		       o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at
+		       o.revision_count, o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.tags_json
 		FROM observations o
 		LEFT JOIN sessions s ON s.id = o.session_id
 		WHERE (
@@ -5247,6 +5267,7 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 	var pending []syncObservationPayload
 	for rows.Next() {
 		var payload syncObservationPayload
+		var tagsJSON sql.NullString
 		if err := rows.Scan(
 			&payload.SyncID,
 			&payload.SessionID,
@@ -5262,9 +5283,14 @@ func (s *Store) backfillObservationSyncMutationsTx(tx *sql.Tx, project string) e
 			&payload.LastSeenAt,
 			&payload.CreatedAt,
 			&payload.UpdatedAt,
+			&tagsJSON,
 		); err != nil {
 			return closeRowsWithError(rows, err)
 		}
+		// Carry tags_json into the sync payload so backfill mutations are not
+		// tagless. Without this, enrollment/rename/repair would enqueue mutations
+		// with Tags=nil and could wipe cloud tags on push.
+		payload.Tags = parseTagsJSON(tagsJSON)
 		pending = append(pending, payload)
 	}
 	if err := rows.Close(); err != nil {
@@ -5734,12 +5760,7 @@ func (s *Store) getObservationTx(tx *sql.Tx, id int64) (*Observation, error) {
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
-	if tagsJSON.Valid && tagsJSON.String != "" {
-		var tags map[string]string
-		if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
-			o.Tags = tags
-		}
-	}
+	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -5760,12 +5781,7 @@ func (s *Store) getObservationBySyncIDTx(tx *sql.Tx, syncID string, includeDelet
 		return nil, err
 	}
 	o.ClassifiedByV2 = classifiedByV2Int != 0
-	if tagsJSON.Valid && tagsJSON.String != "" {
-		var tags map[string]string
-		if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
-			o.Tags = tags
-		}
-	}
+	o.Tags = parseTagsJSON(tagsJSON)
 	return &o, nil
 }
 
@@ -5890,6 +5906,10 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		updatedAt = existing.UpdatedAt
 	}
 
+	// COALESCE(?, tags_json): a remote payload that carries no tags (Tags=nil →
+	// tagsJSONValue → SQL NULL) preserves existing local tags rather than clearing
+	// them. No tag-removal API exists today, so a NULL remote value must never wipe
+	// local tags. Revisit this semantics if a tag-delete operation is introduced.
 	_, err = s.execHook(tx,
 		`UPDATE observations
 		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, tags_json = COALESCE(?, tags_json), revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
@@ -6042,12 +6062,7 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 		); err != nil {
 			return nil, err
 		}
-		if tagsJSON.Valid && tagsJSON.String != "" {
-			var tags map[string]string
-			if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err == nil {
-				o.Tags = tags
-			}
-		}
+		o.Tags = parseTagsJSON(tagsJSON)
 		results = append(results, o)
 	}
 	return results, rows.Err()
@@ -6562,6 +6577,21 @@ func hashNormalized(content string) string {
 	normalized := strings.ToLower(strings.Join(strings.Fields(content), " "))
 	h := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(h[:])
+}
+
+// parseTagsJSON decodes the flat tags_json column into a map. Returns nil for
+// NULL/empty. Logs (non-fatal) on malformed JSON and returns nil so a corrupt
+// row degrades to "no tags" instead of failing the read.
+func parseTagsJSON(ns sql.NullString) map[string]string {
+	if !ns.Valid || ns.String == "" {
+		return nil
+	}
+	var tags map[string]string
+	if err := json.Unmarshal([]byte(ns.String), &tags); err != nil {
+		log.Printf("store: parseTagsJSON: malformed tags_json %q: %v", ns.String, err)
+		return nil
+	}
+	return tags
 }
 
 // tagsJSONValue marshals the flat tags map for the observations.tags_json column.

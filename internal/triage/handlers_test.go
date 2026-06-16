@@ -1,9 +1,13 @@
 package triage_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -366,6 +370,271 @@ func TestHandleProject_Golden(t *testing.T) {
 	}
 	got, _ := io.ReadAll(rec.Body)
 	goldenCheck(t, "project", got)
+}
+
+// ─── Bulk set-scope: POST /project/{name}/set-scope ──────────────────────────
+
+// TestSetProjectScope_SharedNoConfirm verifies that POSTing scope=shared without
+// confirm=1 returns a confirmation page with the sync-risk warning and no store writes.
+// Scenario C-11.
+func TestSetProjectScope_SharedNoConfirm(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Title: "A", Scope: "personal", Project: ptrStr("proj")},
+		{ID: 2, Title: "B", Scope: "personal", Project: ptrStr("proj")},
+	}
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("want 200 confirmation page, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Must show sync-risk warning for → shared direction (D7, REQ-36).
+	if !strings.Contains(body, "sync") && !strings.Contains(body, "cannot be recalled") {
+		t.Errorf("want sync-risk warning in shared confirm page; body excerpt: %s", body[:min(500, len(body))])
+	}
+	// Must show observation count.
+	if !strings.Contains(body, "2") {
+		t.Errorf("want count 2 in confirmation page; body excerpt: %s", body[:min(300, len(body))])
+	}
+	// Zero writes before confirm.
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("want 0 store mutations before confirm, got %d", len(fs.updateCalls))
+	}
+}
+
+// TestSetProjectScope_PersonalNoConfirm verifies that POSTing scope=personal without
+// confirm=1 returns a confirmation page WITHOUT the sync-risk warning and no store
+// writes. Scenario C-12.
+func TestSetProjectScope_PersonalNoConfirm(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Title: "A", Scope: "team", Project: ptrStr("proj")},
+	}
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"personal"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("want 200 confirmation page, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Must NOT show sync-risk warning for → personal direction (D7, REQ-36).
+	if strings.Contains(body, "cannot be recalled") {
+		t.Errorf("want NO sync-risk warning in personal confirm page; body excerpt: %s", body[:min(500, len(body))])
+	}
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("want 0 store mutations before confirm, got %d", len(fs.updateCalls))
+	}
+}
+
+// TestSetProjectScope_SharedConfirm verifies that confirming scope=shared updates all
+// observations to internal scope "team" and writes default_scope="shared" to config.json
+// for the cwd project. Scenarios C-06, C-14.
+func TestSetProjectScope_SharedConfirm(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 10, Title: "A", Scope: "personal", Project: ptrStr("proj")},
+		{ID: 20, Title: "B", Scope: "personal", Project: ptrStr("proj")},
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, dir)
+	srv.SetCwdProject("proj")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	}
+	// All observations must be updated to internal scope "team".
+	if len(fs.updateCalls) != 2 {
+		t.Fatalf("want 2 UpdateObservationScope calls, got %d", len(fs.updateCalls))
+	}
+	for _, c := range fs.updateCalls {
+		if c.Scope != "team" {
+			t.Errorf("want scope=team, got %q for id=%d", c.Scope, c.ID)
+		}
+	}
+	// WriteProjectDefaultScope must have written default_scope="shared".
+	configPath := dir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg["default_scope"] != "shared" {
+		t.Errorf("want default_scope=shared, got %q", cfg["default_scope"])
+	}
+}
+
+// TestSetProjectScope_PersonalConfirm verifies that confirming scope=personal updates
+// all observations to "personal" and writes default_scope="personal" to config.json.
+// Scenarios C-06b, C-13.
+func TestSetProjectScope_PersonalConfirm(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 10, Title: "A", Scope: "team", Project: ptrStr("proj")},
+		{ID: 20, Title: "B", Scope: "team", Project: ptrStr("proj")},
+		{ID: 30, Title: "C", Scope: "team", Project: ptrStr("proj")},
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, dir)
+	srv.SetCwdProject("proj")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"personal"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	}
+	if len(fs.updateCalls) != 3 {
+		t.Fatalf("want 3 UpdateObservationScope calls, got %d", len(fs.updateCalls))
+	}
+	for _, c := range fs.updateCalls {
+		if c.Scope != "personal" {
+			t.Errorf("want scope=personal, got %q for id=%d", c.Scope, c.ID)
+		}
+	}
+	// WriteProjectDefaultScope must have written default_scope="personal".
+	configPath := dir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg["default_scope"] != "personal" {
+		t.Errorf("want default_scope=personal, got %q", cfg["default_scope"])
+	}
+}
+
+// TestSetProjectScope_NonCwdProjectNoConfigWrite verifies that confirming set-scope
+// for a project that is NOT the cwd project does NOT write config.json. Scenario C-15.
+func TestSetProjectScope_NonCwdProjectNoConfigWrite(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 5, Title: "A", Scope: "personal", Project: ptrStr("other")},
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, dir)
+	srv.SetCwdProject("mine") // cwd is "mine" — posting for "other"
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/other/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	}
+	// Observations MUST still be updated.
+	if len(fs.updateCalls) != 1 {
+		t.Fatalf("want 1 UpdateObservationScope call, got %d", len(fs.updateCalls))
+	}
+	// config.json must NOT be written (Option A — only cwd project).
+	configPath := dir + "/.engram/config.json"
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("want config.json NOT written for non-cwd project, but file exists")
+	}
+}
+
+// TestSetProjectScope_InvalidScope verifies that an unrecognised scope value returns 400.
+func TestSetProjectScope_InvalidScope(t *testing.T) {
+	fs := &fakeMutableStore{}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"department"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for invalid scope, got %d", rec.Code)
+	}
+	if len(fs.updateCalls) != 0 {
+		t.Error("want no store calls for invalid scope")
+	}
+}
+
+// TestSetProjectScope_PartialFailure verifies that a store error on a single
+// UpdateObservationScope call causes the handler to report a failure. Scenario C-08.
+func TestSetProjectScope_PartialFailure(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Title: "A", Scope: "personal", Project: ptrStr("proj")},
+	}
+	fs := &fakeMutableStore{
+		observations: obs,
+		updateErr:    fmt.Errorf("simulated store error"),
+	}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// On update error the handler must report failure (non-2xx or error body).
+	if rec.Code == http.StatusOK && !strings.Contains(rec.Body.String(), "error") &&
+		!strings.Contains(rec.Body.String(), "partial") && !strings.Contains(rec.Body.String(), "fail") {
+		t.Errorf("want error indication on partial failure, got %d body: %s", rec.Code, rec.Body.String()[:min(300, len(rec.Body.String()))])
+	}
 }
 
 // min is a small helper (Go 1.21+ has min built-in but kept explicit for clarity).

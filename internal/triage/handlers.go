@@ -387,6 +387,10 @@ func (s *Server) handleTagScope(w http.ResponseWriter, r *http.Request) {
 	}
 
 	value := r.FormValue("value")
+	if value == "" {
+		http.Error(w, "value is required", http.StatusBadRequest)
+		return
+	}
 
 	ms := s.mutableStore
 	if ms == nil {

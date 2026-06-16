@@ -170,9 +170,9 @@ func TestHandleSetScope_RequiresConfirm(t *testing.T) {
 		t.Errorf("want 200 confirmation page, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	// Must show item count in the confirm prompt.
-	if !strings.Contains(body, "2") {
-		t.Errorf("want item count (2) in confirmation page; body: %s", body[:min(300, len(body))])
+	// Must show item count with contextual phrasing in the confirm prompt.
+	if !strings.Contains(body, "2 observation(s)") {
+		t.Errorf("want '2 observation(s)' in confirmation page; body: %s", body[:min(300, len(body))])
 	}
 	if len(fs.updateCalls) != 0 {
 		t.Errorf("want 0 store mutations before confirm, got %d", len(fs.updateCalls))
@@ -220,6 +220,19 @@ func TestHandleSetScope_WithConfirmUpdatesAll(t *testing.T) {
 			t.Errorf("want scope=team for id=%d, got %q", c.ID, c.Scope)
 		}
 	}
+	// config.json must be written with default_scope="shared" for the cwd project.
+	configPath := dir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "shared" {
+		t.Errorf("want default_scope=shared in config.json, got %q", cfg["default_scope"])
+	}
 }
 
 // TestHandleSetScope_ReportsCount verifies the confirmation page shows the
@@ -245,8 +258,8 @@ func TestHandleSetScope_ReportsCount(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "5") {
-		t.Errorf("want count 5 in body; got: %s", body[:min(400, len(body))])
+	if !strings.Contains(body, "5 observation(s)") {
+		t.Errorf("want '5 observation(s)' in body; got: %s", body[:min(400, len(body))])
 	}
 }
 

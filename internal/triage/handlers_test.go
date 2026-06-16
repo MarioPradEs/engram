@@ -658,26 +658,8 @@ func TestSetProjectScope_NonCwdProjectNoConfigWrite(t *testing.T) {
 	}
 }
 
-// TestSetProjectScope_InvalidScope verifies that an unrecognised scope value returns 400.
-func TestSetProjectScope_InvalidScope(t *testing.T) {
-	fs := &fakeMutableStore{}
-	srv := triage.NewWithMutableStore(nil, fs, 0, "")
-	h := srv.Handler()
-
-	form := url.Values{"scope": {"department"}}
-	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
-		strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("want 400 for invalid scope, got %d", rec.Code)
-	}
-	if len(fs.updateCalls) != 0 {
-		t.Error("want no store calls for invalid scope")
-	}
-}
+// TestSetProjectScope_InvalidScope has been replaced by TestSetProjectScope_InvalidScope_TableDriven
+// which covers the same "department" case plus empty string and wrong-case "SHARED".
 
 // TestSetProjectScope_PartialFailure verifies that a store error on a single
 // UpdateObservationScope call causes the handler to report a failure AND does
@@ -709,8 +691,9 @@ func TestSetProjectScope_PartialFailure(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	// The handler returns 500 on a store error (partial update).
+	// Use Fatalf so downstream body/config checks only run in the expected (500) path.
 	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("want 500 on partial failure, got %d; body: %s",
+		t.Fatalf("want 500 on partial failure, got %d; body: %s",
 			rec.Code, rec.Body.String()[:min(300, len(rec.Body.String()))])
 	}
 	// Secondary: body should contain a hint about the failure.
@@ -810,21 +793,28 @@ func TestHandleIndex_BulkButtons_FormStructure(t *testing.T) {
 	if !strings.Contains(body, "Mark all as personal") {
 		t.Errorf("want 'Mark all as personal' button in body")
 	}
-	// Fix #2: ordering assertion — the closing </a> for the gamma card anchor must
-	// appear BEFORE the gamma bulk form action. A regression that nests the form
-	// inside the <a> would put the form action before </a>, failing this check.
-	//
-	// The template renders: <a href="/project/gamma">...</a>
-	// followed by: <div class="bulk-actions"><form ... action="/project/gamma/set-scope">
-	// So </a> must precede action="/project/gamma/set-scope".
-	anchorCloseIdx := strings.Index(body, "</a>")
+	// Fix #2: anchor-nesting structural assertion — the template must render the
+	// anchor closing tag immediately before the bulk-actions div:
+	//   <a href="/project/gamma">...</a><div class="bulk-actions">...
+	// If a regression nests the form inside the <a>, that exact sequence disappears.
+	// This is robust to nav links that add </a> earlier in the page.
+	if !strings.Contains(body, `</a><div class="bulk-actions">`) {
+		t.Errorf(`anchor nesting regression: expected "</a><div class=\"bulk-actions\">" sequence proving bulk form is outside the anchor; not found in body excerpt: %s`, body[:min(500, len(body))])
+	}
+	// Additional guard: verify gammaFormIdx for the specific project.
 	gammaFormIdx := strings.Index(body, `action="/project/gamma/set-scope"`)
-	if anchorCloseIdx < 0 {
-		t.Errorf("want </a> tag in rendered body; not found")
-	} else if gammaFormIdx < 0 {
+	if gammaFormIdx < 0 {
 		t.Errorf("want action=/project/gamma/set-scope in rendered body; not found")
-	} else if anchorCloseIdx > gammaFormIdx {
-		t.Errorf("anchor nesting regression: </a> at index %d appears AFTER gamma form action at index %d; bulk form must be outside the <a> anchor", anchorCloseIdx, gammaFormIdx)
+	} else {
+		// The last </a> before the gamma form must exist and must not be followed
+		// by an opening <a before the form (proves no anchor wraps the form).
+		beforeForm := body[:gammaFormIdx]
+		lastAnchorClose := strings.LastIndex(beforeForm, "</a>")
+		if lastAnchorClose < 0 {
+			t.Errorf("want </a> before gamma form action; not found")
+		} else if strings.Contains(beforeForm[lastAnchorClose:], "<a ") {
+			t.Errorf("anchor nesting regression: found <a after the last </a> and before gamma form action; bulk form is nested inside an anchor")
+		}
 	}
 }
 

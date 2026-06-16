@@ -296,6 +296,83 @@ func TestHandleSetScope_SetsAllBeyondLimit(t *testing.T) {
 
 // ─── Classify (set default scope): POST /project/{name}/classify ─────────────
 
+// TestSetProjectScope_SkipsAlreadyAtTarget verifies that the bulk set-scope
+// action does NOT call UpdateObservationScope for observations that are already
+// at the target internal scope (Scenario C-06: 130 updated, 20 already-team
+// untouched when marking all shared).
+//
+// RED phase: add this test first (it fails before the skip guard is added).
+func TestSetProjectScope_SkipsAlreadyAtTarget(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+
+	// Mixed scopes: personal, project (legacy), team.
+	// Marking all "shared" (→ internal "team"):
+	//   IDs 1,2,3 (personal) + ID 4 (legacy project) must be updated.
+	//   ID 5 (team) must NOT be updated — already at target.
+	obs := []store.Observation{
+		{ID: 1, Scope: "personal", Project: ptrStr("proj")},
+		{ID: 2, Scope: "personal", Project: ptrStr("proj")},
+		{ID: 3, Scope: "personal", Project: ptrStr("proj")},
+		{ID: 4, Scope: "project", Project: ptrStr("proj")}, // legacy; not at "team"
+		{ID: 5, Scope: "team", Project: ptrStr("proj")},   // already at target
+	}
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusInternalServerError {
+		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	}
+
+	// ID 5 (already "team") must NOT appear in update calls.
+	for _, c := range fs.updateCalls {
+		if c.ID == 5 {
+			t.Errorf("C-06: ID 5 was already at target scope 'team'; must NOT be updated, but got UpdateObservationScope(5, %q)", c.Scope)
+		}
+	}
+	// Exactly 4 observations need updating (IDs 1,2,3,4).
+	if len(fs.updateCalls) != 4 {
+		t.Errorf("C-06: want 4 update calls (non-team rows only), got %d: %+v", len(fs.updateCalls), fs.updateCalls)
+	}
+
+	// Mirror case: marking all "personal" (→ internal "personal").
+	// IDs with scope != "personal" must be updated; already-personal ones skipped.
+	obs2 := []store.Observation{
+		{ID: 10, Scope: "team", Project: ptrStr("proj2")},
+		{ID: 11, Scope: "personal", Project: ptrStr("proj2")}, // already at target
+		{ID: 12, Scope: "project", Project: ptrStr("proj2")},  // legacy; not "personal"
+	}
+	fs2 := &fakeMutableStore{observations: obs2}
+	srv2 := triage.NewWithMutableStore(nil, fs2, 0, "")
+	h2 := srv2.Handler()
+
+	form2 := url.Values{"scope": {"personal"}, "confirm": {"1"}}
+	req2 := httptest.NewRequest(http.MethodPost, "/project/proj2/set-scope",
+		strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+
+	if rec2.Code == http.StatusInternalServerError {
+		t.Fatalf("personal mirror: unexpected 500; body: %s", rec2.Body.String())
+	}
+	for _, c := range fs2.updateCalls {
+		if c.ID == 11 {
+			t.Errorf("personal mirror: ID 11 was already 'personal'; must NOT be updated, got UpdateObservationScope(11, %q)", c.Scope)
+		}
+	}
+	if len(fs2.updateCalls) != 2 {
+		t.Errorf("personal mirror: want 2 update calls (IDs 10, 12), got %d: %+v", len(fs2.updateCalls), fs2.updateCalls)
+	}
+}
+
 // TestHandleClassify_SetsCwdProjectDefault verifies that POSTing to
 // /project/{name}/classify for the cwd project writes default_scope to config.json.
 func TestHandleClassify_SetsCwdProjectDefault(t *testing.T) {

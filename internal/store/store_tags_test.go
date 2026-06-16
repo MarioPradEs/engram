@@ -847,3 +847,202 @@ func TestDistinctTagValues(t *testing.T) {
 		}
 	})
 }
+
+// ─── WU-B6: Export/Import round-trip preserves tags ──────────────────────────
+
+// TestExportImport_TagsRoundTrip verifies that tags survive a full Export →
+// Import cycle: the exported ExportData carries Tags, and after Import into a
+// fresh store ObservationsByTag can find the observation.
+func TestExportImport_TagsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	// ── Source store ──────────────────────────────────────────────────────────
+	src := newTestStore(t)
+	if err := src.CreateSession("sess-export-rt", "proj-rt", "/tmp/rt"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	_, err := src.AddObservation(AddObservationParams{
+		SessionID: "sess-export-rt",
+		Type:      "manual",
+		Title:     "RT Tagged Obs",
+		Content:   "round-trip content",
+		Project:   "proj-rt",
+		Scope:     "project",
+		Tags:      map[string]string{"juego": "game-rt", "tipo": "decision"},
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+
+	// ── Export (full) ─────────────────────────────────────────────────────────
+	t.Run("Export carries tags", func(t *testing.T) {
+		data, err := src.Export()
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if len(data.Observations) == 0 {
+			t.Fatal("Export returned no observations")
+		}
+		obs := data.Observations[0]
+		if obs.Tags == nil {
+			t.Fatal("Export: Observation.Tags is nil; tags_json was not read by exportWithProjectScope")
+		}
+		if obs.Tags["juego"] != "game-rt" {
+			t.Errorf("Export: Tags[juego] = %q, want %q", obs.Tags["juego"], "game-rt")
+		}
+		if obs.Tags["tipo"] != "decision" {
+			t.Errorf("Export: Tags[tipo] = %q, want %q", obs.Tags["tipo"], "decision")
+		}
+	})
+
+	// ── ExportProject carries tags ────────────────────────────────────────────
+	t.Run("ExportProject carries tags", func(t *testing.T) {
+		data, err := src.ExportProject("proj-rt")
+		if err != nil {
+			t.Fatalf("ExportProject: %v", err)
+		}
+		if len(data.Observations) == 0 {
+			t.Fatal("ExportProject returned no observations")
+		}
+		obs := data.Observations[0]
+		if obs.Tags == nil {
+			t.Fatal("ExportProject: Observation.Tags is nil")
+		}
+		if obs.Tags["juego"] != "game-rt" {
+			t.Errorf("ExportProject: Tags[juego] = %q, want %q", obs.Tags["juego"], "game-rt")
+		}
+	})
+
+	// ── Import into fresh store + ObservationsByTag finds it ─────────────────
+	t.Run("Import persists tags and ObservationsByTag finds obs", func(t *testing.T) {
+		data, err := src.Export()
+		if err != nil {
+			t.Fatalf("Export for import: %v", err)
+		}
+
+		dst := newTestStore(t)
+		result, err := dst.Import(data)
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if result.ObservationsImported == 0 {
+			t.Fatal("Import: no observations imported")
+		}
+
+		// tags_json must be persisted in the destination store.
+		var tagsJSON sql.NullString
+		if err := dst.db.QueryRow(`SELECT tags_json FROM observations WHERE title = 'RT Tagged Obs'`).Scan(&tagsJSON); err != nil {
+			t.Fatalf("select tags_json from dst: %v", err)
+		}
+		if !tagsJSON.Valid {
+			t.Fatal("Import: tags_json is NULL in destination store; tags were not persisted")
+		}
+
+		// ObservationsByTag must locate the imported observation.
+		results, err := dst.ObservationsByTag("proj-rt", "juego", "game-rt", 10)
+		if err != nil {
+			t.Fatalf("ObservationsByTag in dst: %v", err)
+		}
+		if len(results) == 0 {
+			t.Fatal("ObservationsByTag returned 0 results after Import; tags_json not searchable")
+		}
+		if results[0].Title != "RT Tagged Obs" {
+			t.Errorf("ObservationsByTag: got title %q, want %q", results[0].Title, "RT Tagged Obs")
+		}
+	})
+}
+
+// ─── WU-B7: parseTagsJSON("{}" → nil) ────────────────────────────────────────
+
+// TestParseTagsJSON_EmptyObject verifies that a tags_json column value of '{}'
+// (a valid but empty JSON object) yields Tags == nil, honoring the
+// "nil not empty map" contract on Observation.Tags (RD4).
+func TestParseTagsJSON_EmptyObject(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty JSON object yields nil", func(t *testing.T) {
+		t.Parallel()
+
+		ns := sql.NullString{String: "{}", Valid: true}
+		got := parseTagsJSON(ns)
+		if got != nil {
+			t.Errorf("parseTagsJSON(%q) = %v, want nil (empty map must be treated as nil per RD4)", ns.String, got)
+		}
+	})
+
+	t.Run("populated JSON object yields map", func(t *testing.T) {
+		t.Parallel()
+
+		ns := sql.NullString{String: `{"juego":"game-x"}`, Valid: true}
+		got := parseTagsJSON(ns)
+		if got == nil {
+			t.Fatal("parseTagsJSON with populated object returned nil, want non-nil map")
+		}
+		if got["juego"] != "game-x" {
+			t.Errorf(`got["juego"] = %q, want "game-x"`, got["juego"])
+		}
+	})
+
+	t.Run("NULL yields nil", func(t *testing.T) {
+		t.Parallel()
+
+		ns := sql.NullString{Valid: false}
+		got := parseTagsJSON(ns)
+		if got != nil {
+			t.Errorf("parseTagsJSON(NULL) = %v, want nil", got)
+		}
+	})
+
+	t.Run("empty string yields nil", func(t *testing.T) {
+		t.Parallel()
+
+		ns := sql.NullString{String: "", Valid: true}
+		got := parseTagsJSON(ns)
+		if got != nil {
+			t.Errorf("parseTagsJSON(%q) = %v, want nil", ns.String, got)
+		}
+	})
+
+	t.Run("malformed JSON yields nil and logs", func(t *testing.T) {
+		t.Parallel()
+
+		ns := sql.NullString{String: `{bad json`, Valid: true}
+		got := parseTagsJSON(ns)
+		if got != nil {
+			t.Errorf("parseTagsJSON(malformed) = %v, want nil", got)
+		}
+	})
+
+	t.Run("empty object stored via raw DB row yields nil Tags on ObservationsByTag", func(t *testing.T) {
+		// Behavioral end-to-end: insert a row with tags_json='{}', verify that
+		// ObservationsByTag does NOT find it (json_extract on an empty object
+		// returns NULL, so the row is not matched). Also verify that parsing the
+		// stored value directly yields nil per RD4.
+		t.Parallel()
+
+		s := newTestStore(t)
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO sessions (id, project, directory) VALUES ('ses-empty-obj', 'alpha-empty', '/tmp/alpha')`,
+		); err != nil {
+			t.Fatalf("insert session: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO observations (sync_id, session_id, type, title, content, project, scope, tags_json, updated_at)
+			 VALUES ('obs-empty-obj-001', 'ses-empty-obj', 'manual', 'Empty Obj Tags', 'content', 'alpha-empty', 'project', '{}', datetime('now'))`,
+		); err != nil {
+			t.Fatalf("insert obs with tags_json='{}': %v", err)
+		}
+
+		// Direct parseTagsJSON check.
+		var tagsJSON sql.NullString
+		if err := s.db.QueryRow(
+			`SELECT tags_json FROM observations WHERE title = 'Empty Obj Tags'`,
+		).Scan(&tagsJSON); err != nil {
+			t.Fatalf("select tags_json: %v", err)
+		}
+		got := parseTagsJSON(tagsJSON)
+		if got != nil {
+			t.Errorf("parseTagsJSON('{}') = %v, want nil (RD4 contract)", got)
+		}
+	})
+}

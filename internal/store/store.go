@@ -2460,11 +2460,12 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					return err
 				}
 				// Revision branch (topic-key match, content changed):
-				// tags_json was already replaced with the fresh incoming tags above
-				// (tags_json = ?), so we re-read the row from the DB via
-				// getObservationTx and assign obs.Tags here to ensure the sync
-				// payload carries the updated tags without a second DB round-trip.
-				// Semantics: revision = full replace; old tags are gone, new tags win.
+				// getObservationTx above already performs a DB round-trip and
+				// populates obs.Tags from the freshly-written tags_json column.
+				// The assignment below mirrors that value into obs.Tags so that
+				// the in-memory struct and the sync payload stay consistent with
+				// what was just persisted. Semantics: revision = full replace;
+				// old tags are gone, new tags win.
 				obs.Tags = tags
 				observationID = existingID
 				return s.enqueueSyncMutationTx(tx, SyncEntityObservation, obs.SyncID, SyncOpUpsert, observationPayloadFromObservation(obs))
@@ -3508,7 +3509,8 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 
 	// Observations
 	obsQuery := `SELECT id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
-	        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at
+	        scope, topic_key, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at,
+	        tags_json
 	 FROM observations`
 	obsArgs := []any{}
 	if project != "" {
@@ -3525,13 +3527,16 @@ func (s *Store) exportWithProjectScope(project string) (*ExportData, error) {
 	defer obsRows.Close()
 	for obsRows.Next() {
 		var o Observation
+		var tagsJSON sql.NullString
 		if err := obsRows.Scan(
 			&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 			&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt,
 			&o.CreatedAt, &o.UpdatedAt, &o.DeletedAt,
+			&tagsJSON,
 		); err != nil {
 			return nil, err
 		}
+		o.Tags = parseTagsJSON(tagsJSON)
 		data.Observations = append(data.Observations, o)
 	}
 	if err := obsRows.Err(); err != nil {
@@ -3593,8 +3598,8 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 	// Import observations (use new IDs — AUTOINCREMENT)
 	for _, obs := range data.Observations {
 		_, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			normalizeExistingSyncID(obs.SyncID, "obs"),
 			obs.SessionID,
 			obs.Type,
@@ -3605,6 +3610,7 @@ func (s *Store) Import(data *ExportData) (*ImportResult, error) {
 			normalizeScope(obs.Scope),
 			nullableString(normalizeTopicKey(derefString(obs.TopicKey))),
 			hashNormalized(obs.Content),
+			tagsJSONValue(obs.Tags),
 			maxInt(obs.RevisionCount, 1),
 			maxInt(obs.DuplicateCount, 1),
 			obs.LastSeenAt,
@@ -6589,6 +6595,9 @@ func parseTagsJSON(ns sql.NullString) map[string]string {
 	var tags map[string]string
 	if err := json.Unmarshal([]byte(ns.String), &tags); err != nil {
 		log.Printf("store: parseTagsJSON: malformed tags_json %q: %v", ns.String, err)
+		return nil
+	}
+	if len(tags) == 0 {
 		return nil
 	}
 	return tags

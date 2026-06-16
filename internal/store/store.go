@@ -884,6 +884,7 @@ func (s *Store) migrate() error {
 		{name: "embedding", definition: "BLOB"},
 		{name: "embedding_model", definition: "TEXT"},
 		{name: "embedding_created_at", definition: "TEXT"},
+		{name: "tags_json", definition: "TEXT"},
 	}
 	for _, c := range memConflictObsCols {
 		if err := s.addColumnIfNotExists("observations", c.name, c.definition); err != nil {
@@ -976,6 +977,35 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if _, err := s.execHook(s.db, `UPDATE observations SET sync_id = 'obs-' || lower(hex(randomblob(16))) WHERE sync_id IS NULL OR sync_id = ''`); err != nil {
+		return err
+	}
+
+	// ── Phase: triage-ux-enhancements E2a — tags_json backfill ──────────────
+	// One-time recovery: populate tags_json from the latest sync_mutations payload
+	// for observations that have a sync_id but no tags_json yet.
+	// Idempotent via WHERE tags_json IS NULL.
+	// Already-personal observations (sync_id=NULL, no mutation row) remain NULL —
+	// accepted limitation per REQ-57 / decision #964.
+	if _, err := s.execHook(s.db, `
+		UPDATE observations
+		SET tags_json = (
+			SELECT json_extract(m.payload, '$.tags')
+			FROM sync_mutations m
+			WHERE m.entity = 'observation'
+			  AND m.entity_key = observations.sync_id
+			  AND json_extract(m.payload, '$.tags') IS NOT NULL
+			ORDER BY m.seq DESC
+			LIMIT 1
+		)
+		WHERE tags_json IS NULL
+		  AND sync_id IS NOT NULL
+		  AND EXISTS (
+			SELECT 1 FROM sync_mutations m2
+			WHERE m2.entity = 'observation'
+			  AND m2.entity_key = observations.sync_id
+			  AND json_extract(m2.payload, '$.tags') IS NOT NULL
+		  )
+	`); err != nil {
 		return err
 	}
 
@@ -2397,6 +2427,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					     tool_name = ?,
 					     topic_key = ?,
 					     normalized_hash = ?,
+					     tags_json = ?,
 					     revision_count = revision_count + 1,
 					     last_seen_at = datetime('now'),
 					     updated_at = datetime('now')
@@ -2407,6 +2438,7 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 					nullableString(p.ToolName),
 					nullableString(topicKey),
 					normHash,
+					tagsJSONValue(tags),
 					existingID,
 				); err != nil {
 					return err
@@ -2445,9 +2477,11 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 			if _, err := s.execHook(tx,
 				`UPDATE observations
 				 SET duplicate_count = duplicate_count + 1,
+				     tags_json = COALESCE(?, tags_json),
 				     last_seen_at = datetime('now'),
 				     updated_at = datetime('now')
 				 WHERE id = ?`,
+				tagsJSONValue(tags),
 				existingID,
 			); err != nil {
 				return err
@@ -2468,10 +2502,10 @@ func (s *Store) AddObservation(p AddObservationParams) (int64, error) {
 
 		syncID := newSyncID("obs")
 		res, err := s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, revision_count, duplicate_count, last_seen_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, datetime('now'), datetime('now'))`,
 			syncID, p.SessionID, p.Type, title, content,
-			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash,
+			nullableString(p.ToolName), nullableString(p.Project), scope, nullableString(topicKey), normHash, tagsJSONValue(tags),
 		)
 		if err != nil {
 			return err
@@ -4826,11 +4860,11 @@ func (s *Store) PruneProject(project string) (*PruneResult, error) {
 
 // DeleteProjectResult summarises a cascade project deletion.
 type DeleteProjectResult struct {
-	Project              string `json:"project"`
-	ObservationsDeleted  int64  `json:"observations_deleted"`
-	PromptsDeleted       int64  `json:"prompts_deleted"`
-	SessionsDeleted      int64  `json:"sessions_deleted"`
-	HardDelete           bool   `json:"hard_delete"`
+	Project             string `json:"project"`
+	ObservationsDeleted int64  `json:"observations_deleted"`
+	PromptsDeleted      int64  `json:"prompts_deleted"`
+	SessionsDeleted     int64  `json:"sessions_deleted"`
+	HardDelete          bool   `json:"hard_delete"`
 }
 
 // DeleteProject removes all data associated with a project in a single
@@ -5985,6 +6019,71 @@ func (s *Store) queryObservations(query string, args ...any) ([]Observation, err
 	return results, rows.Err()
 }
 
+// tagFacetAllowList is the closed set of tag facets that may be used in SQL
+// queries. Facet names are concatenated into the json_extract path string, so
+// only pre-approved values are accepted (injection guard, REQ-51/D3).
+var tagFacetAllowList = map[string]bool{
+	"juego": true,
+	"tipo":  true,
+}
+
+// ObservationsByTag returns observations in the given project whose tags_json
+// column contains the specified facet/value pair. The facet must be one of
+// {juego, tipo}; any other value causes an error (injection guard).
+// Results are ordered by created_at DESC and capped at limit.
+func (s *Store) ObservationsByTag(project, facet, value string, limit int) ([]Observation, error) {
+	if !tagFacetAllowList[facet] {
+		return nil, fmt.Errorf("store.ObservationsByTag: facet %q is not in the allow-list {juego, tipo}", facet)
+	}
+	path := "$." + facet
+	query := `
+		SELECT o.id, ifnull(o.sync_id,'') as sync_id, o.session_id, o.type, o.title, o.content,
+		       o.tool_name, o.project, o.scope, o.topic_key, o.revision_count,
+		       o.duplicate_count, o.last_seen_at, o.created_at, o.updated_at, o.deleted_at
+		FROM observations o
+		WHERE o.deleted_at IS NULL
+		  AND o.project = ?
+		  AND json_extract(o.tags_json, ?) = ?
+		ORDER BY datetime(o.created_at) DESC, o.id DESC
+		LIMIT ?
+	`
+	return s.queryObservations(query, project, path, value, limit)
+}
+
+// DistinctTagValues returns the sorted, de-duplicated set of non-empty values
+// for the given facet across all observations in the project. The facet must be
+// one of {juego, tipo}; any other value causes an error (injection guard).
+// Returns an empty (non-nil) slice when no values exist.
+func (s *Store) DistinctTagValues(project, facet string) ([]string, error) {
+	if !tagFacetAllowList[facet] {
+		return nil, fmt.Errorf("store.DistinctTagValues: facet %q is not in the allow-list {juego, tipo}", facet)
+	}
+	path := "$." + facet
+	rows, err := s.queryItHook(s.db, `
+		SELECT DISTINCT json_extract(tags_json, ?) AS v
+		FROM observations
+		WHERE deleted_at IS NULL
+		  AND project = ?
+		  AND json_extract(tags_json, ?) IS NOT NULL
+		  AND json_extract(tags_json, ?) != ''
+		ORDER BY v
+	`, path, project, path, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := []string{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		results = append(results, v)
+	}
+	return results, rows.Err()
+}
+
 func (s *Store) addColumnIfNotExists(tableName, columnName, definition string) error {
 	rows, err := s.queryItHook(s.db, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
 	if err != nil {
@@ -6425,6 +6524,21 @@ func hashNormalized(content string) string {
 	normalized := strings.ToLower(strings.Join(strings.Fields(content), " "))
 	h := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(h[:])
+}
+
+// tagsJSONValue marshals the flat tags map for the observations.tags_json column.
+// Returns nil (SQL NULL) when tags is empty — untagged observations stay NULL (RD4).
+// The resulting JSON is flat at column root: {"juego":"X","tipo":"Y"}
+// so queries use json_extract(tags_json,'$.juego').
+func tagsJSONValue(tags map[string]string) any {
+	if len(tags) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(tags)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	return string(b)
 }
 
 func dedupeWindowExpression(window time.Duration) string {

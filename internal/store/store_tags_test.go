@@ -128,8 +128,8 @@ func TestTagsJSON_Backfill(t *testing.T) {
 		// Insert a matching sync_mutations row whose payload has $.tags.
 		payload := fmt.Sprintf(`{"sync_id":%q,"type":"manual","title":"Backfill Test","content":"content","scope":"project","tags":{"juego":"game-x","tipo":"decision"}}`, syncID)
 		if _, err := s.db.Exec(
-			`INSERT INTO sync_mutations (sync_id, target_key, entity, entity_key, op, payload, project)
-			 VALUES ('mut-backfill-001', 'cloud', 'observation', ?, 'upsert', ?, 'alpha')`,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, project)
+			 VALUES ('cloud', 'observation', ?, 'upsert', ?, 'alpha')`,
 			syncID, payload,
 		); err != nil {
 			t.Fatalf("insert sync_mutation: %v", err)
@@ -231,8 +231,8 @@ func TestTagsJSON_Backfill(t *testing.T) {
 			t.Fatalf("insert obs: %v", err)
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO sync_mutations (sync_id, target_key, entity, entity_key, op, payload, project)
-			 VALUES ('mut-idem-001', 'cloud', 'observation', ?, 'upsert', ?, 'alpha')`,
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, project)
+			 VALUES ('cloud', 'observation', ?, 'upsert', ?, 'alpha')`,
 			syncID, payload,
 		); err != nil {
 			t.Fatalf("insert sync_mutation: %v", err)
@@ -725,7 +725,7 @@ func TestDistinctTagValues(t *testing.T) {
 				Title:   fmt.Sprintf("DV Obs %v", tags),
 				Content: fmt.Sprintf("content dv %v unique", tags),
 				Project: "alpha", Scope: "project",
-				Tags:    tags,
+				Tags: tags,
 			}); err != nil {
 				t.Fatalf("AddObservation: %v", err)
 			}

@@ -458,9 +458,11 @@ func TestSetProjectScope_SharedNoConfirm(t *testing.T) {
 	if !strings.Contains(body, "cannot be recalled") {
 		t.Errorf("want canonical sync-risk phrase 'cannot be recalled' in shared confirm page; body excerpt: %s", body[:min(500, len(body))])
 	}
-	// Must show observation count.
-	if !strings.Contains(body, "2") {
-		t.Errorf("want count 2 in confirmation page; body excerpt: %s", body[:min(300, len(body))])
+	// Must show observation count with contextual phrasing — a bare "2" is too weak
+	// (any "2" anywhere would pass). Require the template's exact phrasing so a wrong
+	// count (e.g. 0 or 1) fails this assertion.
+	if !strings.Contains(body, "2 observation(s)") {
+		t.Errorf("want '2 observation(s)' in confirmation page; body excerpt: %s", body[:min(300, len(body))])
 	}
 	// Zero writes before confirm.
 	if len(fs.updateCalls) != 0 {
@@ -526,8 +528,12 @@ func TestSetProjectScope_SharedConfirm(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusInternalServerError {
-		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	// Fix #1: assert real 303 redirect with Location on success.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther on success, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/proj" {
+		t.Errorf("want Location=/project/proj, got %q", loc)
 	}
 	// All observations must be updated to internal scope "team".
 	if len(fs.updateCalls) != 2 {
@@ -580,8 +586,12 @@ func TestSetProjectScope_PersonalConfirm(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusInternalServerError {
-		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	// Fix #1: assert real 303 redirect with Location on success.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther on success, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/proj" {
+		t.Errorf("want Location=/project/proj, got %q", loc)
 	}
 	if len(fs.updateCalls) != 3 {
 		t.Fatalf("want 3 UpdateObservationScope calls, got %d", len(fs.updateCalls))
@@ -630,8 +640,12 @@ func TestSetProjectScope_NonCwdProjectNoConfigWrite(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusInternalServerError {
-		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	// Fix #1: assert real 303 redirect with Location on success.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther on success, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/other" {
+		t.Errorf("want Location=/project/other, got %q", loc)
 	}
 	// Observations MUST still be updated.
 	if len(fs.updateCalls) != 1 {
@@ -666,17 +680,25 @@ func TestSetProjectScope_InvalidScope(t *testing.T) {
 }
 
 // TestSetProjectScope_PartialFailure verifies that a store error on a single
-// UpdateObservationScope call causes the handler to report a failure. Scenario C-08.
+// UpdateObservationScope call causes the handler to report a failure AND does
+// NOT write config.json (partial failure must abort before WriteProjectDefaultScope).
+// Scenario C-08.
 func TestSetProjectScope_PartialFailure(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
 		{ID: 1, Title: "A", Scope: "personal", Project: ptrStr("proj")},
 	}
+	// Fix #5: set up temp cwdDir + SetCwdProject so config.json write path is active.
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
 	fs := &fakeMutableStore{
 		observations: obs,
 		updateErr:    fmt.Errorf("simulated store error"),
 	}
-	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	srv := triage.NewWithMutableStore(nil, fs, 0, cwdDir)
+	srv.SetCwdProject("proj")
 	h := srv.Handler()
 
 	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
@@ -687,14 +709,18 @@ func TestSetProjectScope_PartialFailure(t *testing.T) {
 	h.ServeHTTP(rec, req)
 
 	// The handler returns 500 on a store error (partial update).
-	// Assert the status is explicitly non-2xx; body content is a secondary check.
-	if rec.Code >= http.StatusOK && rec.Code < http.StatusMultipleChoices {
-		t.Errorf("want non-2xx status on partial failure, got %d; body: %s",
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500 on partial failure, got %d; body: %s",
 			rec.Code, rec.Body.String()[:min(300, len(rec.Body.String()))])
 	}
 	// Secondary: body should contain a hint about the failure.
 	if !strings.Contains(rec.Body.String(), "partial") && !strings.Contains(rec.Body.String(), "update") {
 		t.Errorf("want partial-update hint in body on failure, got: %s", rec.Body.String()[:min(300, len(rec.Body.String()))])
+	}
+	// Fix #5: config.json must NOT be written when a store error aborts mid-loop.
+	configPath := cwdDir + "/.engram/config.json"
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("want config.json NOT written on partial failure, but file exists at %s", configPath)
 	}
 }
 
@@ -725,13 +751,17 @@ func TestHandleIndex_BulkButtons_AllCards(t *testing.T) {
 	}
 	body := rec.Body.String()
 
-	// Both bulk buttons must appear for the cwd project (alpha).
-	if !strings.Contains(body, `/project/alpha/set-scope`) {
-		t.Errorf("want bulk set-scope form for cwd project 'alpha'; not found in body")
+	// Fix #3: per-project action-specific assertions.
+	// Both bulk forms (→ shared and → personal) must appear for cwd project alpha.
+	alphaSharedCount := strings.Count(body, `action="/project/alpha/set-scope"`)
+	if alphaSharedCount < 2 {
+		t.Errorf("want at least 2 forms with action=/project/alpha/set-scope (one per scope direction), got %d", alphaSharedCount)
 	}
-	// Both bulk buttons must appear for the non-cwd project (beta).
-	if !strings.Contains(body, `/project/beta/set-scope`) {
-		t.Errorf("want bulk set-scope form for non-cwd project 'beta'; not found in body")
+	// Both bulk forms must appear for non-cwd project beta — this proves non-cwd
+	// cards also get bulk buttons. A count < 2 means only one direction is rendered.
+	betaCount := strings.Count(body, `action="/project/beta/set-scope"`)
+	if betaCount < 2 {
+		t.Errorf("want at least 2 forms with action=/project/beta/set-scope (one per scope direction), got %d; non-cwd cards must have both bulk buttons", betaCount)
 	}
 	// The button labels must be present at least twice (once per project card).
 	sharedCount := strings.Count(body, "Mark all as shared")
@@ -741,15 +771,6 @@ func TestHandleIndex_BulkButtons_AllCards(t *testing.T) {
 	}
 	if personalCount < 2 {
 		t.Errorf("want 'Mark all as personal' at least 2 times (once per card), got %d", personalCount)
-	}
-	// Verify the scope hidden fields are present — both directions per card.
-	if strings.Count(body, `name="scope" value="shared"`) < 2 {
-		t.Errorf("want at least 2 scope=shared hidden inputs (one per card), got %d",
-			strings.Count(body, `name="scope" value="shared"`))
-	}
-	if strings.Count(body, `name="scope" value="personal"`) < 2 {
-		t.Errorf("want at least 2 scope=personal hidden inputs (one per card), got %d",
-			strings.Count(body, `name="scope" value="personal"`))
 	}
 	// The cwd project must STILL show classify controls (cwd-only classify
 	// stays on top of the new bulk block).
@@ -788,6 +809,161 @@ func TestHandleIndex_BulkButtons_FormStructure(t *testing.T) {
 	}
 	if !strings.Contains(body, "Mark all as personal") {
 		t.Errorf("want 'Mark all as personal' button in body")
+	}
+	// Fix #2: ordering assertion — the closing </a> for the gamma card anchor must
+	// appear BEFORE the gamma bulk form action. A regression that nests the form
+	// inside the <a> would put the form action before </a>, failing this check.
+	//
+	// The template renders: <a href="/project/gamma">...</a>
+	// followed by: <div class="bulk-actions"><form ... action="/project/gamma/set-scope">
+	// So </a> must precede action="/project/gamma/set-scope".
+	anchorCloseIdx := strings.Index(body, "</a>")
+	gammaFormIdx := strings.Index(body, `action="/project/gamma/set-scope"`)
+	if anchorCloseIdx < 0 {
+		t.Errorf("want </a> tag in rendered body; not found")
+	} else if gammaFormIdx < 0 {
+		t.Errorf("want action=/project/gamma/set-scope in rendered body; not found")
+	} else if anchorCloseIdx > gammaFormIdx {
+		t.Errorf("anchor nesting regression: </a> at index %d appears AFTER gamma form action at index %d; bulk form must be outside the <a> anchor", anchorCloseIdx, gammaFormIdx)
+	}
+}
+
+// ─── Fix 6a: empty project coverage ─────────────────────────────────────────
+
+// TestSetProjectScope_EmptyProject verifies that when the store returns 0 observations
+// and confirm=1 is sent, the handler makes 0 UpdateObservationScope calls, redirects
+// 303, and (for the cwd project) still writes config.json.
+func TestSetProjectScope_EmptyProject(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeMutableStore{observations: nil} // zero observations
+	srv := triage.NewWithMutableStore(nil, fs, 0, dir)
+	srv.SetCwdProject("emptyproj")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/emptyproj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther for empty project, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/emptyproj" {
+		t.Errorf("want Location=/project/emptyproj, got %q", loc)
+	}
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("want 0 UpdateObservationScope calls for empty project, got %d", len(fs.updateCalls))
+	}
+	// config.json IS written for the cwd project even when 0 rows are updated.
+	configPath := dir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json must be written for cwd project even with 0 rows; error: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "shared" {
+		t.Errorf("want default_scope=shared in config.json, got %q", cfg["default_scope"])
+	}
+}
+
+// ─── Fix 6b: all already at target coverage ──────────────────────────────────
+
+// TestSetProjectScope_AllAlreadyAtTarget verifies that when all observations are
+// already at the target scope, 0 UpdateObservationScope calls are made, the handler
+// still redirects 303, and config.json is written for the cwd project.
+func TestSetProjectScope_AllAlreadyAtTarget(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	// All observations already at internal scope "team" (UI scope "shared").
+	obs := []store.Observation{
+		{ID: 1, Scope: "team", Project: ptrStr("proj")},
+		{ID: 2, Scope: "team", Project: ptrStr("proj")},
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeMutableStore{observations: obs}
+	srv := triage.NewWithMutableStore(nil, fs, 0, dir)
+	srv.SetCwdProject("proj")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther when all at target, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/proj" {
+		t.Errorf("want Location=/project/proj, got %q", loc)
+	}
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("want 0 update calls when all already at target, got %d: %+v", len(fs.updateCalls), fs.updateCalls)
+	}
+	// config.json must still be written for the cwd project.
+	configPath := dir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json must be written for cwd project even when 0 rows updated; error: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "shared" {
+		t.Errorf("want default_scope=shared in config.json, got %q", cfg["default_scope"])
+	}
+}
+
+// ─── Fix 6c: table-driven invalid scope ──────────────────────────────────────
+
+// TestSetProjectScope_InvalidScope_TableDriven replaces (and extends) the single
+// invalid-scope test with a table-driven test covering empty string, "department"
+// (which was the original test case), and "SHARED" (wrong case).
+// Each case must return 400 and make ZERO store calls.
+func TestSetProjectScope_InvalidScope_TableDriven(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope string
+	}{
+		{"empty", ""},
+		{"department", "department"},
+		{"uppercase SHARED", "SHARED"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			fs := &fakeMutableStore{}
+			srv := triage.NewWithMutableStore(nil, fs, 0, "")
+			h := srv.Handler()
+
+			form := url.Values{"scope": {tc.scope}}
+			req := httptest.NewRequest(http.MethodPost, "/project/proj/set-scope",
+				strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("scope=%q: want 400, got %d; body: %s", tc.scope, rec.Code, rec.Body.String()[:min(200, len(rec.Body.String()))])
+			}
+			if len(fs.updateCalls) != 0 {
+				t.Errorf("scope=%q: want 0 store calls, got %d", tc.scope, len(fs.updateCalls))
+			}
+		})
 	}
 }
 

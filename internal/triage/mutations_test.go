@@ -205,9 +205,12 @@ func TestHandleSetScope_WithConfirmUpdatesAll(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	// Should redirect or return 2xx after bulk action.
-	if rec.Code == http.StatusInternalServerError {
-		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	// Fix #1: assert real 303 redirect with Location on success.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("want 303 SeeOther on success, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/proj" {
+		t.Errorf("want Location=/project/proj, got %q", loc)
 	}
 	if len(fs.updateCalls) != 3 {
 		t.Fatalf("want 3 update calls, got %d", len(fs.updateCalls))
@@ -327,8 +330,12 @@ func TestSetProjectScope_SkipsAlreadyAtTarget(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusInternalServerError {
-		t.Fatalf("unexpected 500; body: %s", rec.Body.String())
+	// Fix #1: assert real 303 redirect with Location for shared sub-case.
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("C-06 shared: want 303 SeeOther, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/project/proj" {
+		t.Errorf("C-06 shared: want Location=/project/proj, got %q", loc)
 	}
 
 	// ID 5 (already "team") must NOT appear in update calls.
@@ -360,12 +367,20 @@ func TestSetProjectScope_SkipsAlreadyAtTarget(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	h2.ServeHTTP(rec2, req2)
 
-	if rec2.Code == http.StatusInternalServerError {
-		t.Fatalf("personal mirror: unexpected 500; body: %s", rec2.Body.String())
+	// Fix #1: assert real 303 redirect with Location for personal mirror sub-case.
+	if rec2.Code != http.StatusSeeOther {
+		t.Fatalf("personal mirror: want 303 SeeOther, got %d; body: %s", rec2.Code, rec2.Body.String())
+	}
+	if loc := rec2.Header().Get("Location"); loc != "/project/proj2" {
+		t.Errorf("personal mirror: want Location=/project/proj2, got %q", loc)
 	}
 	for _, c := range fs2.updateCalls {
 		if c.ID == 11 {
 			t.Errorf("personal mirror: ID 11 was already 'personal'; must NOT be updated, got UpdateObservationScope(11, %q)", c.Scope)
+		}
+		// Fix #6d: assert all recorded update calls have scope=personal.
+		if c.Scope != "personal" {
+			t.Errorf("personal mirror: expected scope=personal for id=%d, got %q", c.ID, c.Scope)
 		}
 	}
 	if len(fs2.updateCalls) != 2 {

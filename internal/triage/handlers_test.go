@@ -372,6 +372,59 @@ func TestHandleProject_Golden(t *testing.T) {
 	goldenCheck(t, "project", got)
 }
 
+// TestSetScopeConfirmPage_SharedGolden renders the SetScopeConfirmPage for the
+// → shared direction and compares to a golden file.
+// Update with: go test ./internal/triage/... -run TestSetScopeConfirmPage_SharedGolden -update
+func TestSetScopeConfirmPage_SharedGolden(t *testing.T) {
+	fs := &fakeMutableStore{
+		observations: []store.Observation{
+			{ID: 1, Scope: "personal"},
+		},
+	}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/alpha/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	got, _ := io.ReadAll(rec.Body)
+	goldenCheck(t, "set_scope_confirm_shared", got)
+}
+
+// TestSetScopeConfirmPage_PersonalGolden renders the SetScopeConfirmPage for the
+// → personal direction and compares to a golden file.
+// Update with: go test ./internal/triage/... -run TestSetScopeConfirmPage_PersonalGolden -update
+func TestSetScopeConfirmPage_PersonalGolden(t *testing.T) {
+	fs := &fakeMutableStore{
+		observations: []store.Observation{
+			{ID: 1, Scope: "team"},
+			{ID: 2, Scope: "team"},
+		},
+	}
+	srv := triage.NewWithMutableStore(nil, fs, 0, "")
+	h := srv.Handler()
+
+	form := url.Values{"scope": {"personal"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/alpha/set-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	got, _ := io.ReadAll(rec.Body)
+	goldenCheck(t, "set_scope_confirm_personal", got)
+}
+
 // ─── Bulk set-scope: POST /project/{name}/set-scope ──────────────────────────
 
 // TestSetProjectScope_SharedNoConfirm verifies that POSTing scope=shared without

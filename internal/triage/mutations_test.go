@@ -314,7 +314,7 @@ func TestSetProjectScope_SkipsAlreadyAtTarget(t *testing.T) {
 		{ID: 2, Scope: "personal", Project: ptrStr("proj")},
 		{ID: 3, Scope: "personal", Project: ptrStr("proj")},
 		{ID: 4, Scope: "project", Project: ptrStr("proj")}, // legacy; not at "team"
-		{ID: 5, Scope: "team", Project: ptrStr("proj")},   // already at target
+		{ID: 5, Scope: "team", Project: ptrStr("proj")},    // already at target
 	}
 	fs := &fakeMutableStore{observations: obs}
 	srv := triage.NewWithMutableStore(nil, fs, 0, "")

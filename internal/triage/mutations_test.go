@@ -30,6 +30,12 @@ type fakeMutableStore struct {
 	tagErr    error               // error returned by ObservationsByTag
 	tagValues []string            // returned by DistinctTagValues
 	tagValErr error               // error returned by DistinctTagValues
+	// recorded args from the most recent ObservationsByTag call
+	lastTagProject string
+	lastTagFacet   string
+	lastTagValue   string
+	// recorded facet arg from the most recent DistinctTagValues call
+	lastTagValuesFacet string
 }
 
 type updateCall struct {
@@ -54,12 +60,18 @@ func (f *fakeMutableStore) UpdateObservationScope(id int64, internalScope string
 }
 
 // ObservationsByTag returns the canned tagObs slice (PR#3 / WU-C2).
+// Records project, facet, and value for assertion in tests.
 func (f *fakeMutableStore) ObservationsByTag(project, facet, value string, limit int) ([]store.Observation, error) {
+	f.lastTagProject = project
+	f.lastTagFacet = facet
+	f.lastTagValue = value
 	return f.tagObs, f.tagErr
 }
 
 // DistinctTagValues returns the canned tagValues slice (PR#3 / WU-C2).
+// Records facet for assertion in tests.
 func (f *fakeMutableStore) DistinctTagValues(project, facet string) ([]string, error) {
+	f.lastTagValuesFacet = facet
 	return f.tagValues, f.tagValErr
 }
 

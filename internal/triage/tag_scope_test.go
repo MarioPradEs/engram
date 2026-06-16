@@ -98,6 +98,10 @@ func TestTagScope_PersonalNoConfirm(t *testing.T) {
 	if strings.Contains(body, "cannot be recalled") {
 		t.Errorf("want NO sync-risk warning in personal confirm; body: %s", body[:min(500, len(body))])
 	}
+	// Must show match count (mirrors the shared no-confirm test assertion).
+	if !strings.Contains(body, "1 observation(s)") {
+		t.Errorf("want '1 observation(s)' in personal confirm page; body: %s", body[:min(300, len(body))])
+	}
 	if len(fs.updateCalls) != 0 {
 		t.Errorf("want 0 store mutations before confirm, got %d", len(fs.updateCalls))
 	}
@@ -105,6 +109,7 @@ func TestTagScope_PersonalNoConfirm(t *testing.T) {
 
 // TestTagScope_SharedConfirm verifies that confirm=1 + scope=shared updates all
 // matching observations to internal scope "team". Scenario B-01; REQ-50.
+// Also asserts that the correct facet and value were passed to ObservationsByTag.
 func TestTagScope_SharedConfirm(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
@@ -136,10 +141,18 @@ func TestTagScope_SharedConfirm(t *testing.T) {
 			t.Errorf("want scope=team for id=%d, got %q", c.ID, c.Scope)
 		}
 	}
+	// Assert the handler forwarded the correct facet and value to the store.
+	if fs.lastTagFacet != "juego" {
+		t.Errorf("want facet=juego passed to ObservationsByTag, got %q", fs.lastTagFacet)
+	}
+	if fs.lastTagValue != "game-x" {
+		t.Errorf("want value=game-x passed to ObservationsByTag, got %q", fs.lastTagValue)
+	}
 }
 
 // TestTagScope_PersonalConfirm verifies that confirm=1 + scope=personal updates all
 // matching observations to "personal". Scenario B-02; REQ-50.
+// Also asserts that the correct facet and value were passed to ObservationsByTag.
 func TestTagScope_PersonalConfirm(t *testing.T) {
 	ptrStr := func(s string) *string { return &s }
 	obs := []store.Observation{
@@ -168,6 +181,13 @@ func TestTagScope_PersonalConfirm(t *testing.T) {
 		if c.Scope != "personal" {
 			t.Errorf("want scope=personal for id=%d, got %q", c.ID, c.Scope)
 		}
+	}
+	// Assert the handler forwarded the correct facet and value to the store.
+	if fs.lastTagFacet != "tipo" {
+		t.Errorf("want facet=tipo passed to ObservationsByTag, got %q", fs.lastTagFacet)
+	}
+	if fs.lastTagValue != "decision" {
+		t.Errorf("want value=decision passed to ObservationsByTag, got %q", fs.lastTagValue)
 	}
 }
 
@@ -345,7 +365,106 @@ func TestTagScope_NoConfigWrite(t *testing.T) {
 	}
 }
 
+// TestTagScope_EmptyValue verifies that POSTing an empty value="" returns 400
+// without touching the store. Fix 1; RED before the empty-value guard was added
+// (the handler would proceed to ObservationsByTag with an empty string).
+func TestTagScope_EmptyValue(t *testing.T) {
+	fs := &fakeMutableStore{}
+	srv := newMutableSrv(fs)
+	h := srv.Handler()
+
+	form := url.Values{"facet": {"juego"}, "value": {""}, "scope": {"shared"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/tag-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for empty value, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) == "" {
+		t.Error("want non-empty error message in response body")
+	}
+	// Zero store calls — the guard must fire before any store access.
+	if fs.lastTagFacet != "" || fs.lastTagValue != "" {
+		t.Errorf("want zero store calls for empty value, but ObservationsByTag was called with facet=%q value=%q",
+			fs.lastTagFacet, fs.lastTagValue)
+	}
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("want 0 update calls for empty value, got %d", len(fs.updateCalls))
+	}
+}
+
+// TestTagScope_ZeroMatchWithConfirm verifies that the D5 zero-match guard fires
+// BEFORE the confirm check: even with confirm=1, an empty tagObs set must block
+// the update and show the empty/"No observations" page. Scenario B-07 + confirm edge.
+func TestTagScope_ZeroMatchWithConfirm(t *testing.T) {
+	fs := &fakeMutableStore{tagObs: []store.Observation{}} // empty result
+	srv := newMutableSrv(fs)
+	h := srv.Handler()
+
+	form := url.Values{"facet": {"juego"}, "value": {"nonexistent"}, "scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/tag-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Zero-match guard must produce a 200 empty page, NOT proceed to bulk update.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 (zero-match page) even with confirm=1, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "No observations") {
+		t.Errorf("want 'No observations' in body; body: %s", body[:min(500, len(body))])
+	}
+	// Zero writes — the bulk loop must never run when there are no matches.
+	if len(fs.updateCalls) != 0 {
+		t.Errorf("D5: zero-match guard must block confirm; got %d update call(s)", len(fs.updateCalls))
+	}
+}
+
+// TestTagScope_UpdateError verifies that a store error during bulk update returns 500.
+// One matching obs with a mismatched scope triggers UpdateObservationScope, which fails.
+func TestTagScope_UpdateError(t *testing.T) {
+	ptrStr := func(s string) *string { return &s }
+	obs := []store.Observation{
+		{ID: 1, Scope: "personal", Project: ptrStr("proj")},
+	}
+	fs := &fakeMutableStore{tagObs: obs, updateErr: errFakeStore}
+	srv := newMutableSrv(fs)
+	h := srv.Handler()
+
+	form := url.Values{"facet": {"juego"}, "value": {"game-x"}, "scope": {"shared"}, "confirm": {"1"}}
+	req := httptest.NewRequest(http.MethodPost, "/project/proj/tag-scope",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500 on update error, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ─── handleTagValues: GET /project/{name}/tag-values?facet=X ─────────────────
+
+// TestTagValues_StoreError verifies that a DistinctTagValues store error returns 500.
+// Scenario: error path in handleTagValues when the store is available but fails.
+func TestTagValues_StoreError(t *testing.T) {
+	fs := &fakeMutableStore{tagValErr: errFakeStore}
+	srv := newMutableSrv(fs)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/project/proj/tag-values?facet=juego", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("want 500 on DistinctTagValues store error, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
 
 // TestTagValues_JuegoReturnsOptions verifies that GET tag-values?facet=juego
 // returns an HTML <option> list for the given values.
@@ -375,7 +494,8 @@ func TestTagValues_JuegoReturnsOptions(t *testing.T) {
 }
 
 // TestTagValues_EmptyReturnsHint verifies that when DistinctTagValues returns an
-// empty slice, the fragment still renders (graceful empty state). Scenario B-06.
+// empty slice, the fragment still renders with an <option> element and a hint text.
+// Scenario B-06.
 func TestTagValues_EmptyReturnsHint(t *testing.T) {
 	fs := &fakeMutableStore{tagValues: []string{}}
 	srv := newMutableSrv(fs)
@@ -388,10 +508,14 @@ func TestTagValues_EmptyReturnsHint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200 for empty values, got %d; body: %s", rec.Code, rec.Body.String())
 	}
-	// Must still render something (option or hint).
 	body := rec.Body.String()
-	if strings.TrimSpace(body) == "" {
-		t.Errorf("want non-empty response for empty tag values; got empty body")
+	// Must contain an <option> element for htmx swap compatibility.
+	if !strings.Contains(body, "<option") {
+		t.Errorf("want <option> element in empty tag-values fragment; body: %s", body)
+	}
+	// Must show a hint that no values exist.
+	if !strings.Contains(body, "No values") {
+		t.Errorf("want 'No values' hint text in empty tag-values fragment; body: %s", body)
 	}
 }
 

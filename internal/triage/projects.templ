@@ -33,7 +33,12 @@ templ ProjectsPage(projects []store.ProjectStats, cwdProject string, cwdDefault 
 }
 
 // ProjectCard renders a single project summary card.
-// Only the cwdProject shows a resolved default-scope badge and classify controls (Option A).
+// Every card shows bulk set-scope buttons ("Mark all as shared" / "Mark all as
+// personal") targeting /project/{name}/set-scope (WU-A6, REQ-07 / Scenario A-04).
+// Only the cwdProject also shows a resolved default-scope badge and classify
+// controls (Option A, cwd-only).
+// The bulk-actions block is placed after the </a> anchor to avoid nesting
+// interactive elements inside an anchor (invalid HTML).
 templ ProjectCard(p store.ProjectStats, cwdProject string, cwdDefault string, cwdHasExplicit bool) {
 	<div class="project-card">
 		<a href={ templ.SafeURL("/project/" + url.PathEscape(p.Name)) }>
@@ -50,6 +55,16 @@ templ ProjectCard(p store.ProjectStats, cwdProject string, cwdDefault string, cw
 				{ fmt.Sprintf("%d observations · %d sessions", p.ObservationCount, p.SessionCount) }
 			</p>
 		</a>
+		<div class="bulk-actions">
+			<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(p.Name) + "/set-scope") }>
+				<input type="hidden" name="scope" value="shared"/>
+				<button type="submit" class="btn-bulk-share">Mark all as shared</button>
+			</form>
+			<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(p.Name) + "/set-scope") }>
+				<input type="hidden" name="scope" value="personal"/>
+				<button type="submit" class="btn-bulk-personal">Mark all as personal</button>
+			</form>
+		</div>
 		if p.Name == cwdProject {
 			<div class="classify-controls">
 				<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(p.Name) + "/classify") }>

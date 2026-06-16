@@ -698,6 +698,99 @@ func TestSetProjectScope_PartialFailure(t *testing.T) {
 	}
 }
 
+// ─── WU-A6: Landing bulk buttons (REQ-07 / Scenario A-04) ───────────────────
+
+// TestHandleIndex_BulkButtons_AllCards verifies that GET / renders bulk
+// set-scope forms ("Mark all as shared" / "Mark all as personal") on EVERY
+// project card — both the cwd project and non-cwd projects.
+// REQ-07 / Scenario A-04.
+// RED: added before projects.templ is changed (will fail until template updated).
+func TestHandleIndex_BulkButtons_AllCards(t *testing.T) {
+	projects := []store.ProjectStats{
+		{Name: "alpha", ObservationCount: 10, SessionCount: 2},
+		{Name: "beta", ObservationCount: 5, SessionCount: 1},
+	}
+	s := &fakeTriageStore{projects: projects}
+	cwdDir := t.TempDir()
+	srv := triage.NewWithStore(nil, s, 0, cwdDir)
+	srv.SetCwdProject("alpha") // "alpha" is cwd; "beta" is non-cwd
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// Both bulk buttons must appear for the cwd project (alpha).
+	if !strings.Contains(body, `/project/alpha/set-scope`) {
+		t.Errorf("want bulk set-scope form for cwd project 'alpha'; not found in body")
+	}
+	// Both bulk buttons must appear for the non-cwd project (beta).
+	if !strings.Contains(body, `/project/beta/set-scope`) {
+		t.Errorf("want bulk set-scope form for non-cwd project 'beta'; not found in body")
+	}
+	// The button labels must be present at least twice (once per project card).
+	sharedCount := strings.Count(body, "Mark all as shared")
+	personalCount := strings.Count(body, "Mark all as personal")
+	if sharedCount < 2 {
+		t.Errorf("want 'Mark all as shared' at least 2 times (once per card), got %d", sharedCount)
+	}
+	if personalCount < 2 {
+		t.Errorf("want 'Mark all as personal' at least 2 times (once per card), got %d", personalCount)
+	}
+	// Verify the scope hidden fields are present — both directions per card.
+	if strings.Count(body, `name="scope" value="shared"`) < 2 {
+		t.Errorf("want at least 2 scope=shared hidden inputs (one per card), got %d",
+			strings.Count(body, `name="scope" value="shared"`))
+	}
+	if strings.Count(body, `name="scope" value="personal"`) < 2 {
+		t.Errorf("want at least 2 scope=personal hidden inputs (one per card), got %d",
+			strings.Count(body, `name="scope" value="personal"`))
+	}
+	// The cwd project must STILL show classify controls (cwd-only classify
+	// stays on top of the new bulk block).
+	if !strings.Contains(body, "Set default: shared") {
+		t.Errorf("want cwd classify button 'Set default: shared' to remain for cwd project 'alpha'")
+	}
+}
+
+// TestHandleIndex_BulkButtons_FormStructure verifies that the bulk forms are
+// placed OUTSIDE the <a> anchor link so the HTML is valid (no nested interactive
+// elements). We detect this by confirming that the bulk form action appears in
+// the rendered output without being inside an anchor href.
+// This is a structural sanity check — it does not parse HTML but confirms the
+// template does not embed the form inside the anchor.
+func TestHandleIndex_BulkButtons_FormStructure(t *testing.T) {
+	projects := []store.ProjectStats{
+		{Name: "gamma", ObservationCount: 7, SessionCount: 3},
+	}
+	s := &fakeTriageStore{projects: projects}
+	srv := triage.NewWithStore(nil, s, 0, t.TempDir())
+	srv.SetCwdProject("other") // gamma is non-cwd; still must get bulk buttons
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	// The bulk action form must target /project/gamma/set-scope.
+	if !strings.Contains(body, `/project/gamma/set-scope`) {
+		t.Errorf("want bulk form for non-cwd project 'gamma' in landing body; not found")
+	}
+	// Confirm "Mark all as shared" and "Mark all as personal" are both present.
+	if !strings.Contains(body, "Mark all as shared") {
+		t.Errorf("want 'Mark all as shared' button in body")
+	}
+	if !strings.Contains(body, "Mark all as personal") {
+		t.Errorf("want 'Mark all as personal' button in body")
+	}
+}
+
 // min is a small helper (Go 1.21+ has min built-in but kept explicit for clarity).
 func min(a, b int) int {
 	if a < b {

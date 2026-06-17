@@ -47,44 +47,64 @@ func callResultText(t *testing.T, res *mcppkg.CallToolResult) string {
 	return text.Text
 }
 
+// assertSessionSyncMutationDirectory verifies that a session upsert mutation
+// was enqueued locally. It queries sync_mutations directly (unfiltered) because
+// Gate B correctly excludes session entities from the cloud-export selector
+// (ListPendingSyncMutations). The mutation IS enqueued — it just must not reach
+// the cloud selector.
 func assertSessionSyncMutationDirectory(t *testing.T, s *store.Store, sessionID, wantDirectory string) {
 	t.Helper()
 
-	mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
+	// Query sync_mutations directly — bypasses the Gate B entity filter so we
+	// can assert the local mutation exists without touching the cloud selector.
+	rows, err := s.DB().Query(
+		`SELECT payload FROM sync_mutations
+		 WHERE entity = ? AND entity_key = ? AND op = ? AND acked_at IS NULL`,
+		store.SyncEntitySession, sessionID, store.SyncOpUpsert,
+	)
 	if err != nil {
-		t.Fatalf("list pending sync mutations: %v", err)
+		t.Fatalf("query sync_mutations for session %q: %v", sessionID, err)
 	}
+	defer rows.Close()
 
-	for _, mutation := range mutations {
-		if mutation.Entity != store.SyncEntitySession || mutation.EntityKey != sessionID || mutation.Op != store.SyncOpUpsert {
-			continue
+	for rows.Next() {
+		var rawPayload string
+		if err := rows.Scan(&rawPayload); err != nil {
+			t.Fatalf("scan session sync payload: %v", err)
 		}
 		var payload map[string]any
-		if err := json.Unmarshal([]byte(mutation.Payload), &payload); err != nil {
+		if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
 			t.Fatalf("decode session sync payload: %v", err)
 		}
 		if got := payload["directory"]; got != wantDirectory {
-			t.Fatalf("expected session sync payload directory %q, got %#v in payload %s", wantDirectory, got, mutation.Payload)
+			t.Fatalf("expected session sync payload directory %q, got %#v in payload %s", wantDirectory, got, rawPayload)
 		}
 		return
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating sync_mutations rows: %v", err)
+	}
 
-	t.Fatalf("expected pending session upsert sync mutation for %q; got %#v", sessionID, mutations)
+	t.Fatalf("expected pending session upsert sync mutation for %q in sync_mutations (Gate B: session is local-only, not in cloud selector)", sessionID)
 }
 
+// countPromptUpsertSyncMutations counts prompt upsert mutations enqueued
+// locally. It queries sync_mutations directly (unfiltered) because Gate B
+// correctly excludes prompt entities from the cloud-export selector
+// (ListPendingSyncMutations). The mutations ARE enqueued locally — they just
+// must not reach the cloud selector.
 func countPromptUpsertSyncMutations(t *testing.T, s *store.Store) int {
 	t.Helper()
 
-	mutations, err := s.ListPendingSyncMutations(store.DefaultSyncTargetKey, 100)
-	if err != nil {
-		t.Fatalf("list pending sync mutations: %v", err)
-	}
-
-	count := 0
-	for _, mutation := range mutations {
-		if mutation.Entity == store.SyncEntityPrompt && mutation.Op == store.SyncOpUpsert {
-			count++
-		}
+	// Query sync_mutations directly — bypasses the Gate B entity filter.
+	var count int
+	row := s.DB().QueryRow(
+		`SELECT count(*) FROM sync_mutations
+		 WHERE entity = ? AND op = ? AND acked_at IS NULL`,
+		store.SyncEntityPrompt, store.SyncOpUpsert,
+	)
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("count prompt upsert sync mutations: %v", err)
 	}
 	return count
 }

@@ -47,11 +47,39 @@ func setupIntegrationStores(t *testing.T) (machineA, machineB *Store, syncObsX, 
 
 // transferMutations extracts all pending mutations from src and applies them to dst.
 // Returns the count of mutations transferred.
+//
+// This is a LOCAL-TO-LOCAL simulation helper — it deliberately uses an
+// unfiltered query of sync_mutations (bypassing Gate B) so that session and
+// prompt mutations are also transferred. Gate B's entity filter
+// (ListPendingSyncMutations) is the correct cloud-export selector; it must NOT
+// be used here because a local round-trip simulation must faithfully move every
+// entity type (including sessions) to avoid FK violations on the destination.
 func transferMutations(t *testing.T, src, dst *Store) int {
 	t.Helper()
-	mutations, err := src.ListPendingSyncMutations(DefaultSyncTargetKey, 200)
+
+	// Query sync_mutations directly — include all entity types (session,
+	// observation, relation, prompt) for a faithful local simulation.
+	rows, err := src.db.Query(
+		`SELECT seq, target_key, entity, entity_key, op, payload, source, project, occurred_at, acked_at
+		 FROM sync_mutations
+		 WHERE target_key = ? AND acked_at IS NULL
+		 ORDER BY seq ASC
+		 LIMIT 200`, DefaultSyncTargetKey)
 	if err != nil {
-		t.Fatalf("transferMutations: list from src: %v", err)
+		t.Fatalf("transferMutations: query src sync_mutations: %v", err)
+	}
+	defer rows.Close()
+
+	var mutations []SyncMutation
+	for rows.Next() {
+		var m SyncMutation
+		if err := rows.Scan(&m.Seq, &m.TargetKey, &m.Entity, &m.EntityKey, &m.Op, &m.Payload, &m.Source, &m.Project, &m.OccurredAt, &m.AckedAt); err != nil {
+			t.Fatalf("transferMutations: scan row: %v", err)
+		}
+		mutations = append(mutations, m)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("transferMutations: iterate rows: %v", err)
 	}
 
 	if err := dst.ensureSyncState(DefaultSyncTargetKey); err != nil {

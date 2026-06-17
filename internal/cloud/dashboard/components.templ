@@ -10,13 +10,14 @@ import (
 // ─── Shared Components ──────────────────────────────────────────────────────
 
 // NavTabs renders the navigation tab bar.
-// activeTab should be one of: "dashboard", "browser", "projects", "contributors", "admin".
+// activeTab should be one of: "graph", "dashboard", "browser", "projects", "admin".
+// D1/D3: Graph is the first tab. Contributors removed from top nav (accessible via Admin → Users).
 templ NavTabs(activeTab string, isAdmin bool) {
 	<div role="tablist">
+		@navTab("/dashboard/graph", "Graph", "graph", activeTab)
 		@navTab("/dashboard/", "Dashboard", "dashboard", activeTab)
 		@navTab("/dashboard/browser", "Browser", "browser", activeTab)
 		@navTab("/dashboard/projects", "Projects", "projects", activeTab)
-		@navTab("/dashboard/contributors", "Contributors", "contributors", activeTab)
 		if isAdmin {
 			@navTab("/dashboard/admin", "Admin", "admin", activeTab)
 		}
@@ -342,6 +343,9 @@ templ ObservationsPartial(observations []cloudstore.DashboardObservationRow, pg 
 						<footer>
 							<small>{ formatTimestamp(o.CreatedAt) }</small>
 							<small>Session { o.SessionID }</small>
+							if o.UserEmail != "" {
+								<small class="muted">{ o.UserEmail }</small>
+							}
 						</footer>
 					</article>
 				</a>
@@ -1108,6 +1112,16 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 						<tr><th>Chunk ID</th><td>{ observation.ChunkID }</td></tr>
 						<tr><th>Session</th><td><a href={ templ.SafeURL("/dashboard/sessions/" + url.PathEscape(observation.Project) + "/" + url.PathEscape(observation.SessionID)) }>{ observation.SessionID }</a></td></tr>
 						<tr><th>Created</th><td>{ formatTimestamp(observation.CreatedAt) }</td></tr>
+						<tr>
+							<th>Author</th>
+							<td>
+								if observation.UserEmail != "" {
+									{ observation.UserEmail }
+								} else {
+									<span class="muted">Unknown</span>
+								}
+							</td>
+						</tr>
 						<tr>
 							<th>Tool</th>
 							<td>

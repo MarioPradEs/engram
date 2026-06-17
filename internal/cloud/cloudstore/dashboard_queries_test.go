@@ -458,7 +458,7 @@ func TestGetSessionDetailReturnsItsObservations(t *testing.T) {
 		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
 	}
 
-	sess, obs, _, err := cs.GetSessionDetail("proj-sess", "sess-detail-a")
+	sess, obs, _, err := cs.GetSessionDetail(nil, "proj-sess", "sess-detail-a")
 	if err != nil {
 		t.Fatalf("GetSessionDetail: %v", err)
 	}
@@ -508,11 +508,11 @@ func TestDashboardPaginationSortStability(t *testing.T) {
 	}
 
 	// Page 3 of size 5 (offset 10, 5 sessions).
-	page1, total1, err := cs.ListRecentSessionsPaginated("", "", 5, 10)
+	page1, total1, err := cs.ListRecentSessionsPaginated(nil, "", "", 5, 10)
 	if err != nil {
 		t.Fatalf("ListRecentSessionsPaginated call 1: %v", err)
 	}
-	page2, total2, err := cs.ListRecentSessionsPaginated("", "", 5, 10)
+	page2, total2, err := cs.ListRecentSessionsPaginated(nil, "", "", 5, 10)
 	if err != nil {
 		t.Fatalf("ListRecentSessionsPaginated call 2: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestObservationDetailDistinguishesMultipleObsPerChunk(t *testing.T) {
 	}
 
 	// Look up alpha by syncID.
-	obsAlpha, _, _, err := cs.GetObservationDetail("proj-c1", "s-c1", "obs-c1-alpha")
+	obsAlpha, _, _, err := cs.GetObservationDetail(nil, "proj-c1", "s-c1", "obs-c1-alpha")
 	if err != nil {
 		t.Fatalf("GetObservationDetail(alpha): %v", err)
 	}
@@ -571,7 +571,7 @@ func TestObservationDetailDistinguishesMultipleObsPerChunk(t *testing.T) {
 	}
 
 	// Look up beta by syncID — must resolve to a different observation.
-	obsBeta, _, _, err := cs.GetObservationDetail("proj-c1", "s-c1", "obs-c1-beta")
+	obsBeta, _, _, err := cs.GetObservationDetail(nil, "proj-c1", "s-c1", "obs-c1-beta")
 	if err != nil {
 		t.Fatalf("GetObservationDetail(beta): %v", err)
 	}
@@ -609,7 +609,7 @@ func TestPromptDetailDistinguishesMultiplePromptsPerChunk(t *testing.T) {
 	}
 
 	// Look up alpha.
-	promptAlpha, _, _, err := cs.GetPromptDetail("proj-c1p", "s-c1p", "prompt-c1-alpha")
+	promptAlpha, _, _, err := cs.GetPromptDetail(nil, "proj-c1p", "s-c1p", "prompt-c1-alpha")
 	if err != nil {
 		t.Fatalf("GetPromptDetail(alpha): %v", err)
 	}
@@ -621,7 +621,7 @@ func TestPromptDetailDistinguishesMultiplePromptsPerChunk(t *testing.T) {
 	}
 
 	// Look up beta.
-	promptBeta, _, _, err := cs.GetPromptDetail("proj-c1p", "s-c1p", "prompt-c1-beta")
+	promptBeta, _, _, err := cs.GetPromptDetail(nil, "proj-c1p", "s-c1p", "prompt-c1-beta")
 	if err != nil {
 		t.Fatalf("GetPromptDetail(beta): %v", err)
 	}
@@ -1168,7 +1168,7 @@ func TestStandaloneCloudMutationObservationVisibleInPaginatedList(t *testing.T) 
 	}
 
 	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
-	rows, total, err := cs.ListRecentObservationsPaginated("engram", "decisión arquitectónica", "", 20, 0)
+	rows, total, err := cs.ListRecentObservationsPaginated(nil, "engram", "decisión arquitectónica", "", 20, 0)
 	if err != nil {
 		t.Fatalf("ListRecentObservationsPaginated: %v", err)
 	}
@@ -1218,7 +1218,7 @@ func TestStandaloneCloudMutationDeleteWinsBySeq(t *testing.T) {
 	}
 
 	cs := &CloudStore{dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil }}
-	rows, total, err := cs.ListRecentObservationsPaginated("engram", "", "", 20, 0)
+	rows, total, err := cs.ListRecentObservationsPaginated(nil, "engram", "", "", 20, 0)
 	if err != nil {
 		t.Fatalf("ListRecentObservationsPaginated: %v", err)
 	}
@@ -1517,7 +1517,7 @@ func TestSessionDetailNotFoundReturnsSessionNotFoundError(t *testing.T) {
 	cs := &CloudStore{
 		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
 	}
-	_, _, _, err = cs.GetSessionDetail("proj-valid", "sess-missing")
+	_, _, _, err = cs.GetSessionDetail(nil, "proj-valid", "sess-missing")
 	if err == nil {
 		t.Fatal("expected an error for missing session, got nil")
 	}
@@ -1550,7 +1550,7 @@ func TestObservationDetailNotFoundReturnsObservationNotFoundError(t *testing.T) 
 	cs := &CloudStore{
 		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
 	}
-	_, _, _, err = cs.GetObservationDetail("proj-valid", "sess-exists", "obs-missing")
+	_, _, _, err = cs.GetObservationDetail(nil, "proj-valid", "sess-exists", "obs-missing")
 	if err == nil {
 		t.Fatal("expected an error for missing observation, got nil")
 	}
@@ -1583,7 +1583,7 @@ func TestPromptDetailNotFoundReturnsPromptNotFoundError(t *testing.T) {
 	cs := &CloudStore{
 		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
 	}
-	_, _, _, err = cs.GetPromptDetail("proj-valid", "sess-exists", "prompt-missing")
+	_, _, _, err = cs.GetPromptDetail(nil, "proj-valid", "sess-exists", "prompt-missing")
 	if err == nil {
 		t.Fatal("expected an error for missing prompt, got nil")
 	}

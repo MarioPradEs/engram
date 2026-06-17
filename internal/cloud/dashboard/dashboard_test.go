@@ -93,6 +93,12 @@ func (s parityStoreStub) AdminOverview() (cloudstore.DashboardAdminOverview, err
 	}
 	return s.adminOverview, nil
 }
+func (s parityStoreStub) ScopedMemberOverview(_ *cloudstore.ReadScope) (cloudstore.DashboardAdminOverview, error) {
+	if s.errAdminOverview != nil {
+		return cloudstore.DashboardAdminOverview{}, s.errAdminOverview
+	}
+	return s.adminOverview, nil
+}
 
 // Paginated list methods — return all rows (no real pagination in stub).
 func (s parityStoreStub) ListProjectsPaginated(_ string, _, _ int) ([]cloudstore.DashboardProjectRow, int, error) {
@@ -101,19 +107,19 @@ func (s parityStoreStub) ListProjectsPaginated(_ string, _, _ int) ([]cloudstore
 	}
 	return s.projects, len(s.projects), nil
 }
-func (s parityStoreStub) ListRecentObservationsPaginated(_, _, _ string, _, _ int) ([]cloudstore.DashboardObservationRow, int, error) {
+func (s parityStoreStub) ListRecentObservationsPaginated(_ *cloudstore.ReadScope, _, _, _ string, _, _ int) ([]cloudstore.DashboardObservationRow, int, error) {
 	if s.errListRecentObservations != nil {
 		return nil, 0, s.errListRecentObservations
 	}
 	return s.observations, len(s.observations), nil
 }
-func (s parityStoreStub) ListRecentSessionsPaginated(_, _ string, _, _ int) ([]cloudstore.DashboardSessionRow, int, error) {
+func (s parityStoreStub) ListRecentSessionsPaginated(_ *cloudstore.ReadScope, _, _ string, _, _ int) ([]cloudstore.DashboardSessionRow, int, error) {
 	return s.sessions, len(s.sessions), nil
 }
-func (s parityStoreStub) ListRecentPromptsPaginated(_, _ string, _, _ int) ([]cloudstore.DashboardPromptRow, int, error) {
+func (s parityStoreStub) ListRecentPromptsPaginated(_ *cloudstore.ReadScope, _, _ string, _, _ int) ([]cloudstore.DashboardPromptRow, int, error) {
 	return s.prompts, len(s.prompts), nil
 }
-func (s parityStoreStub) ListContributorsPaginated(_ string, _, _ int) ([]cloudstore.DashboardContributorRow, int, error) {
+func (s parityStoreStub) ListContributorsPaginated(_ *cloudstore.ReadScope, _ string, _, _ int) ([]cloudstore.DashboardContributorRow, int, error) {
 	if s.errListContributors != nil {
 		return nil, 0, s.errListContributors
 	}
@@ -121,7 +127,7 @@ func (s parityStoreStub) ListContributorsPaginated(_ string, _, _ int) ([]clouds
 }
 
 // Detail methods — return zero values (not exercised in existing tests).
-func (s parityStoreStub) GetSessionDetail(_, _ string) (cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error) {
+func (s parityStoreStub) GetSessionDetail(_ *cloudstore.ReadScope, _, _ string) (cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error) {
 	if s.errGetSessionDetail != nil {
 		return cloudstore.DashboardSessionRow{}, nil, nil, s.errGetSessionDetail
 	}
@@ -130,7 +136,7 @@ func (s parityStoreStub) GetSessionDetail(_, _ string) (cloudstore.DashboardSess
 	}
 	return cloudstore.DashboardSessionRow{}, nil, nil, nil
 }
-func (s parityStoreStub) GetObservationDetail(_, _, _ string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error) {
+func (s parityStoreStub) GetObservationDetail(_ *cloudstore.ReadScope, _, _, _ string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error) {
 	if s.errGetObservationDetail != nil {
 		return cloudstore.DashboardObservationRow{}, cloudstore.DashboardSessionRow{}, nil, s.errGetObservationDetail
 	}
@@ -143,7 +149,7 @@ func (s parityStoreStub) GetObservationDetail(_, _, _ string) (cloudstore.Dashbo
 	}
 	return cloudstore.DashboardObservationRow{}, cloudstore.DashboardSessionRow{}, nil, nil
 }
-func (s parityStoreStub) GetPromptDetail(_, _, _ string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error) {
+func (s parityStoreStub) GetPromptDetail(_ *cloudstore.ReadScope, _, _, _ string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error) {
 	if s.errGetPromptDetail != nil {
 		return cloudstore.DashboardPromptRow{}, cloudstore.DashboardSessionRow{}, nil, s.errGetPromptDetail
 	}
@@ -967,21 +973,26 @@ func TestStatusRibbonAndFooterPresent(t *testing.T) {
 
 // TestNavTabsRenderedCorrectly asserts that the nav tab hrefs are correct for
 // an admin user. Satisfies REQ-107.
+// D1/D3 update: Graph tab is first; Contributors removed from top nav.
 func TestNavTabsRenderedCorrectly(t *testing.T) {
 	mux := newAuthedMux(parityStoreStub{}, true)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
 	body := rec.Body.String()
 	for _, href := range []string{
+		`href="/dashboard/graph"`,
 		`href="/dashboard/"`,
 		`href="/dashboard/browser"`,
 		`href="/dashboard/projects"`,
-		`href="/dashboard/contributors"`,
 		`href="/dashboard/admin"`,
 	} {
 		if !strings.Contains(body, href) {
 			t.Errorf("expected nav href %q in body", href)
 		}
+	}
+	// D1: Contributors must NOT appear in the top nav (moved to Admin → Users).
+	if strings.Contains(body, `href="/dashboard/contributors"`) {
+		t.Errorf("D1: Contributors link must not appear in top nav, got body contains href=/dashboard/contributors")
 	}
 }
 
@@ -1342,7 +1353,7 @@ type paginationCapturingStub struct {
 	total           int
 }
 
-func (s *paginationCapturingStub) ListRecentObservationsPaginated(_, _, _ string, limit, offset int) ([]cloudstore.DashboardObservationRow, int, error) {
+func (s *paginationCapturingStub) ListRecentObservationsPaginated(_ *cloudstore.ReadScope, _, _, _ string, limit, offset int) ([]cloudstore.DashboardObservationRow, int, error) {
 	s.mu.Lock()
 	s.capturedOffsets = append(s.capturedOffsets, offset)
 	s.capturedLimits = append(s.capturedLimits, limit)
@@ -1358,7 +1369,7 @@ func (s *paginationCapturingStub) ListRecentObservationsPaginated(_, _, _ string
 	return s.parityStoreStub.observations[start:end], s.total, nil
 }
 
-func (s *paginationCapturingStub) ListRecentSessionsPaginated(_, _ string, limit, offset int) ([]cloudstore.DashboardSessionRow, int, error) {
+func (s *paginationCapturingStub) ListRecentSessionsPaginated(_ *cloudstore.ReadScope, _, _ string, limit, offset int) ([]cloudstore.DashboardSessionRow, int, error) {
 	s.mu.Lock()
 	s.capturedOffsets = append(s.capturedOffsets, offset)
 	s.capturedLimits = append(s.capturedLimits, limit)
@@ -1374,7 +1385,7 @@ func (s *paginationCapturingStub) ListRecentSessionsPaginated(_, _ string, limit
 	return s.parityStoreStub.sessions[start:end], s.total, nil
 }
 
-func (s *paginationCapturingStub) ListRecentPromptsPaginated(_, _ string, limit, offset int) ([]cloudstore.DashboardPromptRow, int, error) {
+func (s *paginationCapturingStub) ListRecentPromptsPaginated(_ *cloudstore.ReadScope, _, _ string, limit, offset int) ([]cloudstore.DashboardPromptRow, int, error) {
 	s.mu.Lock()
 	s.capturedOffsets = append(s.capturedOffsets, offset)
 	s.capturedLimits = append(s.capturedLimits, limit)
@@ -2237,7 +2248,7 @@ type contributorsPaginationStub struct {
 	total           int
 }
 
-func (s *contributorsPaginationStub) ListContributorsPaginated(_ string, limit, offset int) ([]cloudstore.DashboardContributorRow, int, error) {
+func (s *contributorsPaginationStub) ListContributorsPaginated(_ *cloudstore.ReadScope, _ string, limit, offset int) ([]cloudstore.DashboardContributorRow, int, error) {
 	s.mu.Lock()
 	s.capturedOffsets = append(s.capturedOffsets, offset)
 	s.capturedLimits = append(s.capturedLimits, limit)

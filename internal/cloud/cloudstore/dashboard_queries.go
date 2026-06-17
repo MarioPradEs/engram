@@ -18,6 +18,44 @@ var ErrDashboardProjectInvalid = errors.New("cloudstore: dashboard project is in
 var ErrDashboardProjectForbidden = errors.New("cloudstore: dashboard project is outside allowed scope")
 var ErrDashboardProjectNotFound = errors.New("cloudstore: dashboard project not found")
 
+// ErrDashboardIdentityRequired is returned when a non-admin caller has no resolved email.
+// This is the DENY path: missing identity must never fall through to an unscoped result.
+var ErrDashboardIdentityRequired = errors.New("cloudstore: dashboard caller identity required")
+
+// ReadScope carries the authenticated dashboard caller's identity for read-side scoping.
+// Mirrors MutationScopeFilter (cloudstore.go:1427) on the read path.
+//
+//	IsAdmin == true  → unscoped (all rows)
+//	IsAdmin == false → rows where row.UserEmail == Email (case-insensitive)
+//	Email == "" && !IsAdmin → DENY: return nil + ErrDashboardIdentityRequired
+type ReadScope struct {
+	Email   string
+	IsAdmin bool
+}
+
+// applyReadScope filters rows by the caller's identity.
+// It is a pure generic function — one testable predicate for ALL row types.
+//
+//   - nil scope or IsAdmin == true → all rows returned unmodified
+//   - IsAdmin == false, Email non-empty → only rows where emailOf(row) matches Email (case-insensitive)
+//   - IsAdmin == false, Email empty → nil, ErrDashboardIdentityRequired (DENY — never leak)
+func applyReadScope[T any](scope *ReadScope, rows []T, emailOf func(T) string) ([]T, error) {
+	if scope == nil || scope.IsAdmin {
+		return rows, nil
+	}
+	email := strings.ToLower(strings.TrimSpace(scope.Email))
+	if email == "" {
+		return nil, ErrDashboardIdentityRequired
+	}
+	out := rows[:0:0]
+	for _, r := range rows {
+		if strings.EqualFold(strings.TrimSpace(emailOf(r)), email) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 // ErrDashboardContributorNotFound is returned when GetContributorDetail cannot find the named contributor.
 // R4-7: Use a dedicated error so classifyStoreError can return "Contributor not found" instead of "Project not found".
 var ErrDashboardContributorNotFound = errors.New("cloudstore: dashboard contributor not found")
@@ -51,6 +89,7 @@ type DashboardSessionRow struct {
 	EndedAt   string // NEW — populated from session close chunk if available
 	Summary   string // NEW — from session chunk summary field
 	Directory string // NEW — from session chunk directory field
+	UserEmail string // NEW (D2) — per-session attribution; from the originating chunk's created_by
 }
 
 type DashboardObservationRow struct {
@@ -64,6 +103,8 @@ type DashboardObservationRow struct {
 	TopicKey  string // NEW — from observation payload
 	ToolName  string // NEW — from observation payload
 	CreatedAt string
+	UserEmail string // NEW (D2) — per-observation attribution: cloud_mutations.user_email wins,
+	// falls back to originating chunk's created_by (legacy path with no per-mutation user_email).
 }
 
 type DashboardPromptRow struct {
@@ -73,6 +114,7 @@ type DashboardPromptRow struct {
 	ChunkID   string // chunk the prompt was first written in (preserved across mutations)
 	Content   string
 	CreatedAt string
+	UserEmail string // NEW (D2) — per-prompt attribution; from the originating chunk's created_by
 }
 
 // DashboardSystemHealth holds aggregate metrics for the admin health page.
@@ -91,6 +133,11 @@ type DashboardAdminOverview struct {
 	Projects     int
 	Contributors int
 	Chunks       int
+	// Member-scoped counts — populated only by ScopedMemberOverview for non-admin callers.
+	// Zero for admin (admin stats use Projects/Contributors/Chunks above).
+	Observations int
+	Sessions     int
+	Prompts      int
 }
 
 type DashboardProjectDetail struct {
@@ -188,7 +235,7 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 					session.Project = existing.Project
 				}
 			}
-			upsertDashboardSession(sessions, session.ID, sessionProject, session.StartedAt, endedAt, summary, session.Directory)
+			upsertDashboardSession(sessions, session.ID, sessionProject, session.StartedAt, endedAt, summary, session.Directory, chunk.createdBy)
 		}
 		for _, obs := range chunk.parsed.Observations {
 			obsProject := project
@@ -207,14 +254,14 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 			if obs.ToolName != nil {
 				toolName = *obs.ToolName
 			}
-			upsertDashboardObservation(observations, obs.SyncID, obsProject, obs.SessionID, obs.Type, obs.Title, obs.Content, topicKey, toolName, chunk.chunkID, obs.CreatedAt)
+			upsertDashboardObservation(observations, obs.SyncID, obsProject, obs.SessionID, obs.Type, obs.Title, obs.Content, topicKey, toolName, chunk.chunkID, obs.CreatedAt, chunk.createdBy)
 		}
 		for _, prompt := range chunk.parsed.Prompts {
-			upsertDashboardPrompt(prompts, prompt.SyncID, resolveProjectValue(prompt.Project, project), prompt.SessionID, prompt.Content, chunk.chunkID, prompt.CreatedAt)
+			upsertDashboardPrompt(prompts, prompt.SyncID, resolveProjectValue(prompt.Project, project), prompt.SessionID, prompt.Content, chunk.chunkID, prompt.CreatedAt, chunk.createdBy)
 		}
 
 		for _, mutation := range chunk.parsed.Mutations {
-			if err := applyDashboardMutation(project, mutation, sessions, observations, prompts); err != nil {
+			if err := applyDashboardMutation(project, mutation, sessions, observations, prompts, chunk.createdBy); err != nil {
 				return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in chunk %q: %w", strings.TrimSpace(chunk.chunkID), err)
 			}
 		}
@@ -273,7 +320,7 @@ func buildDashboardReadModelFromRows(chunks []dashboardChunkRow, mutationRows []
 			Project:    mutationRow.project,
 			OccurredAt: mutationRow.occurredAt.UTC().Format(time.RFC3339),
 		}
-		if err := applyDashboardMutation(mutationRow.project, mutation, sessions, observations, prompts); err != nil {
+		if err := applyDashboardMutation(mutationRow.project, mutation, sessions, observations, prompts, mutationRow.userEmail); err != nil {
 			return dashboardReadModel{}, fmt.Errorf("cloudstore: invalid dashboard mutation payload in cloud_mutations seq %d: %w", mutationRow.seq, err)
 		}
 	}
@@ -475,7 +522,7 @@ func resolveProjectValue(primary string, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
-func upsertDashboardSession(sessions map[dashboardEntityKey]DashboardSessionRow, sessionID, project, startedAt, endedAt, summary, directory string) {
+func upsertDashboardSession(sessions map[dashboardEntityKey]DashboardSessionRow, sessionID, project, startedAt, endedAt, summary, directory, userEmail string) {
 	key := strings.TrimSpace(sessionID)
 	if key == "" {
 		return
@@ -488,10 +535,11 @@ func upsertDashboardSession(sessions map[dashboardEntityKey]DashboardSessionRow,
 		EndedAt:   strings.TrimSpace(endedAt),
 		Summary:   strings.TrimSpace(summary),
 		Directory: strings.TrimSpace(directory),
+		UserEmail: strings.TrimSpace(userEmail),
 	}
 }
 
-func upsertDashboardObservation(observations map[dashboardEntityKey]DashboardObservationRow, syncID, project, sessionID, obsType, title, content, topicKey, toolName, chunkID, createdAt string) {
+func upsertDashboardObservation(observations map[dashboardEntityKey]DashboardObservationRow, syncID, project, sessionID, obsType, title, content, topicKey, toolName, chunkID, createdAt, userEmail string) {
 	key := strings.TrimSpace(syncID)
 	if key == "" {
 		return
@@ -508,10 +556,11 @@ func upsertDashboardObservation(observations map[dashboardEntityKey]DashboardObs
 		TopicKey:  strings.TrimSpace(topicKey),
 		ToolName:  strings.TrimSpace(toolName),
 		CreatedAt: strings.TrimSpace(createdAt),
+		UserEmail: strings.TrimSpace(userEmail),
 	}
 }
 
-func upsertDashboardPrompt(prompts map[dashboardEntityKey]DashboardPromptRow, syncID, project, sessionID, content, chunkID, createdAt string) {
+func upsertDashboardPrompt(prompts map[dashboardEntityKey]DashboardPromptRow, syncID, project, sessionID, content, chunkID, createdAt, userEmail string) {
 	key := strings.TrimSpace(syncID)
 	if key == "" {
 		return
@@ -524,6 +573,7 @@ func upsertDashboardPrompt(prompts map[dashboardEntityKey]DashboardPromptRow, sy
 		ChunkID:   strings.TrimSpace(chunkID),
 		Content:   strings.TrimSpace(content),
 		CreatedAt: strings.TrimSpace(createdAt),
+		UserEmail: strings.TrimSpace(userEmail),
 	}
 }
 
@@ -563,12 +613,16 @@ type dashboardPromptMutationPayload struct {
 	HardDelete bool    `json:"hard_delete,omitempty"`
 }
 
+// applyDashboardMutation applies a single mutation to the in-memory maps.
+// mutationUserEmail carries the cloud_mutations.user_email value (empty string for legacy rows).
+// When non-empty it WINS over the existing chunk-derived UserEmail on an observation (D2: authoritative attribution).
 func applyDashboardMutation(
 	chunkProject string,
 	mutation store.SyncMutation,
 	sessions map[dashboardEntityKey]DashboardSessionRow,
 	observations map[dashboardEntityKey]DashboardObservationRow,
 	prompts map[dashboardEntityKey]DashboardPromptRow,
+	mutationUserEmail string,
 ) error {
 	entity := strings.TrimSpace(mutation.Entity)
 	op := strings.TrimSpace(mutation.Op)
@@ -592,11 +646,13 @@ func applyDashboardMutation(
 		existingEndedAt := ""
 		existingSummary := ""
 		existingDirectory := ""
+		existingSessionUserEmail := ""
 		if existing, ok := sessions[newDashboardEntityKey(project, key)]; ok {
 			existingStartedAt = existing.StartedAt
 			existingEndedAt = existing.EndedAt
 			existingSummary = existing.Summary
 			existingDirectory = existing.Directory
+			existingSessionUserEmail = existing.UserEmail
 		}
 		resolvedStartedAt := body.StartedAt
 		if resolvedStartedAt == "" {
@@ -614,7 +670,12 @@ func applyDashboardMutation(
 		if resolvedDirectory == "" {
 			resolvedDirectory = existingDirectory
 		}
-		upsertDashboardSession(sessions, key, project, resolvedStartedAt, resolvedEndedAt, resolvedSummary, resolvedDirectory)
+		// D2: preserve-on-empty — session mutations do not carry user_email; keep chunk-derived value.
+		resolvedSessionUserEmail := mutationUserEmail
+		if resolvedSessionUserEmail == "" {
+			resolvedSessionUserEmail = existingSessionUserEmail
+		}
+		upsertDashboardSession(sessions, key, project, resolvedStartedAt, resolvedEndedAt, resolvedSummary, resolvedDirectory, resolvedSessionUserEmail)
 	case store.SyncEntityObservation:
 		var body dashboardObservationMutationPayload
 		if err := chunkcodec.DecodeSyncMutationPayload(mutation.Payload, &body); err != nil {
@@ -644,6 +705,7 @@ func applyDashboardMutation(
 		existingTopicKey := ""
 		existingToolName := ""
 		existingCreatedAt := ""
+		existingUserEmail := ""
 		if existing, ok := observations[newDashboardEntityKey(project, key)]; ok {
 			existingChunkID = existing.ChunkID
 			existingSessionID = existing.SessionID
@@ -653,6 +715,7 @@ func applyDashboardMutation(
 			existingTopicKey = existing.TopicKey
 			existingToolName = existing.ToolName
 			existingCreatedAt = existing.CreatedAt
+			existingUserEmail = existing.UserEmail
 		}
 		resolvedSessionID := body.SessionID
 		if resolvedSessionID == "" {
@@ -682,7 +745,13 @@ func applyDashboardMutation(
 		if resolvedCreatedAt == "" {
 			resolvedCreatedAt = existingCreatedAt
 		}
-		upsertDashboardObservation(observations, key, project, resolvedSessionID, resolvedType, resolvedTitle, resolvedContent, resolvedTopicKey, resolvedToolName, existingChunkID, resolvedCreatedAt)
+		// D2: cloud_mutations.user_email WINS over chunk-derived created_by (preserve-on-empty).
+		// mutationUserEmail is the authoritative per-observation attribution from cloud_mutations.
+		resolvedUserEmail := mutationUserEmail
+		if resolvedUserEmail == "" {
+			resolvedUserEmail = existingUserEmail
+		}
+		upsertDashboardObservation(observations, key, project, resolvedSessionID, resolvedType, resolvedTitle, resolvedContent, resolvedTopicKey, resolvedToolName, existingChunkID, resolvedCreatedAt, resolvedUserEmail)
 	case store.SyncEntityPrompt:
 		var body dashboardPromptMutationPayload
 		if err := chunkcodec.DecodeSyncMutationPayload(mutation.Payload, &body); err != nil {
@@ -710,11 +779,13 @@ func applyDashboardMutation(
 		existingPromptContent := ""
 		existingPromptSessionID := ""
 		existingPromptCreatedAt := ""
+		existingPromptUserEmail := ""
 		if existing, ok := prompts[newDashboardEntityKey(project, key)]; ok {
 			existingPromptChunkID = existing.ChunkID
 			existingPromptContent = existing.Content
 			existingPromptSessionID = existing.SessionID
 			existingPromptCreatedAt = existing.CreatedAt
+			existingPromptUserEmail = existing.UserEmail
 		}
 		resolvedPromptContent := body.Content
 		if resolvedPromptContent == "" {
@@ -728,7 +799,12 @@ func applyDashboardMutation(
 		if resolvedPromptCreatedAt == "" {
 			resolvedPromptCreatedAt = existingPromptCreatedAt
 		}
-		upsertDashboardPrompt(prompts, key, project, resolvedPromptSessionID, resolvedPromptContent, existingPromptChunkID, resolvedPromptCreatedAt)
+		// D2: preserve-on-empty for prompt attribution.
+		resolvedPromptUserEmail := mutationUserEmail
+		if resolvedPromptUserEmail == "" {
+			resolvedPromptUserEmail = existingPromptUserEmail
+		}
+		upsertDashboardPrompt(prompts, key, project, resolvedPromptSessionID, resolvedPromptContent, existingPromptChunkID, resolvedPromptCreatedAt, resolvedPromptUserEmail)
 	}
 	return nil
 }
@@ -1077,6 +1153,55 @@ func (cs *CloudStore) AdminOverview() (DashboardAdminOverview, error) {
 	return model.admin, nil
 }
 
+// ScopedMemberOverview returns stats tailored to the caller's ReadScope.
+//
+//   - Admin scope → returns team-wide AdminOverview (Projects/Contributors/Chunks).
+//   - Member scope → returns Observations/Sessions/Prompts counts scoped to the
+//     caller's email across ALL projects. Contributors and Chunks remain zero
+//     (chunk-level data is admin-only).
+//   - Missing identity (non-admin, empty email) → ErrDashboardIdentityRequired.
+func (cs *CloudStore) ScopedMemberOverview(scope *ReadScope) (DashboardAdminOverview, error) {
+	model, err := cs.loadDashboardReadModel()
+	if err != nil {
+		return DashboardAdminOverview{}, err
+	}
+	// Admin: return team-wide overview unchanged.
+	if scope == nil || scope.IsAdmin {
+		return model.admin, nil
+	}
+	// Member: validate identity first.
+	email := strings.ToLower(strings.TrimSpace(scope.Email))
+	if email == "" {
+		return DashboardAdminOverview{}, ErrDashboardIdentityRequired
+	}
+	// Count scoped obs/sessions/prompts across all project details.
+	var obsCount, sessCount, promptCount int
+	for _, detail := range model.projectDetails {
+		for _, o := range detail.Observations {
+			if strings.EqualFold(strings.TrimSpace(o.UserEmail), email) {
+				obsCount++
+			}
+		}
+		for _, s := range detail.Sessions {
+			if strings.EqualFold(strings.TrimSpace(s.UserEmail), email) {
+				sessCount++
+			}
+		}
+		for _, p := range detail.Prompts {
+			if strings.EqualFold(strings.TrimSpace(p.UserEmail), email) {
+				promptCount++
+			}
+		}
+	}
+	return DashboardAdminOverview{
+		Observations: obsCount,
+		Sessions:     sessCount,
+		Prompts:      promptCount,
+		// Projects, Contributors, Chunks intentionally zero for member scope —
+		// those are team-wide metrics reserved for admin views.
+	}, nil
+}
+
 type dashboardChunkRow struct {
 	chunkID   string
 	project   string
@@ -1093,6 +1218,7 @@ type dashboardMutationRow struct {
 	op         string
 	payload    []byte
 	occurredAt time.Time
+	userEmail  string // NEW (D2) — cloud_mutations.user_email; per-observation authoritative attribution
 }
 
 func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error) {
@@ -1157,7 +1283,7 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 		return nil, fmt.Errorf("cloudstore: not initialized")
 	}
 	project = strings.TrimSpace(project)
-	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at FROM cloud_mutations`
+	query := `SELECT seq, project, entity, entity_key, op, payload::text, occurred_at, COALESCE(user_email,'') FROM cloud_mutations`
 	args := []any{}
 	if project == "" && !cs.dashboardAllowedAll && len(cs.dashboardAllowedScopes) > 0 {
 		allowed := make([]string, 0, len(cs.dashboardAllowedScopes))
@@ -1191,7 +1317,7 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 	for rows.Next() {
 		var row dashboardMutationRow
 		var payloadText string
-		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payloadText, &row.occurredAt); err != nil {
+		if err := rows.Scan(&row.seq, &row.project, &row.entity, &row.entityKey, &row.op, &payloadText, &row.occurredAt, &row.userEmail); err != nil {
 			return nil, fmt.Errorf("cloudstore: dashboard scan mutation row: %w", err)
 		}
 		row.project = strings.TrimSpace(row.project)
@@ -1362,8 +1488,10 @@ func (cs *CloudStore) ListProjectsPaginated(query string, limit, offset int) ([]
 	return filtered[offset:end], total, nil
 }
 
-// ListRecentObservationsPaginated returns a page of observations.
-func (cs *CloudStore) ListRecentObservationsPaginated(project, query, obsType string, limit, offset int) ([]DashboardObservationRow, int, error) {
+// ListRecentObservationsPaginated returns a page of observations filtered by the caller's ReadScope.
+// scope must not be nil for non-admin callers; missing identity (empty email, non-admin) returns
+// ErrDashboardIdentityRequired so the handler can render a 403 deny — never an unscoped result.
+func (cs *CloudStore) ListRecentObservationsPaginated(scope *ReadScope, project, query, obsType string, limit, offset int) ([]DashboardObservationRow, int, error) {
 	normalizedProject, err := cs.normalizeDashboardProjectFilter(project)
 	if err != nil {
 		return nil, 0, err
@@ -1384,6 +1512,11 @@ func (cs *CloudStore) ListRecentObservationsPaginated(project, query, obsType st
 		}
 		rows = filtered
 	}
+	// D2: apply per-request read scope BEFORE pagination (cache stays unscoped).
+	rows, err = applyReadScope(scope, rows, func(r DashboardObservationRow) string { return r.UserEmail })
+	if err != nil {
+		return nil, 0, err
+	}
 	total := len(rows)
 	if offset > total {
 		return []DashboardObservationRow{}, total, nil
@@ -1395,8 +1528,8 @@ func (cs *CloudStore) ListRecentObservationsPaginated(project, query, obsType st
 	return rows[offset:end], total, nil
 }
 
-// ListRecentSessionsPaginated returns a page of sessions.
-func (cs *CloudStore) ListRecentSessionsPaginated(project, query string, limit, offset int) ([]DashboardSessionRow, int, error) {
+// ListRecentSessionsPaginated returns a page of sessions filtered by the caller's ReadScope.
+func (cs *CloudStore) ListRecentSessionsPaginated(scope *ReadScope, project, query string, limit, offset int) ([]DashboardSessionRow, int, error) {
 	normalizedProject, err := cs.normalizeDashboardProjectFilter(project)
 	if err != nil {
 		return nil, 0, err
@@ -1406,6 +1539,11 @@ func (cs *CloudStore) ListRecentSessionsPaginated(project, query string, limit, 
 		return nil, 0, err
 	}
 	rows := model.filterSessions(normalizedProject, query)
+	// D2: apply per-request read scope BEFORE pagination.
+	rows, err = applyReadScope(scope, rows, func(r DashboardSessionRow) string { return r.UserEmail })
+	if err != nil {
+		return nil, 0, err
+	}
 	total := len(rows)
 	if offset > total {
 		return []DashboardSessionRow{}, total, nil
@@ -1417,8 +1555,8 @@ func (cs *CloudStore) ListRecentSessionsPaginated(project, query string, limit, 
 	return rows[offset:end], total, nil
 }
 
-// ListRecentPromptsPaginated returns a page of prompts.
-func (cs *CloudStore) ListRecentPromptsPaginated(project, query string, limit, offset int) ([]DashboardPromptRow, int, error) {
+// ListRecentPromptsPaginated returns a page of prompts filtered by the caller's ReadScope.
+func (cs *CloudStore) ListRecentPromptsPaginated(scope *ReadScope, project, query string, limit, offset int) ([]DashboardPromptRow, int, error) {
 	normalizedProject, err := cs.normalizeDashboardProjectFilter(project)
 	if err != nil {
 		return nil, 0, err
@@ -1428,6 +1566,11 @@ func (cs *CloudStore) ListRecentPromptsPaginated(project, query string, limit, o
 		return nil, 0, err
 	}
 	rows := model.filterPrompts(normalizedProject, query)
+	// D2: apply per-request read scope BEFORE pagination.
+	rows, err = applyReadScope(scope, rows, func(r DashboardPromptRow) string { return r.UserEmail })
+	if err != nil {
+		return nil, 0, err
+	}
 	total := len(rows)
 	if offset > total {
 		return []DashboardPromptRow{}, total, nil
@@ -1439,8 +1582,11 @@ func (cs *CloudStore) ListRecentPromptsPaginated(project, query string, limit, o
 	return rows[offset:end], total, nil
 }
 
-// ListContributorsPaginated returns a page of contributors.
-func (cs *CloudStore) ListContributorsPaginated(query string, limit, offset int) ([]DashboardContributorRow, int, error) {
+// ListContributorsPaginated returns a page of contributors. Contributors are admin-only data
+// and not scoped per-member — the caller must gate on IsAdmin before invoking this.
+// The scope parameter is accepted for interface consistency but contributors are not filtered
+// by UserEmail (they represent chunk upload identity, always team-wide for admin use).
+func (cs *CloudStore) ListContributorsPaginated(scope *ReadScope, query string, limit, offset int) ([]DashboardContributorRow, int, error) {
 	model, err := cs.loadDashboardReadModel()
 	if err != nil {
 		return nil, 0, err
@@ -1460,7 +1606,8 @@ func (cs *CloudStore) ListContributorsPaginated(query string, limit, offset int)
 // ─── Detail Query Methods ─────────────────────────────────────────────────────
 
 // GetSessionDetail returns session detail with its observations and prompts.
-func (cs *CloudStore) GetSessionDetail(project, sessionID string) (DashboardSessionRow, []DashboardObservationRow, []DashboardPromptRow, error) {
+// scope controls whether the caller can see this session (admin → all, member → own only).
+func (cs *CloudStore) GetSessionDetail(scope *ReadScope, project, sessionID string) (DashboardSessionRow, []DashboardObservationRow, []DashboardPromptRow, error) {
 	normalizedProject, err := cs.normalizeDashboardProject(project)
 	if err != nil {
 		return DashboardSessionRow{}, nil, nil, err
@@ -1488,6 +1635,12 @@ func (cs *CloudStore) GetSessionDetail(project, sessionID string) (DashboardSess
 		// the project exists but the specific session is missing.
 		return DashboardSessionRow{}, nil, nil, fmt.Errorf("%w: session %s in project %s", ErrDashboardSessionNotFound, sessionID, normalizedProject)
 	}
+	// D2: scope check on the found session — member cannot see another user's session.
+	// Return ErrDashboardSessionNotFound (not 403) so membership in a session is not leaked.
+	scopedSessions, scopeErr := applyReadScope(scope, []DashboardSessionRow{sess}, func(r DashboardSessionRow) string { return r.UserEmail })
+	if scopeErr != nil || len(scopedSessions) == 0 {
+		return DashboardSessionRow{}, nil, nil, fmt.Errorf("%w: session %s in project %s", ErrDashboardSessionNotFound, sessionID, normalizedProject)
+	}
 	// Collect observations and prompts for this session.
 	var obs []DashboardObservationRow
 	for _, o := range detail.Observations {
@@ -1495,19 +1648,34 @@ func (cs *CloudStore) GetSessionDetail(project, sessionID string) (DashboardSess
 			obs = append(obs, o)
 		}
 	}
+	// D2: re-apply scope to related observations so a member never sees another
+	// user's observations in the session sidebar (Warning 4).
+	obs, err = applyReadScope(scope, obs, func(r DashboardObservationRow) string { return r.UserEmail })
+	if err != nil {
+		// ErrDashboardIdentityRequired on related items: return an empty slice rather
+		// than an error — the session header already passed scope; only related items
+		// are filtered out. Callers that lack identity were already denied above.
+		obs = nil
+	}
 	var prompts []DashboardPromptRow
 	for _, p := range detail.Prompts {
 		if p.SessionID == sessionID {
 			prompts = append(prompts, p)
 		}
 	}
+	// D2: re-apply scope to related prompts (Warning 4).
+	prompts, err = applyReadScope(scope, prompts, func(r DashboardPromptRow) string { return r.UserEmail })
+	if err != nil {
+		prompts = nil
+	}
 	return sess, obs, prompts, nil
 }
 
 // GetObservationDetail returns an observation with its parent session and related observations.
 // The third parameter is syncID — the unique per-observation identifier (map key).
-// Using syncID (not chunkID) is the correct lookup since one chunk can contain multiple observations.
-func (cs *CloudStore) GetObservationDetail(project, sessionID, syncID string) (DashboardObservationRow, DashboardSessionRow, []DashboardObservationRow, error) {
+// scope controls visibility: member callers see only their own observation; missing identity → deny.
+// Returns ErrDashboardObservationNotFound (not 403) so existence is not leaked to member callers.
+func (cs *CloudStore) GetObservationDetail(scope *ReadScope, project, sessionID, syncID string) (DashboardObservationRow, DashboardSessionRow, []DashboardObservationRow, error) {
 	normalizedProject, err := cs.normalizeDashboardProject(project)
 	if err != nil {
 		return DashboardObservationRow{}, DashboardSessionRow{}, nil, err
@@ -1535,6 +1703,12 @@ func (cs *CloudStore) GetObservationDetail(project, sessionID, syncID string) (D
 		// R5-4: return ErrDashboardObservationNotFound when the project exists but the observation is missing.
 		return DashboardObservationRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: observation %s/%s in project %s", ErrDashboardObservationNotFound, sessionID, syncID, normalizedProject)
 	}
+	// D2: scope check — member cannot see another user's observation.
+	// Return ErrDashboardObservationNotFound (not 403) so existence is not leaked.
+	scopedObs, scopeErr := applyReadScope(scope, []DashboardObservationRow{obs}, func(r DashboardObservationRow) string { return r.UserEmail })
+	if scopeErr != nil || len(scopedObs) == 0 {
+		return DashboardObservationRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: observation %s/%s in project %s", ErrDashboardObservationNotFound, sessionID, syncID, normalizedProject)
+	}
 	var sess DashboardSessionRow
 	for _, s := range detail.Sessions {
 		if s.SessionID == sessionID {
@@ -1548,12 +1722,19 @@ func (cs *CloudStore) GetObservationDetail(project, sessionID, syncID string) (D
 			related = append(related, o)
 		}
 	}
+	// D2: re-apply scope to related observations so a member never sees another
+	// user's sibling observations in the detail sidebar (Warning 4).
+	related, err = applyReadScope(scope, related, func(r DashboardObservationRow) string { return r.UserEmail })
+	if err != nil {
+		related = nil
+	}
 	return obs, sess, related, nil
 }
 
 // GetPromptDetail returns a prompt with its parent session and related prompts.
 // The third parameter is syncID — the unique per-prompt identifier (map key).
-func (cs *CloudStore) GetPromptDetail(project, sessionID, syncID string) (DashboardPromptRow, DashboardSessionRow, []DashboardPromptRow, error) {
+// scope controls visibility: member callers see only their own prompts; missing identity → deny.
+func (cs *CloudStore) GetPromptDetail(scope *ReadScope, project, sessionID, syncID string) (DashboardPromptRow, DashboardSessionRow, []DashboardPromptRow, error) {
 	normalizedProject, err := cs.normalizeDashboardProject(project)
 	if err != nil {
 		return DashboardPromptRow{}, DashboardSessionRow{}, nil, err
@@ -1581,6 +1762,12 @@ func (cs *CloudStore) GetPromptDetail(project, sessionID, syncID string) (Dashbo
 		// R5-4: return ErrDashboardPromptNotFound when the project exists but the prompt is missing.
 		return DashboardPromptRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: prompt %s/%s in project %s", ErrDashboardPromptNotFound, sessionID, syncID, normalizedProject)
 	}
+	// D2: scope check — member cannot see another user's prompt.
+	// Return ErrDashboardPromptNotFound (not 403) so existence is not leaked.
+	scopedPrompts, scopeErr := applyReadScope(scope, []DashboardPromptRow{prompt}, func(r DashboardPromptRow) string { return r.UserEmail })
+	if scopeErr != nil || len(scopedPrompts) == 0 {
+		return DashboardPromptRow{}, DashboardSessionRow{}, nil, fmt.Errorf("%w: prompt %s/%s in project %s", ErrDashboardPromptNotFound, sessionID, syncID, normalizedProject)
+	}
 	var sess DashboardSessionRow
 	for _, s := range detail.Sessions {
 		if s.SessionID == sessionID {
@@ -1593,6 +1780,12 @@ func (cs *CloudStore) GetPromptDetail(project, sessionID, syncID string) (Dashbo
 		if p.SessionID == sessionID && p.SyncID != syncID {
 			related = append(related, p)
 		}
+	}
+	// D2: re-apply scope to related prompts so a member never sees another
+	// user's sibling prompts in the detail sidebar (Warning 4).
+	related, err = applyReadScope(scope, related, func(r DashboardPromptRow) string { return r.UserEmail })
+	if err != nil {
+		related = nil
 	}
 	return prompt, sess, related, nil
 }

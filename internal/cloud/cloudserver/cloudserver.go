@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -255,6 +256,18 @@ func (s *CloudServer) routes() {
 			}
 			return "OPERATOR"
 		},
+		// GetUserEmail: returns the verified JWT email claim. Returns "" for static
+		// admin token sessions (no JWT = no per-user scoping = treated as admin).
+		// The email is derived from the verified JWT, NEVER from a request parameter.
+		GetUserEmail: func(r *http.Request) string {
+			if claims, ok := s.dashboardPrincipal(r); ok {
+				return strings.ToLower(strings.TrimSpace(claims.Email))
+			}
+			return ""
+		},
+		// BrainURL: set from ENGRAM_BRAIN_URL env var. When non-empty, the Graph tab renders
+		// an iframe pointing to the Brain service. When empty, a placeholder is shown. (D3)
+		BrainURL:          os.Getenv("ENGRAM_BRAIN_URL"),
 		Store:             dashboardStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,

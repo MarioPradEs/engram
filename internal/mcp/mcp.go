@@ -1301,6 +1301,15 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		}
 		tags := buildTagsFromArgs(req.GetArguments(), gamesVocab)
 
+		// Determine whether to emit a soft tagging hint in the response.
+		// The hint fires when: (a) the instance has games configured, AND
+		// (b) the caller did NOT provide a non-empty juego arg.
+		// It is INFORMATIONAL only — it never blocks or fails the save.
+		juegoArg, _ := req.GetArguments()["juego"].(string)
+		emitTaggingHint := cfg.ClassRules != nil &&
+			len(cfg.ClassRules.Games) > 0 &&
+			juegoArg == ""
+
 		savedID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      typ,
@@ -1401,6 +1410,13 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
 		} else {
 			extra["judgment_required"] = false
+		}
+
+		// Soft tagging hint (informational, non-blocking).
+		// Emitted when games are configured but the caller omitted juego,
+		// so the AI is nudged to include it on future saves.
+		if emitTaggingHint {
+			extra["tagging_hint"] = "juego was not set; include it on game-related memories (pick from the configured games list)"
 		}
 
 		// Update detRes to reflect normalized project for envelope accuracy

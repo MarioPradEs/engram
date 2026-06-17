@@ -164,6 +164,15 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 
 **Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
+### mem_save ARGUMENTS
+- title: short, searchable verb + what
+- type: bugfix | decision | architecture | discovery | pattern | config | preference
+- scope: project (default) | personal
+- topic_key: stable key for evolving topics (recommended)
+- content: **What** / **Why** / **Where** / **Learned** structure
+- juego: pick EXACTLY ONE game from the operator's configured list, or omit if no clear match. NEVER invent a name not in the list. (Only applies when the instance has a games vocabulary configured; omit otherwise.)
+- tipo: infer the content type (e.g. bug, decision, hallazgo, solucion). Free inference; omit if unclear.
+
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
 - Starting work on something that might have been done before

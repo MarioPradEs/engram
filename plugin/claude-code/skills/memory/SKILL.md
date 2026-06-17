@@ -62,6 +62,8 @@ Format for `mem_save`:
 - **type**: bugfix | decision | architecture | discovery | pattern | config | preference
 - **scope**: `project` (default) | `personal`
 - **topic_key** (optional but recommended for evolving topics): stable key like `architecture/auth-model`
+- **juego**: pick EXACTLY ONE game from the operator's configured list, or omit if no clear match. NEVER invent a name not in the list. (Only applies when the instance has a games vocabulary configured; omit otherwise.)
+- **tipo**: infer the content type (e.g. bug, decision, hallazgo, solucion). Free inference; omit if unclear.
 - **content**:
   **What**: One sentence — what was done
   **Why**: What motivated it (user request, bug, performance, etc.)

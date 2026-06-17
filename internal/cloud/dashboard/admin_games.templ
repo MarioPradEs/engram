@@ -1,0 +1,90 @@
+package dashboard
+
+import "strings"
+
+// AdminGamesPage renders the admin games-editing page.
+// Admin-only — caller must verify p.IsAdmin() before rendering.
+//
+// games is the current list from the cloud server's in-memory ClassrulesLoader.
+// flashMessage is a non-empty success or error message to display after a write.
+// flashIsError is true when flashMessage describes an error (shown in red).
+//
+// Open-item notice: MCP clients pick up games changes on their next reconnect
+// (restart of `engram mcp`). The cloud server cannot push into running client
+// processes. Per-dev propagation (hook-pull) is a follow-up slice (S4).
+templ AdminGamesPage(games []string, flashMessage string, flashIsError bool) {
+	<section class="frame-section">
+		<p class="section-kicker">ADMIN</p>
+		<h2>Games Vocabulary</h2>
+		<p class="section-description">
+			Edit the canonical games list used for memory tagging.
+			Changes are written atomically to <code>classification-rules.yaml</code>
+			and take effect in the cloud server immediately.
+		</p>
+		<div class="open-item-notice">
+			<strong>Note:</strong> Running <code>engram mcp</code> client processes pick up changes
+			on their next reconnect/restart — the cloud server cannot push into running client
+			processes. Per-dev propagation is a follow-up feature (S4, hook-pull).
+		</div>
+		if flashMessage != "" {
+			if flashIsError {
+				<div class="flash-message flash-error">{ flashMessage }</div>
+			} else {
+				<div class="flash-message flash-success">{ flashMessage }</div>
+			}
+		}
+		<div class="games-edit-section">
+			<h3>Current Games ({ formatCount(len(games)) })</h3>
+			<form method="POST" action="/dashboard/admin/games">
+				<div class="form-group">
+					<label for="games-textarea">
+						Games list (one per line):
+					</label>
+					<textarea
+						id="games-textarea"
+						name="games"
+						rows="20"
+						cols="60"
+						placeholder="Enter one game slug per line&#10;e.g. my-game-title"
+					>{ strings.Join(games, "\n") }</textarea>
+				</div>
+				<div class="form-actions">
+					<button type="submit" class="btn-primary">Save Games</button>
+					<a href="/dashboard/admin/games" class="btn-secondary">Reset</a>
+				</div>
+			</form>
+		</div>
+	</section>
+}
+
+// formatCount returns a human-readable count string.
+func formatCount(n int) string {
+	if n == 0 {
+		return "none"
+	}
+	if n == 1 {
+		return "1 game"
+	}
+	return strings.Join([]string{intToStr(n), "games"}, " ")
+}
+
+// intToStr converts an int to its decimal string representation.
+// Using a manual approach to avoid importing strconv in the templ file.
+func intToStr(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	buf := make([]byte, 0, 10)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		buf = append([]byte{byte('0' + n%10)}, buf...)
+		n /= 10
+	}
+	if neg {
+		buf = append([]byte{'-'}, buf...)
+	}
+	return string(buf)
+}

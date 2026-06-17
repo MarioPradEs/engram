@@ -69,7 +69,17 @@ type MountConfig struct {
 	// UsersFilePath is the absolute path to users.yaml inside the container.
 	// Required for atomic write + local git commit in admin member-management handlers (D4).
 	UsersFilePath string
-	Store         DashboardStore
+	// ListGames returns the current games vocabulary from the cloud's in-memory
+	// ClassrulesLoader. Used by the admin games-editing UI to display the current list.
+	// Returns nil when ENGRAM_CLASSIFICATION_RULES is not configured. (D6)
+	ListGames func() []string
+	// ClassrulesReload triggers an in-process reload of the cloud's classrules Config
+	// after a successful atomic write to classification-rules.yaml. Non-fatal on failure. (D6)
+	ClassrulesReload func() error
+	// ClassrulesFilePath is the absolute path to classification-rules.yaml inside the
+	// container. Required for atomic write + local git commit in admin games handlers (D6).
+	ClassrulesFilePath string
+	Store              DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
 }
@@ -200,6 +210,12 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/admin/deletion-requests", h.requireSession(h.handleAdminDeletionRequests))
 	mux.HandleFunc("POST /dashboard/admin/deletion-requests/accept", h.requireSession(h.handleAdminDeletionRequestAccept))
 	mux.HandleFunc("POST /dashboard/admin/deletion-requests/reject", h.requireSession(h.handleAdminDeletionRequestReject))
+
+	// D6: Admin games-editing routes — admin-gated.
+	// GET  /dashboard/admin/games  → show current games list + edit form.
+	// POST /dashboard/admin/games  → apply games update (validate → atomic write → reload).
+	mux.HandleFunc("GET /dashboard/admin/games", h.requireSession(h.handleAdminGames))
+	mux.HandleFunc("POST /dashboard/admin/games", h.requireSession(h.handleAdminGamesPost))
 }
 
 func Handler() http.Handler {

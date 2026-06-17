@@ -16,6 +16,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/cloud"
 	"github.com/Gentleman-Programming/engram/internal/cloud/auth"
+	"github.com/Gentleman-Programming/engram/internal/cloud/classrules"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudserver"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
@@ -136,11 +137,35 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			return nil, fmt.Errorf("newCloudRuntime: configure header authenticator: %w", err)
 		}
 		// SIGHUP → reload user directory so operator changes take effect without restart.
+		// D6: also reload classrules when configured (fan-out, each reload is independent).
+		classrulesFile := strings.TrimSpace(cfg.ClassrulesFile)
+		var classrulesLoader *classrules.ClassrulesLoader
+		if classrulesFile != "" {
+			cl, clErr := classrules.NewClassrulesLoader(classrulesFile)
+			if clErr != nil {
+				_ = cs.Close()
+				return nil, fmt.Errorf("newCloudRuntime: load classrules file %q: %w", classrulesFile, clErr)
+			}
+			classrulesLoader = cl
+			log.Printf("[engram-cloud] classrules loaded from %s (%d games)", classrulesFile, func() int {
+				if cfg := cl.Current(); cfg != nil {
+					return len(cfg.Games)
+				}
+				return 0
+			}())
+		}
 		runtime.onSIGHUP = func() {
 			if err := loader.Reload(); err != nil {
 				log.Printf("[engram-cloud] users.Reload: %v (retaining last-good directory)", err)
 			} else {
 				log.Printf("[engram-cloud] user directory reloaded from %s", usersFile)
+			}
+			if classrulesLoader != nil {
+				if err := classrulesLoader.Reload(); err != nil {
+					log.Printf("[engram-cloud] classrules.Reload: %v (retaining last-good config)", err)
+				} else {
+					log.Printf("[engram-cloud] classrules reloaded from %s", classrulesFile)
+				}
 			}
 		}
 		jwtSecret := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
@@ -161,6 +186,31 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithUserDirectoryReload(loader.Reload),
 			// D4: set usersFilePath so admin handlers can write + git-commit users.yaml.
 			cloudserver.WithUsersFilePath(usersFile),
+			// D6: wire ClassrulesLoader.Reload so admin games writes update the in-memory
+			// config without a process restart. Only wired when ENGRAM_CLASSIFICATION_RULES
+			// is set and the loader was successfully initialised.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					return cloudserver.WithClassrulesReload(classrulesLoader.Reload)
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// D6: wire ClassrulesLoader.Current().Games as the live games getter for the admin UI.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader // capture
+					return cloudserver.WithClassrulesCurrentGames(func() []string {
+						cfg := cl.Current()
+						if cfg == nil {
+							return nil
+						}
+						return cfg.Games
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// D6: set classrulesFilePath so admin games handlers know where to write.
+			cloudserver.WithClassrulesFilePath(classrulesFile),
 		)
 		return runtime, nil
 	}

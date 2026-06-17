@@ -75,6 +75,15 @@ type CloudServer struct {
 	// usersFilePath is the absolute path to users.yaml inside the container. Used by
 	// admin member-management handlers for atomic write + git commit (D4).
 	usersFilePath string
+	// classrulesReloadFn is called by admin games write handlers to reload the
+	// cloud server's in-memory classrules Config after a successful write (D6).
+	classrulesReloadFn func() error
+	// classrulesCurrentGamesFn returns the current in-memory games list from the
+	// ClassrulesLoader. Used by admin games UI to display the live list. (D6)
+	classrulesCurrentGamesFn func() []string
+	// classrulesFilePath is the absolute path to classification-rules.yaml inside the
+	// container. Used by admin games handlers for atomic write + local git commit (D6).
+	classrulesFilePath string
 }
 
 const defaultHost = "127.0.0.1"
@@ -132,6 +141,34 @@ func WithUserDirectoryReload(fn func() error) Option {
 func WithUsersFilePath(path string) Option {
 	return func(s *CloudServer) {
 		s.usersFilePath = path
+	}
+}
+
+// WithClassrulesReload registers a callback that admin games write handlers call after a
+// successful atomic write to classification-rules.yaml. The callback should invoke
+// ClassrulesLoader.Reload() so the cloud server's in-memory Config is updated without a
+// process restart (D6: in-process reload via onSIGHUP fan-out callback).
+func WithClassrulesReload(fn func() error) Option {
+	return func(s *CloudServer) {
+		s.classrulesReloadFn = fn
+	}
+}
+
+// WithClassrulesFilePath sets the absolute path to classification-rules.yaml used by
+// admin games handlers for atomic write and local git commit (D6). In production this
+// is sourced from ENGRAM_CLASSIFICATION_RULES; tests inject it directly.
+func WithClassrulesFilePath(path string) Option {
+	return func(s *CloudServer) {
+		s.classrulesFilePath = path
+	}
+}
+
+// WithClassrulesCurrentGames registers a closure that returns the current in-memory
+// games vocabulary from the ClassrulesLoader. The admin games UI calls this to
+// display the live list. nil means classrules is not configured. (D6)
+func WithClassrulesCurrentGames(fn func() []string) Option {
+	return func(s *CloudServer) {
+		s.classrulesCurrentGamesFn = fn
 	}
 }
 
@@ -293,6 +330,10 @@ func (s *CloudServer) routes() {
 		// BrainURL: set from ENGRAM_BRAIN_URL env var. When non-empty, the Graph tab renders
 		// an iframe pointing to the Brain service. When empty, a placeholder is shown. (D3)
 		BrainURL: os.Getenv("ENGRAM_BRAIN_URL"),
+		// D6: wire classrules fields for admin games-editing handlers.
+		ListGames:          s.listGamesFunc(),
+		ClassrulesReload:   s.classrulesReloadFn,
+		ClassrulesFilePath: s.resolveClassrulesFilePath(),
 		// D4: ListProvisionedUsers — closure that sources the admin member list from
 		// users.yaml (YAMLLoader.List) rather than cloud_chunks contributors. Only
 		// wired when the authLoader implements the listableUserDirectory interface

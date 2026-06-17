@@ -69,6 +69,12 @@ type CloudServer struct {
 	// /auth endpoint fields (set by WithAuthEndpoint option).
 	authLoader    AuthUserLoader // user directory for /auth principal resolution
 	authJWTSecret string         // ENGRAM_JWT_SECRET for minting JWTs in /auth
+	// userReloadFn is called by admin member-management write handlers to reload
+	// the in-memory user directory after a successful users.yaml write. (D4)
+	userReloadFn func() error
+	// usersFilePath is the absolute path to users.yaml inside the container. Used by
+	// admin member-management handlers for atomic write + git commit (D4).
+	usersFilePath string
 }
 
 const defaultHost = "127.0.0.1"
@@ -107,6 +113,25 @@ func WithMaxPushBodyBytes(limit int64) Option {
 		if limit > 0 {
 			s.maxPushBodyBytes = limit
 		}
+	}
+}
+
+// WithUserDirectoryReload registers a callback that the admin member-management
+// handlers call after a successful atomic write to users.yaml. The callback
+// should invoke YAMLLoader.Reload() so the in-memory directory is updated
+// without a process restart (D4: in-process reload via existing reload hook).
+func WithUserDirectoryReload(fn func() error) Option {
+	return func(s *CloudServer) {
+		s.userReloadFn = fn
+	}
+}
+
+// WithUsersFilePath sets the absolute path to users.yaml used by admin member-management
+// handlers for atomic write and local git commit (D4). In production this is sourced
+// from ENGRAM_USERS_FILE; tests inject it directly.
+func WithUsersFilePath(path string) Option {
+	return func(s *CloudServer) {
+		s.usersFilePath = path
 	}
 }
 
@@ -267,7 +292,17 @@ func (s *CloudServer) routes() {
 		},
 		// BrainURL: set from ENGRAM_BRAIN_URL env var. When non-empty, the Graph tab renders
 		// an iframe pointing to the Brain service. When empty, a placeholder is shown. (D3)
-		BrainURL:          os.Getenv("ENGRAM_BRAIN_URL"),
+		BrainURL: os.Getenv("ENGRAM_BRAIN_URL"),
+		// D4: ListProvisionedUsers — closure that sources the admin member list from
+		// users.yaml (YAMLLoader.List) rather than cloud_chunks contributors. Only
+		// wired when the authLoader implements the listableUserDirectory interface
+		// (i.e. when ENGRAM_USERS_FILE is set and a YAMLLoader was constructed).
+		ListProvisionedUsers: s.listProvisionedUsersFunc(),
+		// D4: UserReload — invoke YAMLLoader.Reload after a successful write to users.yaml.
+		UserReload: s.userReloadFn,
+		// D4: UsersFilePath — absolute path to users.yaml inside the container.
+		// Set via WithUsersFilePath option (default: ENGRAM_USERS_FILE env var).
+		UsersFilePath:     s.resolveUsersFilePath(),
 		Store:             dashboardStore,
 		MaxLoginBodyBytes: maxDashboardLoginBodyBytes,
 		StatusProvider:    s.syncStatus,

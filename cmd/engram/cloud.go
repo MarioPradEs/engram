@@ -156,6 +156,11 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
 			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
 			cloudserver.WithAuthEndpoint(loader, jwtSecret),
+			// D4: wire YAMLLoader.Reload as the user-directory reload callback so
+			// admin member-management writes take effect in-process without restart.
+			cloudserver.WithUserDirectoryReload(loader.Reload),
+			// D4: set usersFilePath so admin handlers can write + git-commit users.yaml.
+			cloudserver.WithUsersFilePath(usersFile),
 		)
 		return runtime, nil
 	}

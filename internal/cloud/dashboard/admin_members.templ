@@ -1,0 +1,117 @@
+package dashboard
+
+// AdminMembersPage renders the admin member-management page shell.
+// The member list is rendered inline (not via HTMX) for simplicity.
+// Admin-only — caller must verify p.IsAdmin() before rendering.
+templ AdminMembersPage(members []ProvisionedUser, flashMessage string) {
+	<section class="frame-section">
+		<p class="section-kicker">ADMIN</p>
+		<h2>Member Management</h2>
+		if flashMessage != "" {
+			<div class="flash-message">{ flashMessage }</div>
+		}
+		<div class="member-actions">
+			<h3>Add Member</h3>
+			<form method="POST" action="/dashboard/admin/members/add">
+				<div class="form-row">
+					<label>Email <input type="email" name="email" placeholder="user@vivastudios.com" required/></label>
+					<label>Name <input type="text" name="name" placeholder="Full Name"/></label>
+					<label>
+						Department
+						<select name="department">
+							<option value="ceo">ceo</option>
+							<option value="dev">dev</option>
+							<option value="art">art</option>
+							<option value="qa">qa</option>
+							<option value="analytics">analytics</option>
+							<option value="marketing">marketing</option>
+						</select>
+					</label>
+					<label>
+						Role
+						<select name="role">
+							<option value="member">member</option>
+							<option value="admin">admin</option>
+						</select>
+					</label>
+					<label>
+						Status
+						<select name="status">
+							<option value="active">active</option>
+							<option value="offboarding">offboarding</option>
+							<option value="removed">removed</option>
+						</select>
+					</label>
+					<button type="submit">Add</button>
+				</div>
+			</form>
+		</div>
+		<div class="member-list">
+			<h3>Provisioned Members</h3>
+			if len(members) == 0 {
+				<p>No provisioned users found.</p>
+			} else {
+				<table class="data-table">
+					<thead>
+						<tr>
+							<th>Email</th>
+							<th>Name</th>
+							<th>Department</th>
+							<th>Role</th>
+							<th>Status</th>
+							<th>Actions</th>
+						</tr>
+					</thead>
+					<tbody>
+						for _, m := range members {
+							<tr>
+								<td>{ m.Email }</td>
+								<td>{ m.Name }</td>
+								<td>{ m.Department }</td>
+								<td>{ m.Role }</td>
+								<td>{ m.Status }</td>
+								<td>
+									<form method="POST" action="/dashboard/admin/members/edit" style="display:inline">
+										<input type="hidden" name="email" value={ m.Email }/>
+										<label>
+											Role
+											<select name="role">
+												<option value="admin" selected?={ m.Role == "admin" }>admin</option>
+												<option value="member" selected?={ m.Role == "member" }>member</option>
+											</select>
+										</label>
+										<label>
+											Dept
+											<select name="department">
+												<option value="ceo" selected?={ m.Department == "ceo" }>ceo</option>
+												<option value="dev" selected?={ m.Department == "dev" }>dev</option>
+												<option value="art" selected?={ m.Department == "art" }>art</option>
+												<option value="qa" selected?={ m.Department == "qa" }>qa</option>
+												<option value="analytics" selected?={ m.Department == "analytics" }>analytics</option>
+												<option value="marketing" selected?={ m.Department == "marketing" }>marketing</option>
+											</select>
+										</label>
+										<label>
+											Status
+											<select name="status">
+												<option value="active" selected?={ m.Status == "active" }>active</option>
+												<option value="offboarding" selected?={ m.Status == "offboarding" }>offboarding</option>
+												<option value="removed" selected?={ m.Status == "removed" }>removed</option>
+											</select>
+										</label>
+										<button type="submit">Edit</button>
+									</form>
+									<form method="POST" action="/dashboard/admin/members/deactivate" style="display:inline">
+										<input type="hidden" name="email" value={ m.Email }/>
+										<input type="hidden" name="status" value="removed"/>
+										<button type="submit" onclick="return confirm('Deactivate this member?')">Deactivate</button>
+									</form>
+								</td>
+							</tr>
+						}
+					</tbody>
+				</table>
+			}
+		</div>
+	</section>
+}

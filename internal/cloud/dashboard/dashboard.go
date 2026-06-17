@@ -115,6 +115,17 @@ type DashboardStore interface {
 
 	// Audit log (REQ-409).
 	ListAuditEntriesPaginated(ctx context.Context, filter cloudstore.AuditFilter, limit, offset int) ([]cloudstore.DashboardAuditRow, int, error)
+
+	// D5: Per-observation deletion requests.
+	// Members submit requests; admins review, accept, or reject them.
+	// Accept hard-deletes exactly the targeted observation via the mutation journal.
+	CreateDeletionRequest(ctx context.Context, req cloudstore.DeletionRequest) (int64, error)
+	GetDeletionRequest(ctx context.Context, id int64) (cloudstore.StoredDeletionRequest, error)
+	ListPendingDeletionRequests(ctx context.Context) ([]cloudstore.StoredDeletionRequest, error)
+	ListDeletionRequestsForRequester(ctx context.Context, email string) ([]cloudstore.StoredDeletionRequest, error)
+	AcceptDeletionRequest(ctx context.Context, id int64, adminEmail string) error
+	RejectDeletionRequest(ctx context.Context, id int64, adminEmail string) error
+	PendingDeletionRequestCount(ctx context.Context) (int, error)
 }
 
 type handlers struct {
@@ -180,6 +191,15 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("POST /dashboard/admin/members/add", h.requireSession(h.handleAdminMembersAdd))
 	mux.HandleFunc("POST /dashboard/admin/members/edit", h.requireSession(h.handleAdminMembersEdit))
 	mux.HandleFunc("POST /dashboard/admin/members/deactivate", h.requireSession(h.handleAdminMembersDeactivate))
+
+	// D5: Per-observation deletion-request routes.
+	// Member route: POST request-removal (member-only — admin gets 403).
+	// Admin routes: review page (GET) + accept/reject actions (POST, admin-only).
+	// Guiding principle: hard deletion is the RARE EXCEPTION — not the normal path.
+	mux.HandleFunc("POST /dashboard/browser/observations/{syncID}/request-removal", h.requireSession(h.handleRequestRemoval))
+	mux.HandleFunc("GET /dashboard/admin/deletion-requests", h.requireSession(h.handleAdminDeletionRequests))
+	mux.HandleFunc("POST /dashboard/admin/deletion-requests/accept", h.requireSession(h.handleAdminDeletionRequestAccept))
+	mux.HandleFunc("POST /dashboard/admin/deletion-requests/reject", h.requireSession(h.handleAdminDeletionRequestReject))
 }
 
 func Handler() http.Handler {

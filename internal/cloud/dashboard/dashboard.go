@@ -59,7 +59,17 @@ type MountConfig struct {
 	// BrainURL is the base URL of the Engram Brain service rendered in the Graph tab iframe.
 	// When empty, the Graph tab shows a "Graph coming soon" placeholder. Set from ENGRAM_BRAIN_URL env. (D3)
 	BrainURL string
-	Store    DashboardStore
+	// ListProvisionedUsers returns the current snapshot of provisioned users from users.yaml.
+	// Used by admin member-management routes to source the member list (D4).
+	// nil when users.yaml is not configured (e.g. legacy bearer-token deployments).
+	ListProvisionedUsers func() []ProvisionedUser
+	// UserReload triggers an in-process reload of the user directory after an atomic write to users.yaml.
+	// Non-fatal on failure — the write has already succeeded; reload errors are logged by the handler.
+	UserReload func() error
+	// UsersFilePath is the absolute path to users.yaml inside the container.
+	// Required for atomic write + local git commit in admin member-management handlers (D4).
+	UsersFilePath string
+	Store         DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
 }
@@ -163,6 +173,13 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	// Audit log routes — admin-gated (REQ-408, REQ-409).
 	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireSession(h.handleAdminAuditLog))
 	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireSession(h.handleAdminAuditLogList))
+
+	// D4: Admin member-management routes — admin-gated.
+	// Source: users.yaml (ListProvisionedUsers), not cloud_chunks contributors.
+	mux.HandleFunc("GET /dashboard/admin/members", h.requireSession(h.handleAdminMembers))
+	mux.HandleFunc("POST /dashboard/admin/members/add", h.requireSession(h.handleAdminMembersAdd))
+	mux.HandleFunc("POST /dashboard/admin/members/edit", h.requireSession(h.handleAdminMembersEdit))
+	mux.HandleFunc("POST /dashboard/admin/members/deactivate", h.requireSession(h.handleAdminMembersDeactivate))
 }
 
 func Handler() http.Handler {

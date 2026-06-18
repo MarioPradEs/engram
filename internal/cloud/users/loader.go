@@ -123,6 +123,19 @@ func (l *YAMLLoader) SoleAdmin() (Principal, bool) {
 	return Principal{}, false
 }
 
+// List returns a snapshot of all currently loaded principals as a slice.
+// The slice is a copy — callers may iterate it without holding a lock.
+// The order of entries is unspecified (map-based iteration).
+func (l *YAMLLoader) List() []Principal {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]Principal, 0, len(l.current))
+	for _, p := range l.current {
+		out = append(out, p)
+	}
+	return out
+}
+
 // Reload re-reads and validates the YAML file. On success the directory is
 // atomically replaced. On failure the last valid directory is retained and the
 // error is returned.

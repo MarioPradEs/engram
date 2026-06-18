@@ -21,6 +21,11 @@ type Config struct {
 	// X-Forwarded-Email is resolved against the user directory.
 	// SIGHUP triggers a reload of the user directory at runtime.
 	UsersFile string
+	// ClassrulesFile is the path to classification-rules.yaml.
+	// When non-empty, the cloud server loads its own in-memory *classrules.Config
+	// from this file so the admin games-editing UI can read and write the vocabulary.
+	// SIGHUP triggers a reload alongside the users reload. (D6)
+	ClassrulesFile string
 }
 
 const DefaultJWTSecret = "engram-dev-jwt-secret-for-local-smoke-1234"
@@ -68,6 +73,9 @@ func ConfigFromEnv() Config {
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_USERS_FILE")); v != "" {
 		cfg.UsersFile = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLASSIFICATION_RULES")); v != "" {
+		cfg.ClassrulesFile = v
 	}
 	if v := strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_ALLOWED_PROJECTS")); v != "" {
 		parts := strings.Split(v, ",")

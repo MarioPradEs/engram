@@ -224,9 +224,16 @@ func TestScopingSC1_MemberSeesOnlyOwnObservations(t *testing.T) {
 	}
 }
 
-// TestScopingSC2_AdminSeesAllObservations (SC2) asserts that an admin session
-// returns observations from all users without filtering.
-func TestScopingSC2_AdminSeesAllObservations(t *testing.T) {
+// TestScopingSC2_AdminBrowserSeesOnlyOwnObservations (SC2) asserts that an admin session
+// on the Browser tab returns ONLY the admin's own observations — not all observations.
+// S6 decision: "por la web solo podrá ver lo suyo propio; solo la IA accede a todo."
+// The Browser tab enforces own-scope for everyone (including admins). The Contributors
+// tab (admin-only) provides the global view across all users.
+//
+// The admin under test is mario@vivastudios.com. The seed data has observations owned by
+// member@vivastudios.com and admin@vivastudios.com — neither of which is mario — so the
+// Browser response must be empty (empty state, 200 OK).
+func TestScopingSC2_AdminBrowserSeesOnlyOwnObservations(t *testing.T) {
 	t.Parallel()
 	jwtSecret := strings.Repeat("a", 32)
 	srv := buildScopingServer(t, jwtSecret)
@@ -242,11 +249,17 @@ func TestScopingSC2_AdminSeesAllObservations(t *testing.T) {
 		t.Fatalf("SC2: expected 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Member observation") {
-		t.Errorf("SC2: expected 'Member observation' visible to admin, got body=%q", body)
+	// S6: Browser is own-scoped for everyone. mario@vivastudios.com has no seeded
+	// observations, so the browser must return an empty state — NOT member or admin data.
+	if strings.Contains(body, "Member observation") {
+		t.Errorf("SC2: 'Member observation' must NOT appear in admin's own-scoped Browser — S6 scope enforcement failure")
 	}
-	if !strings.Contains(body, "Admin observation") {
-		t.Errorf("SC2: expected 'Admin observation' visible to admin, got body=%q", body)
+	if strings.Contains(body, "Admin observation") {
+		t.Errorf("SC2: 'Admin observation' must NOT appear in mario's own-scoped Browser (it belongs to admin@vivastudios.com, not mario) — S6 scope enforcement failure")
+	}
+	// Empty state is the correct outcome when the admin has no own observations.
+	if !strings.Contains(body, "No Observations") && !strings.Contains(body, "NO SIGNAL YET") {
+		t.Logf("SC2: browser returned non-empty state for admin with no own observations, body=%q (acceptable if observations exist for mario)", body)
 	}
 }
 

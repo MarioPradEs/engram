@@ -158,8 +158,10 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 
 	mux.HandleFunc("GET /dashboard", h.requireSession(h.handleDashboardHome))
 	mux.HandleFunc("GET /dashboard/", h.requireSession(h.handleDashboardHome))
-	// D3: Graph tab — iframe to Brain when ENGRAM_BRAIN_URL is set; placeholder otherwise.
-	mux.HandleFunc("GET /dashboard/graph", h.requireSession(h.handleGraph))
+	// S6: Brain tab — iframe to Brain when ENGRAM_BRAIN_URL is set; placeholder otherwise.
+	// /dashboard/graph is kept as a permanent redirect to avoid broken bookmarks.
+	mux.HandleFunc("GET /dashboard/brain", h.requireSession(h.handleBrain))
+	mux.HandleFunc("GET /dashboard/graph", h.requireSession(h.handleGraphRedirect))
 	mux.HandleFunc("GET /dashboard/stats", h.requireSession(h.handleDashboardStats))
 	mux.HandleFunc("GET /dashboard/activity", h.requireSession(h.handleDashboardActivity))
 	mux.HandleFunc("GET /dashboard/browser", h.requireSession(h.handleBrowser))
@@ -395,12 +397,12 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName())))
 }
 
-// handleGraph serves the Graph tab (D3).
+// handleBrain serves the Brain tab (S6, formerly handleGraph/D3).
 // When MountConfig.BrainURL is non-empty and starts with http:// or https://,
-// renders an iframe pointing to the Brain service. Any other value (including
-// javascript: or data: URIs) is treated as unset and falls back to the placeholder.
-// When BrainURL is empty, shows a "Graph coming soon" placeholder.
-func (h *handlers) handleGraph(w http.ResponseWriter, r *http.Request) {
+// renders an iframe pointing to the Brain service filling the viewport below the nav bar.
+// Any other value (including javascript: or data: URIs) is treated as unset and falls back
+// to the placeholder. When BrainURL is empty, shows a "Graph coming soon" placeholder.
+func (h *handlers) handleBrain(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	brainURL := strings.TrimSpace(h.cfg.BrainURL)
 	// S3: only embed URLs with a safe absolute scheme; reject anything else.
@@ -410,15 +412,23 @@ func (h *handlers) handleGraph(w http.ResponseWriter, r *http.Request) {
 	var body string
 	if brainURL != "" {
 		escapedURL := html.EscapeString(brainURL)
-		body = fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">GRAPH</p><h2>Knowledge Graph</h2><iframe src="%s" style="width:100%%;height:80vh;border:none;" title="Knowledge Graph"></iframe></section>`, escapedURL)
+		// S6: iframe fills the full viewport height minus the nav bar (~56px) so the
+		// knowledge graph is the prominent main view with no wasted whitespace below it.
+		body = fmt.Sprintf(`<section class="frame-section brain-full-bleed"><p class="section-kicker">BRAIN</p><h2>Knowledge Graph</h2><iframe src="%s" style="width:100%%;height:calc(100vh - 56px);border:none;display:block;" title="Knowledge Graph"></iframe></section>`, escapedURL)
 	} else {
-		body = `<section class="frame-section"><p class="section-kicker">GRAPH</p><h2>Knowledge Graph</h2><p>Graph coming soon. Set <code>ENGRAM_BRAIN_URL</code> to enable the interactive graph.</p></section>`
+		body = `<section class="frame-section"><p class="section-kicker">BRAIN</p><h2>Knowledge Graph</h2><p>Graph coming soon. Set <code>ENGRAM_BRAIN_URL</code> to enable the interactive graph.</p></section>`
 	}
 	if isHTMXRequest(r) {
 		renderHTML(w, body)
 		return
 	}
-	renderComponent(w, r, Layout("Graph", p.DisplayName(), "graph", p.IsAdmin(), templ.Raw(body)))
+	renderComponent(w, r, Layout("Brain", p.DisplayName(), "brain", p.IsAdmin(), templ.Raw(body)))
+}
+
+// handleGraphRedirect redirects the legacy /dashboard/graph route to /dashboard/brain (S6).
+// Permanent redirect (301) so browsers and crawlers update cached links.
+func (h *handlers) handleGraphRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/dashboard/brain", http.StatusMovedPermanently)
 }
 
 func (h *handlers) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
@@ -552,8 +562,10 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	obsType := strings.TrimSpace(r.URL.Query().Get("type"))
-	// D2: build per-request read scope from the verified principal.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+	// S6: Browser always uses own scope — even admins see only their own data in the
+	// Browser tab. The global view is the Contributors tab (admin-only). This decision
+	// was Mario's: "por la web solo podrá ver lo suyo propio; solo la IA accede a todo."
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
 	// R2-1: parse page/pageSize without pre-clamping (total not known yet).
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardObservationRow, 0)
@@ -600,8 +612,8 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	// D2: build per-request read scope from the verified principal.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+	// S6: Browser always uses own scope — even admins see only their own data.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardSessionRow, 0)
@@ -648,8 +660,8 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	// D2: build per-request read scope from the verified principal.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+	// S6: Browser always uses own scope — even admins see only their own data.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardPromptRow, 0)
@@ -747,6 +759,12 @@ func (h *handlers) handleProjectDetail(w http.ResponseWriter, r *http.Request) {
 
 func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
+	// S6: Contributors tab is admin-only — it shows the global (all-contributors) view.
+	// Non-admin users get 403; they use the Browser tab to see their own data.
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	// R6-1: serve only the shell; the list is loaded via HTMX from /dashboard/contributors/list.
 	// This mirrors the ProjectsPage pattern — no store call at the shell level.
@@ -762,10 +780,18 @@ func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
 // R5-2: always returns ContributorsListPartial (no full page wrapper) so HTMX
 // pagination targets can swap just the content div.
 // R6-2: on store error, always renders a fragment (no Layout wrapper) — partial-only contract.
+// S6: admin-gated; non-admins receive 403. Uses global scope (IsAdmin: true) so all
+// contributors are visible — this is the Contributors tab, not the scoped Browser.
 func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
-	// D2: contributors are admin-only data — pass admin scope; the store method accepts scope for interface consistency.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+	// S6: admin-only endpoint.
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// S6: Contributors always uses global scope regardless of the caller's actual role,
+	// since only admins can reach this endpoint and they need the full picture.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: true}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardContributorRow, 0)
@@ -799,6 +825,10 @@ func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request
 
 func (h *handlers) handleContributorDetail(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	contributor := strings.TrimSpace(r.PathValue("contributor"))
 	if contributor == "" {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), EmptyState("Contributor Not Found", "No dashboard data exists for that contributor.")))

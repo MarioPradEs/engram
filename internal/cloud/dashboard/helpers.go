@@ -613,12 +613,13 @@ func dashboardLoginPathWithNext(next string) string {
 }
 
 // dashboardHomePath returns the default post-login landing path for this
-// server instance. When BrainURL is set, users land on the Graph tab
-// (/dashboard/graph) so the knowledge graph is the first thing they see.
+// server instance. When BrainURL is set, users land on the Brain tab
+// (/dashboard/brain) so the knowledge graph is the first thing they see.
 // When BrainURL is empty, they land on the standard dashboard home (/dashboard/).
+// S6: renamed from /dashboard/graph to /dashboard/brain.
 func (h *handlers) dashboardHomePath() string {
 	if strings.TrimSpace(h.cfg.BrainURL) != "" {
-		return "/dashboard/graph"
+		return "/dashboard/brain"
 	}
 	return defaultDashboardHomePath
 }
@@ -631,7 +632,7 @@ func (h *handlers) dashboardHomePath() string {
 // The production autologin flow (oauth2-proxy) always injects
 // ?next=/dashboard/ — which is indistinguishable from "no preference". Treating
 // /dashboard/ (and its path.Clean form /dashboard) the same as an empty next
-// ensures BrainURL-enabled deployments land on /dashboard/graph rather than
+// ensures BrainURL-enabled deployments land on /dashboard/brain rather than
 // /dashboard/. Any other explicit destination (e.g. /dashboard/browser) is
 // preserved verbatim.
 func (h *handlers) dashboardPostLoginPathFor(next string) string {

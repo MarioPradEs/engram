@@ -240,6 +240,7 @@ func (s parityStoreStub) PendingDeletionRequestCount(_ context.Context) (int, er
 
 // TestContributorDetailPageRendersDrillDown asserts that GET /dashboard/contributors/{name}
 // renders the ContributorDetailPage templ (not raw HTML stub). Satisfies (h).
+// Requires admin: contributor detail is admin-gated (C1 fix).
 func TestContributorDetailPageRendersDrillDown(t *testing.T) {
 	store := parityStoreStub{
 		contributors: []cloudstore.DashboardContributorRow{
@@ -255,7 +256,7 @@ func TestContributorDetailPageRendersDrillDown(t *testing.T) {
 			{Project: "proj-alice", SessionID: "sess-alice-1", Content: "Alice prompt", CreatedAt: "2026-04-23T08:20:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/contributors/alice?auth=ok", nil))
 	if rec.Code != http.StatusOK {
@@ -536,14 +537,12 @@ func TestMountHTMXAndProjectDetailParity(t *testing.T) {
 		}
 	})
 
-	t.Run("contributor detail route provides deep-link surface", func(t *testing.T) {
+	t.Run("contributor detail route denies non-admin (admin gate enforced)", func(t *testing.T) {
+		// This mux uses IsAdmin=false; contributor detail is admin-gated (C1).
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/contributors/alan@example.com?auth=ok", nil))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 for contributor detail, got %d", rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "CONTRIBUTOR DETAIL") {
-			t.Fatalf("expected contributor detail section, body=%q", rec.Body.String())
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for non-admin on contributor detail, got %d", rec.Code)
 		}
 	})
 
@@ -629,7 +628,7 @@ func TestMountContributorsSurfaceRendersCloudstoreBackedRows(t *testing.T) {
 			}
 			return errUnauthorized
 		},
-		IsAdmin: func(_ *http.Request) bool { return false },
+		IsAdmin: func(_ *http.Request) bool { return true }, // S6: Contributors is admin-only.
 		Store: parityStoreStub{
 			contributors: []cloudstore.DashboardContributorRow{
 				{CreatedBy: "alan@example.com", Chunks: 5, Projects: 2, LastChunkAt: "2026-04-22T10:00:00Z"},
@@ -996,26 +995,27 @@ func TestStatusRibbonAndFooterPresent(t *testing.T) {
 
 // TestNavTabsRenderedCorrectly asserts that the nav tab hrefs are correct for
 // an admin user. Satisfies REQ-107.
-// D1/D3 update: Graph tab is first; Contributors removed from top nav.
+// S6 update: Brain tab replaces Graph; Contributors tab added for admins.
 func TestNavTabsRenderedCorrectly(t *testing.T) {
 	mux := newAuthedMux(parityStoreStub{}, true)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
 	body := rec.Body.String()
 	for _, href := range []string{
-		`href="/dashboard/graph"`,
+		`href="/dashboard/brain"`,
 		`href="/dashboard/"`,
 		`href="/dashboard/browser"`,
 		`href="/dashboard/projects"`,
+		`href="/dashboard/contributors"`,
 		`href="/dashboard/admin"`,
 	} {
 		if !strings.Contains(body, href) {
 			t.Errorf("expected nav href %q in body", href)
 		}
 	}
-	// D1: Contributors must NOT appear in the top nav (moved to Admin → Users).
-	if strings.Contains(body, `href="/dashboard/contributors"`) {
-		t.Errorf("D1: Contributors link must not appear in top nav, got body contains href=/dashboard/contributors")
+	// S6: Legacy graph href must not appear in top nav.
+	if strings.Contains(body, `href="/dashboard/graph"`) {
+		t.Errorf("S6: legacy /dashboard/graph href must not appear in top nav")
 	}
 }
 
@@ -1391,8 +1391,8 @@ func newMuxWithBrainURL(brainURL string) *http.ServeMux {
 }
 
 // TestPostLoginLandingWithBrainURL asserts that when BrainURL is non-empty,
-// a successful login (no ?next= param) redirects to /dashboard/graph.
-// RED test: fails until dashboardHomePath() is wired in the handlers.
+// a successful login (no ?next= param) redirects to /dashboard/brain.
+// S6 update: renamed from /dashboard/graph to /dashboard/brain.
 func TestPostLoginLandingWithBrainURL(t *testing.T) {
 	mux := newMuxWithBrainURL("https://engram.vivastudios.com/brain/")
 	rec := httptest.NewRecorder()
@@ -1404,8 +1404,8 @@ func TestPostLoginLandingWithBrainURL(t *testing.T) {
 		t.Fatalf("expected 303 SeeOther, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	if loc != "/dashboard/graph" {
-		t.Errorf("post-login landing = %q, want /dashboard/graph (BrainURL is set)", loc)
+	if loc != "/dashboard/brain" {
+		t.Errorf("post-login landing = %q, want /dashboard/brain (BrainURL is set, S6)", loc)
 	}
 }
 
@@ -1598,6 +1598,7 @@ func TestBrowserPaginationBeyondTotalClampsToLastPage(t *testing.T) {
 // are url.PathEscape'd in the href. R2-2.
 // R6-1 update: links are rendered by the list partial (/dashboard/contributors/list),
 // not the shell page (/dashboard/contributors).
+// S6 update: Contributors is admin-only; use admin mux.
 func TestContributorLinkEscapesName(t *testing.T) {
 	store := parityStoreStub{
 		contributors: []cloudstore.DashboardContributorRow{
@@ -1605,7 +1606,7 @@ func TestContributorLinkEscapesName(t *testing.T) {
 			{CreatedBy: "user@domain.com", Chunks: 2, Projects: 1},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	mux := newAuthedMux(store, true) // S6: Contributors is admin-only.
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/contributors/list?auth=ok", nil)
 	req.Header.Set("HX-Request", "true")
@@ -1962,7 +1963,8 @@ func TestSessionsTableWrappedInScrollContainer(t *testing.T) {
 			{Project: "proj-a", SessionID: "sess-layout-x", StartedAt: "2026-04-23T08:00:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	// Contributor detail is admin-gated; use isAdmin=true so the drill-down subtest can reach the page.
+	mux := newAuthedMux(store, true)
 
 	t.Run("contributor detail page wraps session table in table-scroll", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -2326,7 +2328,8 @@ func TestContributorDetailChunksCardUsesQQueryParam(t *testing.T) {
 			{CreatedBy: "alice", Chunks: 42, Projects: 3, LastChunkAt: "2026-04-23T10:00:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	// Contributor detail is admin-gated; use isAdmin=true so the page is reachable.
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/contributors/alice?auth=ok", nil))
 	if rec.Code != http.StatusOK {
@@ -2373,6 +2376,7 @@ func (s *contributorsPaginationStub) ListContributorsPaginated(_ *cloudstore.Rea
 // request page=1 on the /list endpoint. TotalItems in the rendered output must be 75, not 50.
 // R6-1 update: pagination is now rendered by /dashboard/contributors/list (the partial endpoint),
 // not the /dashboard/contributors shell page.
+// S6 update: Contributors is admin-only, so the mux must have IsAdmin: true.
 func TestContributorsPaginationUsesRealTotal(t *testing.T) {
 	contributors := make([]cloudstore.DashboardContributorRow, 75)
 	for i := range contributors {
@@ -2393,7 +2397,7 @@ func TestContributorsPaginationUsesRealTotal(t *testing.T) {
 			}
 			return errUnauthorized
 		},
-		IsAdmin: func(_ *http.Request) bool { return false },
+		IsAdmin: func(_ *http.Request) bool { return true }, // S6: Contributors is admin-only.
 		Store:   stub,
 	})
 
@@ -2597,8 +2601,9 @@ func TestNavLinksDoNotLeakQueryParams(t *testing.T) {
 // a missing contributor returns 404 with "Contributor not found" headline (not "Project not found").
 func TestContributorNotFoundReturns404WithContributorMessage(t *testing.T) {
 	// Store with no contributors so GetContributorDetail returns not-found.
+	// Contributor detail is admin-gated; use isAdmin=true so the gate is passed and 404 logic runs.
 	store := parityStoreStub{contributors: nil}
-	mux := newAuthedMux(store, false)
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/contributors/nobody?auth=ok", nil))
 	if rec.Code != http.StatusNotFound {
@@ -2744,7 +2749,8 @@ func TestContributorsPaginationHTMXSwapsContent(t *testing.T) {
 			{CreatedBy: "bob", Chunks: 3, Projects: 1, LastChunkAt: "2026-04-23T11:00:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	// S6: Contributors is admin-only; use admin mux.
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/contributors/list?auth=ok&page=1", nil)
 	req.Header.Set("HX-Request", "true")
@@ -2795,6 +2801,7 @@ func TestAdminUsersPaginationHTMXSwapsContent(t *testing.T) {
 // GET /dashboard/contributors (non-HTMX, full page) renders a shell with
 // hx-get="/dashboard/contributors/list" and does NOT contain the contributor
 // table rows directly (those come from the HTMX load).
+// S6 update: Contributors is admin-only; use admin mux.
 func TestContributorsPageLoadsListPartialViaHTMX(t *testing.T) {
 	store := parityStoreStub{
 		contributors: []cloudstore.DashboardContributorRow{
@@ -2802,7 +2809,8 @@ func TestContributorsPageLoadsListPartialViaHTMX(t *testing.T) {
 			{CreatedBy: "bob", Chunks: 3, Projects: 1, LastChunkAt: "2026-04-23T11:00:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	// S6: Contributors is admin-only; use admin mux.
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	// Non-HTMX request to the shell page.
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/contributors?auth=ok", nil)
@@ -2856,7 +2864,8 @@ func TestContributorsListPartialHasNoOuterWrapper(t *testing.T) {
 			{CreatedBy: "alice", Chunks: 5, Projects: 2, LastChunkAt: "2026-04-23T10:00:00Z"},
 		},
 	}
-	mux := newAuthedMux(store, false)
+	// S6: Contributors is admin-only; use admin mux.
+	mux := newAuthedMux(store, true)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/contributors/list?auth=ok", nil)
 	req.Header.Set("HX-Request", "true")
@@ -2896,10 +2905,11 @@ func TestAdminUsersListPartialHasNoOuterWrapper(t *testing.T) {
 // store error occurs on a partial-only endpoint and the caller is NOT an HTMX
 // request, the response is a fragment (no Layout shell), not a full page with
 // status-ribbon. Tests /dashboard/contributors/list.
+// S6 update: Contributors is admin-only; use admin mux so the 403 gate doesn't fire.
 func TestPartialOnlyEndpointErrorIsFragmentNotLayout(t *testing.T) {
 	storeErr := errors.New("db unavailable")
 	store := parityStoreStub{errListContributors: storeErr}
-	mux := newAuthedMux(store, false)
+	mux := newAuthedMux(store, true) // S6: Contributors is admin-only.
 	rec := httptest.NewRecorder()
 	// Non-HTMX request — this is the case the fix targets.
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/contributors/list?auth=ok", nil)
@@ -3250,13 +3260,11 @@ func newMuxWithBrainURLAndAutoLogin(brainURL string) *http.ServeMux {
 	return mux
 }
 
-// TestAutoLoginWithNextDashboardLandsOnGraph reproduces the production autologin
+// TestAutoLoginWithNextDashboardLandsOnBrain reproduces the production autologin
 // path. oauth2-proxy sets X-Forwarded-Email and the ?next= it forwards is
-// /dashboard/ (the default). Before the W1 fix, dashboardPostLoginPathFor treats
-// /dashboard/ as a valid explicit next and returns it verbatim — so the redirect
-// goes to /dashboard/ instead of /dashboard/graph. After the fix, /dashboard/ is
-// recognised as the default home and upgraded to /dashboard/graph.
-// W1 RED test — MUST FAIL before the helpers.go fix.
+// /dashboard/ (the default). dashboardPostLoginPathFor treats /dashboard/ as the
+// default home and upgrades it to /dashboard/brain when BrainURL is set.
+// S6 update: renamed /dashboard/graph → /dashboard/brain.
 func TestAutoLoginWithNextDashboardLandsOnGraph(t *testing.T) {
 	mux := newMuxWithBrainURLAndAutoLogin("https://engram.vivastudios.com/brain/")
 	rec := httptest.NewRecorder()
@@ -3267,8 +3275,8 @@ func TestAutoLoginWithNextDashboardLandsOnGraph(t *testing.T) {
 		t.Fatalf("expected 303 SeeOther from autologin, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	if loc != "/dashboard/graph" {
-		t.Errorf("autologin with next=/dashboard/ and BrainURL set: Location = %q, want /dashboard/graph", loc)
+	if loc != "/dashboard/brain" {
+		t.Errorf("autologin with next=/dashboard/ and BrainURL set: Location = %q, want /dashboard/brain (S6)", loc)
 	}
 }
 
@@ -3313,7 +3321,7 @@ func TestAutoLoginExplicitNextPreserved(t *testing.T) {
 // TestExistingSessionWithBrainURLLandsOnGraph asserts that when RequireSession
 // SUCCEEDS (user already has a valid session) and they visit /dashboard/login
 // with no ?next= query param and BrainURL is set, the redirect goes to
-// /dashboard/graph. W3 coverage.
+// /dashboard/brain. W3 coverage. S6 update: renamed /dashboard/graph → /dashboard/brain.
 func TestExistingSessionWithBrainURLLandsOnGraph(t *testing.T) {
 	mux := http.NewServeMux()
 	Mount(mux, MountConfig{
@@ -3325,24 +3333,25 @@ func TestExistingSessionWithBrainURLLandsOnGraph(t *testing.T) {
 		BrainURL: "https://engram.vivastudios.com/brain/",
 	})
 	rec := httptest.NewRecorder()
-	// No ?next= — should redirect to dashboardHomePath() = /dashboard/graph.
+	// No ?next= — should redirect to dashboardHomePath() = /dashboard/brain.
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("expected 303 SeeOther for existing session, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	if loc != "/dashboard/graph" {
-		t.Errorf("existing session with BrainURL set and no next: Location = %q, want /dashboard/graph", loc)
+	if loc != "/dashboard/brain" {
+		t.Errorf("existing session with BrainURL set and no next: Location = %q, want /dashboard/brain (S6)", loc)
 	}
 }
 
 // ─── S3: iframe src scheme guard ─────────────────────────────────────────────
 
-// TestGraphHandlerRejectsBadSchemeInBrainURL asserts that when ENGRAM_BRAIN_URL
-// is set to a value that does not start with http:// or https://, handleGraph
+// TestBrainHandlerRejectsBadSchemeInBrainURL asserts that when ENGRAM_BRAIN_URL
+// is set to a value that does not start with http:// or https://, handleBrain
 // renders the "Graph coming soon" placeholder instead of embedding it in an iframe
 // src (which would allow javascript: or data: URIs to be embedded).
+// S6 update: route changed from /dashboard/graph to /dashboard/brain.
 func TestGraphHandlerRejectsBadSchemeInBrainURL(t *testing.T) {
 	badURLs := []string{
 		"javascript:alert(1)",
@@ -3365,15 +3374,16 @@ func TestGraphHandlerRejectsBadSchemeInBrainURL(t *testing.T) {
 				BrainURL: bad,
 			})
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/dashboard/graph?auth=ok", nil)
+			// S6: route is now /dashboard/brain (not /dashboard/graph).
+			req := httptest.NewRequest(http.MethodGet, "/dashboard/brain?auth=ok", nil)
 			mux.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("BrainURL=%q: expected 200, got %d", bad, rec.Code)
 			}
 			body := rec.Body.String()
 			// Must show the placeholder, not an iframe.
-			if !strings.Contains(body, "Graph coming soon") {
-				t.Errorf("BrainURL=%q: expected placeholder text, body=%q", bad, body)
+			if !strings.Contains(body, "ENGRAM_BRAIN_URL") {
+				t.Errorf("BrainURL=%q: expected placeholder text mentioning ENGRAM_BRAIN_URL, body=%q", bad, body)
 			}
 			if strings.Contains(body, "<iframe") {
 				t.Errorf("BrainURL=%q: must not embed an iframe with unsafe scheme, body=%q", bad, body)

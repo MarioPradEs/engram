@@ -10,16 +10,17 @@ import (
 // ─── Shared Components ──────────────────────────────────────────────────────
 
 // NavTabs renders the navigation tab bar.
-// activeTab should be one of: "graph", "dashboard", "browser", "projects", "admin".
-// D1/D3: Graph is the first tab. Contributors removed from top nav (accessible via Admin → Users).
+// activeTab should be one of: "brain", "dashboard", "browser", "projects", "contributors", "admin".
+// S6: Brain is the first tab. Contributors tab is admin-only and appears after Projects.
 templ NavTabs(activeTab string, isAdmin bool) {
 	<div role="tablist">
-		@navTab("/dashboard/graph", "Graph", "graph", activeTab)
-		@navTab("/dashboard/", "Dashboard", "dashboard", activeTab)
-		@navTab("/dashboard/browser", "Browser", "browser", activeTab)
-		@navTab("/dashboard/projects", "Projects", "projects", activeTab)
+		@navTab("/dashboard/brain", "BRAIN", "brain", activeTab)
+		@navTab("/dashboard/", "DASHBOARD", "dashboard", activeTab)
+		@navTab("/dashboard/browser", "BROWSER", "browser", activeTab)
+		@navTab("/dashboard/projects", "PROJECTS", "projects", activeTab)
 		if isAdmin {
-			@navTab("/dashboard/admin", "Admin", "admin", activeTab)
+			@navTab("/dashboard/contributors", "CONTRIBUTORS", "contributors", activeTab)
+			@navTab("/dashboard/admin", "ADMIN", "admin", activeTab)
 		}
 	</div>
 }

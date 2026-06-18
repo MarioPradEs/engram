@@ -145,15 +145,22 @@ func (h *handlers) handleAdminMembersEdit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Last-admin guard: ensure at least one admin remains.
-	adminCount := 0
+	// Last-admin guard: ensure at least one ACTIVE admin remains after the edit.
+	//
+	// W1 fix: count only admins with role=admin AND status=active (matching the
+	// handleAdminMembersDeactivate guard). The previous implementation counted by
+	// role only, ignoring status — allowing the sole active admin to set their own
+	// status=removed via this form, which would pass the role-count guard (still
+	// role=admin, count=1) and cause a complete admin lockout. The deactivate
+	// handler already does the correct active-admin count; this handler must match it.
+	activeAdminCount := 0
 	for _, u := range updated {
-		if strings.EqualFold(u.Role, "admin") {
-			adminCount++
+		if strings.EqualFold(u.Role, "admin") && strings.EqualFold(u.Status, "active") {
+			activeAdminCount++
 		}
 	}
-	if adminCount == 0 {
-		http.Error(w, "edit rejected: at least one admin must remain in the directory", http.StatusBadRequest)
+	if activeAdminCount == 0 {
+		http.Error(w, "edit rejected: at least one active admin must remain in the directory", http.StatusBadRequest)
 		return
 	}
 

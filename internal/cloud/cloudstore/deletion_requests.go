@@ -211,14 +211,32 @@ func (cs *CloudStore) AcceptDeletionRequest(ctx context.Context, id int64, admin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Resolve the observation's real project so the hard-delete mutation is keyed
+	// correctly. applyDashboardMutation keys observations by (project, syncID); if
+	// project is empty the delete never matches and the observation stays visible.
+	//
+	// C2 fix: look up the observation in the current read model to get its project.
+	// We use admin scope (IsAdmin=true) so we see all projects. If the observation is
+	// already absent (already deleted or never existed) we proceed gracefully — the
+	// Accept is still recorded and the mutation is a no-op on rebuild.
+	resolvedProject := ""
+	adminScope := &ReadScope{IsAdmin: true}
+	if existingObs, lookupErr := cs.GetObservationBySyncID(adminScope, strings.TrimSpace(row.TargetSyncID)); lookupErr == nil {
+		resolvedProject = strings.TrimSpace(existingObs.Project)
+	}
+	// If the observation is already gone (lookupErr != nil), resolvedProject stays "".
+	// The mutation will still be inserted and will be a no-op on rebuild — matching
+	// the spec §graceful: "observation already absent → accept is still recorded".
+
 	// Insert the hard-delete mutation. This is the same mutation format the sync client
 	// uses: entity=observation, op=delete, payload contains sync_id + hard_delete=true.
 	// On the next read-model rebuild, applyDashboardMutation will delete(observations, key).
-	hardDeletePayload := fmt.Sprintf(`{"sync_id":%q,"deleted":true,"hard_delete":true}`,
-		strings.TrimSpace(row.TargetSyncID))
+	hardDeletePayload := fmt.Sprintf(`{"sync_id":%q,"deleted":true,"hard_delete":true,"project":%q}`,
+		strings.TrimSpace(row.TargetSyncID), resolvedProject)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cloud_mutations (project, entity, entity_key, op, payload, user_email)
-		VALUES ('', 'observation', $1, 'delete', $2::jsonb, $3)`,
+		VALUES ($1, 'observation', $2, 'delete', $3::jsonb, $4)`,
+		resolvedProject,
 		strings.TrimSpace(row.TargetSyncID),
 		hardDeletePayload,
 		strings.ToLower(strings.TrimSpace(adminEmail)),

@@ -68,20 +68,25 @@ func (h *handlers) handleRequestRemoval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Ownership check: load the observation using an admin scope to get the stored
-	// user_email, then verify the caller owns it.
-	// Two-step to match spec behavior:
+	// Ownership check: load the observation by syncID alone using an admin scope to
+	// retrieve it across all projects, then verify the caller's email matches.
+	//
+	// C1 fix: use GetObservationBySyncID instead of GetObservationDetail("","",syncID).
+	// GetObservationDetail requires a non-empty project (normalizeDashboardProject
+	// returns ErrDashboardProjectInvalid for ""), causing every call here to return 500.
+	// GetObservationBySyncID is designed for this cross-project lookup pattern.
+	//
+	// Two-step spec behavior:
 	//   - Observation not found at all → 404
 	//   - Observation found but user_email != caller → 403 not_observation_owner
-	// This is a POST (write) operation so the existence check is acceptable.
 	adminScope := &cloudstore.ReadScope{IsAdmin: true}
-	obs, _, _, err := h.cfg.Store.GetObservationDetail(adminScope, "", "", syncID)
+	obs, err := h.cfg.Store.GetObservationBySyncID(adminScope, syncID)
 	if err != nil {
 		if errors.Is(err, cloudstore.ErrDashboardObservationNotFound) {
 			http.Error(w, "observation not found", http.StatusNotFound)
 			return
 		}
-		log.Printf("[engram-cloud] handleRequestRemoval: GetObservationDetail: %v", err)
+		log.Printf("[engram-cloud] handleRequestRemoval: GetObservationBySyncID: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

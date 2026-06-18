@@ -213,6 +213,21 @@ func (s parityStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudsto
 	return s.auditRows, len(s.auditRows), nil
 }
 
+// GetObservationBySyncID — looks up by syncID alone. Stub scans s.observations.
+func (s parityStoreStub) GetObservationBySyncID(scope *cloudstore.ReadScope, syncID string) (cloudstore.DashboardObservationRow, error) {
+	for _, obs := range s.observations {
+		if obs.SyncID == syncID {
+			if scope != nil && !scope.IsAdmin {
+				if !strings.EqualFold(strings.TrimSpace(obs.UserEmail), strings.TrimSpace(scope.Email)) {
+					return cloudstore.DashboardObservationRow{}, fmt.Errorf("%w: %s", cloudstore.ErrDashboardObservationNotFound, syncID)
+				}
+			}
+			return obs, nil
+		}
+	}
+	return cloudstore.DashboardObservationRow{}, fmt.Errorf("%w: %s", cloudstore.ErrDashboardObservationNotFound, syncID)
+}
+
 // D5: deletion-request stubs — return zero values (parity tests don't exercise these paths).
 func (s parityStoreStub) CreateDeletionRequest(_ context.Context, _ cloudstore.DeletionRequest) (int64, error) {
 	return 0, nil

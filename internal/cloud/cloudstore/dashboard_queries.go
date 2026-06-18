@@ -1731,6 +1731,54 @@ func (cs *CloudStore) GetObservationDetail(scope *ReadScope, project, sessionID,
 	return obs, sess, related, nil
 }
 
+// GetObservationBySyncID looks up a single observation by its syncID alone,
+// without requiring a project or sessionID. This is used by the deletion-request
+// submission path (handleRequestRemoval) where the caller only has the syncID
+// extracted from the URL path.
+//
+// scope controls visibility:
+//   - admin (IsAdmin=true)       → searches all observations across all projects
+//   - member (IsAdmin=false)     → searches, but returns ErrDashboardObservationNotFound
+//     unless obs.UserEmail == scope.Email (ownership check, case-insensitive)
+//   - missing identity (!IsAdmin && Email=="") → returns ErrDashboardIdentityRequired
+//
+// Returns ErrDashboardObservationNotFound when the syncID is not in the read model
+// (either because it was deleted, never existed, or the member doesn't own it).
+func (cs *CloudStore) GetObservationBySyncID(scope *ReadScope, syncID string) (DashboardObservationRow, error) {
+	model, err := cs.loadDashboardReadModel()
+	if err != nil {
+		return DashboardObservationRow{}, err
+	}
+	syncID = strings.TrimSpace(syncID)
+
+	// Validate member identity before scanning so we never leak existence.
+	if scope != nil && !scope.IsAdmin {
+		email := strings.ToLower(strings.TrimSpace(scope.Email))
+		if email == "" {
+			return DashboardObservationRow{}, ErrDashboardIdentityRequired
+		}
+	}
+
+	// Linear scan across all project details — the in-memory model is small.
+	for _, detail := range model.projectDetails {
+		for _, obs := range detail.Observations {
+			if obs.SyncID != syncID {
+				continue
+			}
+			// Found. Apply scope check.
+			if scope != nil && !scope.IsAdmin {
+				callerEmail := strings.ToLower(strings.TrimSpace(scope.Email))
+				if !strings.EqualFold(strings.TrimSpace(obs.UserEmail), callerEmail) {
+					// Member does not own this observation — return not-found to avoid leaking existence.
+					return DashboardObservationRow{}, fmt.Errorf("%w: %s", ErrDashboardObservationNotFound, syncID)
+				}
+			}
+			return obs, nil
+		}
+	}
+	return DashboardObservationRow{}, fmt.Errorf("%w: %s", ErrDashboardObservationNotFound, syncID)
+}
+
 // GetPromptDetail returns a prompt with its parent session and related prompts.
 // The third parameter is syncID — the unique per-prompt identifier (map key).
 // scope controls visibility: member callers see only their own prompts; missing identity → deny.

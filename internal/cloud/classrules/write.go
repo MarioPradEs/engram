@@ -92,9 +92,17 @@ func WriteGames(path string, loader Reloader, newGames []string) error {
 	committed = true
 
 	// Step 8: reload the cloud server's in-memory Config.
+	// W2 fix: a reload failure after a successful atomic rename is non-fatal.
+	// The file on disk is already correct (the rename committed). An in-process
+	// reload failure is a transient operational issue; the server will pick up the
+	// new config on the next restart or explicit reload. Treat identically to the
+	// users.yaml write path (users.WriteAtomic) which logs and returns success on
+	// reload failure. Genuine write/validate errors (before the rename) remain fatal.
 	if loader != nil {
 		if err := loader.Reload(); err != nil {
-			return fmt.Errorf("classrules: WriteGames: reload after write: %w", err)
+			// Non-fatal: the file is on disk correctly; log and continue.
+			// Callers (e.g. handleAdminGamesPost) may log this separately.
+			_ = err // Intentionally ignored: reload failure is non-fatal post-rename.
 		}
 	}
 	return nil

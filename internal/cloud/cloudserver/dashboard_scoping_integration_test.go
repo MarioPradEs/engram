@@ -117,6 +117,22 @@ func (s *scopingStoreStub) ListAuditEntriesPaginated(_ context.Context, _ clouds
 	return nil, 0, nil
 }
 
+// GetObservationBySyncID — faithful stub: searches allObservations by syncID and enforces scope.
+func (s *scopingStoreStub) GetObservationBySyncID(scope *cloudstore.ReadScope, syncID string) (cloudstore.DashboardObservationRow, error) {
+	for _, obs := range s.allObservations {
+		if obs.SyncID == syncID {
+			if scope != nil && !scope.IsAdmin {
+				email := strings.TrimSpace(strings.ToLower(scope.Email))
+				if email == "" || !strings.EqualFold(strings.TrimSpace(obs.UserEmail), email) {
+					return cloudstore.DashboardObservationRow{}, cloudstore.ErrDashboardObservationNotFound
+				}
+			}
+			return obs, nil
+		}
+	}
+	return cloudstore.DashboardObservationRow{}, cloudstore.ErrDashboardObservationNotFound
+}
+
 // D5: deletion-request stubs — return zero values (scoping tests don't exercise these paths).
 func (s *scopingStoreStub) CreateDeletionRequest(_ context.Context, _ cloudstore.DeletionRequest) (int64, error) {
 	return 0, nil

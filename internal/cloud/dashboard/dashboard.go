@@ -110,6 +110,12 @@ type DashboardStore interface {
 	GetObservationDetail(scope *cloudstore.ReadScope, project, sessionID, syncID string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error)
 	GetPromptDetail(scope *cloudstore.ReadScope, project, sessionID, syncID string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error)
 
+	// GetObservationBySyncID looks up an observation by syncID alone (no project or
+	// sessionID required). Used by handleRequestRemoval to verify ownership before
+	// submitting a deletion request. scope enforces visibility: admin sees all,
+	// member sees only own (ErrDashboardObservationNotFound if not owner or not found).
+	GetObservationBySyncID(scope *cloudstore.ReadScope, syncID string) (cloudstore.DashboardObservationRow, error)
+
 	// SystemHealth.
 	SystemHealth() (cloudstore.DashboardSystemHealth, error)
 

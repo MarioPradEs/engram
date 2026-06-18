@@ -42,6 +42,20 @@ func ObservationToMarkdown(obs store.Observation) string {
 		fmt.Fprintf(&sb, "  - %s\n", obs.Type)
 	}
 	fmt.Fprintf(&sb, "aliases:\n  - %q\n", obs.Title)
+	// ── Brain-graph metadata (Slice A) ────────────────────────────────────────
+	// Each field is omitted entirely when empty — no empty-string keys in frontmatter.
+	if juego := obs.Tags["juego"]; juego != "" {
+		fmt.Fprintf(&sb, "juego: %s\n", juego)
+	}
+	if obs.UserEmail != "" {
+		fmt.Fprintf(&sb, "created_by: %s\n", obs.UserEmail)
+	}
+	if obs.Department != "" {
+		fmt.Fprintf(&sb, "department: %s\n", obs.Department)
+	}
+	if obs.SyncID != "" {
+		fmt.Fprintf(&sb, "sync_id: %s\n", obs.SyncID)
+	}
 	sb.WriteString("---\n")
 
 	// ── Title as H1 ───────────────────────────────────────────────────────────

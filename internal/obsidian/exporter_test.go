@@ -724,6 +724,92 @@ func buildPipelineFixtures(deletedAt string) *store.ExportData {
 	}
 }
 
+// ─── Brain-Graph-View Slice A — A3: project-scope filter for brain export ──────
+
+// TestBrainProjectScopeFilter covers A3.1: exporting with project="general"
+// must include ONLY general observations; personal and team-alpha must be absent.
+func TestBrainProjectScopeFilter(t *testing.T) {
+	t.Run("A3.1: project=general excludes personal and team-alpha observations", func(t *testing.T) {
+		dir := t.TempDir()
+
+		ms := &mockStore{
+			exportData: &store.ExportData{
+				Sessions: []store.Session{
+					{ID: "sess-general", Project: "general"},
+					{ID: "sess-personal", Project: "personal"},
+					{ID: "sess-team", Project: "team-alpha"},
+				},
+				Observations: []store.Observation{
+					{
+						ID:        1,
+						SessionID: "sess-general",
+						Type:      "decision",
+						Title:     "General Decision",
+						Content:   "content for general",
+						Scope:     "project",
+						CreatedAt: "2026-06-01T00:00:00Z",
+						UpdatedAt: "2026-06-01T00:00:00Z",
+						Project:   strPtr("general"),
+					},
+					{
+						ID:        2,
+						SessionID: "sess-personal",
+						Type:      "decision",
+						Title:     "Personal Note",
+						Content:   "content for personal",
+						Scope:     "personal",
+						CreatedAt: "2026-06-01T00:00:00Z",
+						UpdatedAt: "2026-06-01T00:00:00Z",
+						Project:   strPtr("personal"),
+					},
+					{
+						ID:        3,
+						SessionID: "sess-team",
+						Type:      "decision",
+						Title:     "Team Alpha Note",
+						Content:   "content for team-alpha",
+						Scope:     "team",
+						CreatedAt: "2026-06-01T00:00:00Z",
+						UpdatedAt: "2026-06-01T00:00:00Z",
+						Project:   strPtr("team-alpha"),
+					},
+				},
+				Prompts: []store.Prompt{},
+			},
+		}
+
+		cfg := ExportConfig{VaultPath: dir, Project: "general"}
+		exp := NewExporter(ms, cfg)
+		result, err := exp.Export()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Only the general observation must be created
+		if result.Created != 1 {
+			t.Errorf("Created: got %d, want 1 (only general project)", result.Created)
+		}
+
+		// personal observation file must NOT exist
+		personalFile := dir + "/engram/personal/decision/personal-note-2.md"
+		if fileExists(personalFile) {
+			t.Errorf("personal observation was exported but should have been excluded: %s", personalFile)
+		}
+
+		// team-alpha observation file must NOT exist
+		teamFile := dir + "/engram/team-alpha/decision/team-alpha-note-3.md"
+		if fileExists(teamFile) {
+			t.Errorf("team-alpha observation was exported but should have been excluded: %s", teamFile)
+		}
+
+		// general observation file MUST exist
+		generalFile := dir + "/engram/general/decision/general-decision-1.md"
+		if !fileExists(generalFile) {
+			t.Errorf("general observation was not exported but should be present: %s", generalFile)
+		}
+	})
+}
+
 // makeObs is a test helper to build store.Observation values concisely.
 func makeObs(id int64, sessionID, project, obsType, title, topicKey, ts string) store.Observation {
 	obs := store.Observation{

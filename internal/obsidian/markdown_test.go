@@ -176,3 +176,232 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// ─── Brain-Graph-View Slice A — A1: frontmatter additions ────────────────────
+
+// TestFrontmatterJuego covers A1.1 and A1.2.
+func TestFrontmatterJuego(t *testing.T) {
+	t.Run("A1.1: observation with juego tag emits juego in frontmatter", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:        100,
+			Type:      "manual",
+			Title:     "Juego test",
+			Content:   "content",
+			Project:   strPtr(project),
+			Scope:     "project",
+			SessionID: "sess-x",
+			Tags:      map[string]string{"juego": "spark"},
+			CreatedAt: "2026-06-01T00:00:00Z",
+			UpdatedAt: "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if !strings.Contains(got, "juego: spark") {
+			t.Errorf("expected 'juego: spark' in frontmatter, got:\n%s", got)
+		}
+	})
+
+	t.Run("A1.2: observation with no juego tag omits juego key entirely", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:        101,
+			Type:      "manual",
+			Title:     "No juego",
+			Content:   "content",
+			Project:   strPtr(project),
+			Scope:     "project",
+			SessionID: "sess-y",
+			Tags:      nil, // no tags at all
+			CreatedAt: "2026-06-01T00:00:00Z",
+			UpdatedAt: "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if strings.Contains(got, "juego:") {
+			t.Errorf("expected no 'juego:' key when juego tag absent, got:\n%s", got)
+		}
+	})
+
+	t.Run("A1.2b: observation with empty juego tag omits juego key", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:        102,
+			Type:      "manual",
+			Title:     "Empty juego",
+			Content:   "content",
+			Project:   strPtr(project),
+			Scope:     "project",
+			SessionID: "sess-z",
+			Tags:      map[string]string{"juego": ""},
+			CreatedAt: "2026-06-01T00:00:00Z",
+			UpdatedAt: "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if strings.Contains(got, "juego:") {
+			t.Errorf("expected no 'juego:' key when juego tag is empty string, got:\n%s", got)
+		}
+	})
+}
+
+// TestFrontmatterCreatedByDepartment covers A1.3 and A1.4.
+func TestFrontmatterCreatedByDepartment(t *testing.T) {
+	t.Run("A1.3: observation with UserEmail and Department emits both in frontmatter", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:         103,
+			Type:       "manual",
+			Title:      "Attributed obs",
+			Content:    "content",
+			Project:    strPtr(project),
+			Scope:      "project",
+			SessionID:  "sess-attr",
+			UserEmail:  "alice@vivastudios.com",
+			Department: "dev",
+			CreatedAt:  "2026-06-01T00:00:00Z",
+			UpdatedAt:  "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if !strings.Contains(got, "created_by: alice@vivastudios.com") {
+			t.Errorf("expected 'created_by: alice@vivastudios.com' in frontmatter, got:\n%s", got)
+		}
+		if !strings.Contains(got, "department: dev") {
+			t.Errorf("expected 'department: dev' in frontmatter, got:\n%s", got)
+		}
+	})
+
+	t.Run("A1.4: legacy observation with empty UserEmail omits created_by and department", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:         104,
+			Type:       "manual",
+			Title:      "Legacy obs",
+			Content:    "content",
+			Project:    strPtr(project),
+			Scope:      "project",
+			SessionID:  "sess-legacy",
+			UserEmail:  "", // legacy — no attribution
+			Department: "",
+			CreatedAt:  "2026-06-01T00:00:00Z",
+			UpdatedAt:  "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if strings.Contains(got, "created_by:") {
+			t.Errorf("expected no 'created_by:' key for legacy obs, got:\n%s", got)
+		}
+		if strings.Contains(got, "department:") {
+			t.Errorf("expected no 'department:' key for legacy obs, got:\n%s", got)
+		}
+	})
+}
+
+// TestFrontmatterSyncID covers A1.5.
+func TestFrontmatterSyncID(t *testing.T) {
+	t.Run("A1.5a: non-empty SyncID is written to frontmatter", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:        105,
+			SyncID:    "obs-aabbcc112233",
+			Type:      "manual",
+			Title:     "Sync obs",
+			Content:   "content",
+			Project:   strPtr(project),
+			Scope:     "project",
+			SessionID: "sess-sync",
+			CreatedAt: "2026-06-01T00:00:00Z",
+			UpdatedAt: "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if !strings.Contains(got, "sync_id: obs-aabbcc112233") {
+			t.Errorf("expected 'sync_id: obs-aabbcc112233' in frontmatter, got:\n%s", got)
+		}
+	})
+
+	t.Run("A1.5b: empty SyncID omits sync_id key", func(t *testing.T) {
+		project := "general"
+		obs := store.Observation{
+			ID:        106,
+			SyncID:    "", // empty
+			Type:      "manual",
+			Title:     "No sync id",
+			Content:   "content",
+			Project:   strPtr(project),
+			Scope:     "project",
+			SessionID: "sess-nosync",
+			CreatedAt: "2026-06-01T00:00:00Z",
+			UpdatedAt: "2026-06-01T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		if strings.Contains(got, "sync_id:") {
+			t.Errorf("expected no 'sync_id:' key when SyncID empty, got:\n%s", got)
+		}
+	})
+}
+
+// TestFrontmatterExistingFieldsUnchanged covers A1.6.
+func TestFrontmatterExistingFieldsUnchanged(t *testing.T) {
+	t.Run("A1.6: existing frontmatter fields unchanged when new fields added", func(t *testing.T) {
+		topicKey := "auth/jwt"
+		project := "general"
+		obs := store.Observation{
+			ID:            107,
+			SyncID:        "obs-existing",
+			Type:          "bugfix",
+			Title:         "Preserve existing",
+			Content:       "The fix.",
+			Project:       strPtr(project),
+			Scope:         "project",
+			TopicKey:      &topicKey,
+			SessionID:     "sess-preserve",
+			RevisionCount: 3,
+			Tags:          map[string]string{"juego": "tower-battle"},
+			UserEmail:     "bob@vivastudios.com",
+			Department:    "qa",
+			CreatedAt:     "2026-05-01T00:00:00Z",
+			UpdatedAt:     "2026-05-02T00:00:00Z",
+		}
+
+		got := ObservationToMarkdown(obs)
+
+		// Verify all original fields still present
+		for _, want := range []string{
+			"id: 107",
+			"type: bugfix",
+			"project: general",
+			"scope: project",
+			"topic_key: auth/jwt",
+			"session_id: sess-preserve",
+			"revision_count: 3",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("expected existing field %q still present, got:\n%s", want, got)
+			}
+		}
+
+		// And verify new fields also present
+		if !strings.Contains(got, "juego: tower-battle") {
+			t.Errorf("expected 'juego: tower-battle' in frontmatter")
+		}
+		if !strings.Contains(got, "created_by: bob@vivastudios.com") {
+			t.Errorf("expected 'created_by: bob@vivastudios.com' in frontmatter")
+		}
+		if !strings.Contains(got, "department: qa") {
+			t.Errorf("expected 'department: qa' in frontmatter")
+		}
+		if !strings.Contains(got, "sync_id: obs-existing") {
+			t.Errorf("expected 'sync_id: obs-existing' in frontmatter")
+		}
+	})
+}

@@ -307,7 +307,7 @@ func (h *handlers) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	// Existing valid-session bypass: if the caller already has a valid session, redirect.
 	if h.cfg.RequireSession != nil {
 		if err := h.cfg.RequireSession(r); err == nil {
-			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
+			http.Redirect(w, r, h.dashboardPostLoginPathFor(next), http.StatusSeeOther)
 			return
 		}
 	}
@@ -328,7 +328,7 @@ func (h *handlers) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
+			http.Redirect(w, r, h.dashboardPostLoginPathFor(next), http.StatusSeeOther)
 			return
 		}
 		// jwt == "" → header absent → fall through to token-paste fallback form.
@@ -356,7 +356,7 @@ func (h *handlers) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.cfg.RequireSession != nil {
 		if err := h.cfg.RequireSession(r); err == nil {
-			http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
+			http.Redirect(w, r, h.dashboardPostLoginPathFor(next), http.StatusSeeOther)
 			return
 		}
 	}
@@ -376,7 +376,7 @@ func (h *handlers) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	http.Redirect(w, r, dashboardPostLoginPath(next), http.StatusSeeOther)
+	http.Redirect(w, r, h.dashboardPostLoginPathFor(next), http.StatusSeeOther)
 }
 
 func (h *handlers) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -396,11 +396,17 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGraph serves the Graph tab (D3).
-// When MountConfig.BrainURL is non-empty, renders an iframe pointing to the Brain service.
+// When MountConfig.BrainURL is non-empty and starts with http:// or https://,
+// renders an iframe pointing to the Brain service. Any other value (including
+// javascript: or data: URIs) is treated as unset and falls back to the placeholder.
 // When BrainURL is empty, shows a "Graph coming soon" placeholder.
 func (h *handlers) handleGraph(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	brainURL := strings.TrimSpace(h.cfg.BrainURL)
+	// S3: only embed URLs with a safe absolute scheme; reject anything else.
+	if brainURL != "" && !strings.HasPrefix(brainURL, "http://") && !strings.HasPrefix(brainURL, "https://") {
+		brainURL = ""
+	}
 	var body string
 	if brainURL != "" {
 		escapedURL := html.EscapeString(brainURL)

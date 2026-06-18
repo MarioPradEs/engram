@@ -612,10 +612,35 @@ func dashboardLoginPathWithNext(next string) string {
 	return "/dashboard/login?" + preserveQuery("", "next", next)
 }
 
-func dashboardPostLoginPath(next string) string {
-	next = sanitizeDashboardNext(next)
-	if next == "" {
-		return defaultDashboardHomePath
+// dashboardHomePath returns the default post-login landing path for this
+// server instance. When BrainURL is set, users land on the Graph tab
+// (/dashboard/graph) so the knowledge graph is the first thing they see.
+// When BrainURL is empty, they land on the standard dashboard home (/dashboard/).
+func (h *handlers) dashboardHomePath() string {
+	if strings.TrimSpace(h.cfg.BrainURL) != "" {
+		return "/dashboard/graph"
 	}
-	return next
+	return defaultDashboardHomePath
+}
+
+// dashboardPostLoginPathFor is the handler-aware variant of dashboardPostLoginPath.
+// It respects an explicit ?next= destination when present and different from the
+// default home; otherwise falls back to h.dashboardHomePath() so BrainURL drives
+// the default landing.
+//
+// The production autologin flow (oauth2-proxy) always injects
+// ?next=/dashboard/ — which is indistinguishable from "no preference". Treating
+// /dashboard/ (and its path.Clean form /dashboard) the same as an empty next
+// ensures BrainURL-enabled deployments land on /dashboard/graph rather than
+// /dashboard/. Any other explicit destination (e.g. /dashboard/browser) is
+// preserved verbatim.
+func (h *handlers) dashboardPostLoginPathFor(next string) string {
+	sanitized := sanitizeDashboardNext(next)
+	// path.Clean strips the trailing slash, so both "/dashboard/" and "/dashboard"
+	// normalise to "/dashboard" after sanitizeDashboardNext. Treat either as
+	// "no explicit preference" and delegate to dashboardHomePath().
+	if sanitized == "" || sanitized == defaultDashboardHomePath || sanitized == "/dashboard" {
+		return h.dashboardHomePath()
+	}
+	return sanitized
 }

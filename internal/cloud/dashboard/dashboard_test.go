@@ -1363,6 +1363,88 @@ func TestProjectsPageHTMXWiring(t *testing.T) {
 	}
 }
 
+// ─── D3: Conditional post-login landing (BrainURL) ───────────────────────────
+
+// newMuxWithBrainURL builds a test mux with the given BrainURL, a stub
+// ValidateLoginToken that accepts any non-empty token, and a no-op
+// CreateSessionCookie so the redirect fires without a real JWT codec.
+func newMuxWithBrainURL(brainURL string) *http.ServeMux {
+	mux := http.NewServeMux()
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			// Never has a session — forces the login handler to run its redirect logic.
+			return errUnauthorized
+		},
+		ValidateLoginToken: func(token string) error {
+			if token == "" {
+				return errors.New("empty token")
+			}
+			return nil
+		},
+		CreateSessionCookie: func(w http.ResponseWriter, r *http.Request, token string) error {
+			return nil
+		},
+		IsAdmin:  func(_ *http.Request) bool { return false },
+		BrainURL: brainURL,
+	})
+	return mux
+}
+
+// TestPostLoginLandingWithBrainURL asserts that when BrainURL is non-empty,
+// a successful login (no ?next= param) redirects to /dashboard/graph.
+// RED test: fails until dashboardHomePath() is wired in the handlers.
+func TestPostLoginLandingWithBrainURL(t *testing.T) {
+	mux := newMuxWithBrainURL("https://engram.vivastudios.com/brain/")
+	rec := httptest.NewRecorder()
+	form := url.Values{"token": {"any-valid-token"}}
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/graph" {
+		t.Errorf("post-login landing = %q, want /dashboard/graph (BrainURL is set)", loc)
+	}
+}
+
+// TestPostLoginLandingWithoutBrainURL asserts that when BrainURL is empty,
+// a successful login (no ?next= param) redirects to /dashboard/ (default).
+func TestPostLoginLandingWithoutBrainURL(t *testing.T) {
+	mux := newMuxWithBrainURL("")
+	rec := httptest.NewRecorder()
+	form := url.Values{"token": {"any-valid-token"}}
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/" {
+		t.Errorf("post-login landing = %q, want /dashboard/ (BrainURL is empty)", loc)
+	}
+}
+
+// TestPostLoginLandingNextParamPreserved asserts that an explicit ?next= param
+// is honored regardless of BrainURL — the user's intended destination wins.
+func TestPostLoginLandingNextParamPreserved(t *testing.T) {
+	mux := newMuxWithBrainURL("https://engram.vivastudios.com/brain/")
+	rec := httptest.NewRecorder()
+	form := url.Values{"token": {"any-valid-token"}, "next": {"/dashboard/browser"}}
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/browser" {
+		t.Errorf("post-login with explicit next= = %q, want /dashboard/browser", loc)
+	}
+}
+
 // ─── Judgment Day Round 2 Hotfix Tests ──────────────────────────────────────
 
 // paginationCapturingStub captures the offset and limit passed to paginated list calls.
@@ -3136,5 +3218,166 @@ func TestAdminAuditLogListIsPartialOnlyNoLayoutWrapper(t *testing.T) {
 	// Partial-only: must NOT contain <html> tag (that would be a full Layout wrapper).
 	if strings.Contains(body, "<html") {
 		t.Errorf("handleAdminAuditLogList returned full Layout wrapper for non-HTMX request; got <html> in body")
+	}
+}
+
+// ─── W1/W3: Autologin flow and existing-session landing with BrainURL ────────
+
+// newMuxWithBrainURLAndAutoLogin builds a test mux with BrainURL set and
+// AutoLoginFromHeader wired to return a fixed JWT for any request that carries
+// the X-Forwarded-Email header. RequireSession always fails (unauthenticated)
+// so the autologin branch fires. CreateSessionCookie is a no-op stub.
+func newMuxWithBrainURLAndAutoLogin(brainURL string) *http.ServeMux {
+	mux := http.NewServeMux()
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			// Always unauthenticated — forces the autologin branch.
+			return errUnauthorized
+		},
+		AutoLoginFromHeader: func(r *http.Request) (string, error) {
+			if r.Header.Get("X-Forwarded-Email") != "" {
+				return "fixed-jwt-token", nil
+			}
+			// No header — return empty string so login form falls through.
+			return "", nil
+		},
+		CreateSessionCookie: func(w http.ResponseWriter, r *http.Request, token string) error {
+			return nil
+		},
+		IsAdmin:  func(_ *http.Request) bool { return false },
+		BrainURL: brainURL,
+	})
+	return mux
+}
+
+// TestAutoLoginWithNextDashboardLandsOnGraph reproduces the production autologin
+// path. oauth2-proxy sets X-Forwarded-Email and the ?next= it forwards is
+// /dashboard/ (the default). Before the W1 fix, dashboardPostLoginPathFor treats
+// /dashboard/ as a valid explicit next and returns it verbatim — so the redirect
+// goes to /dashboard/ instead of /dashboard/graph. After the fix, /dashboard/ is
+// recognised as the default home and upgraded to /dashboard/graph.
+// W1 RED test — MUST FAIL before the helpers.go fix.
+func TestAutoLoginWithNextDashboardLandsOnGraph(t *testing.T) {
+	mux := newMuxWithBrainURLAndAutoLogin("https://engram.vivastudios.com/brain/")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/login?next=%2Fdashboard%2F", nil)
+	req.Header.Set("X-Forwarded-Email", "user@vivastudios.com")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther from autologin, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/graph" {
+		t.Errorf("autologin with next=/dashboard/ and BrainURL set: Location = %q, want /dashboard/graph", loc)
+	}
+}
+
+// TestAutoLoginWithNextDashboardNoBrainURLLandsOnHome mirrors the above but
+// with BrainURL empty — must redirect to /dashboard/ (not /dashboard/graph).
+// W1 RED test — MUST FAIL before the helpers.go fix (currently returns /dashboard/).
+// After the fix the logic is consistent: /dashboard/ is treated as default home
+// and dashboardHomePath() returns /dashboard/ when BrainURL is empty.
+func TestAutoLoginWithNextDashboardNoBrainURLLandsOnHome(t *testing.T) {
+	mux := newMuxWithBrainURLAndAutoLogin("")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/login?next=%2Fdashboard%2F", nil)
+	req.Header.Set("X-Forwarded-Email", "user@vivastudios.com")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther from autologin, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/" {
+		t.Errorf("autologin with next=/dashboard/ and no BrainURL: Location = %q, want /dashboard/", loc)
+	}
+}
+
+// TestAutoLoginExplicitNextPreserved asserts that an explicit ?next= other than
+// /dashboard/ is still preserved even when BrainURL is set. The user chose a
+// specific destination (/dashboard/browser) — that must not be overridden.
+func TestAutoLoginExplicitNextPreserved(t *testing.T) {
+	mux := newMuxWithBrainURLAndAutoLogin("https://engram.vivastudios.com/brain/")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/login?next=%2Fdashboard%2Fbrowser", nil)
+	req.Header.Set("X-Forwarded-Email", "user@vivastudios.com")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther from autologin, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/browser" {
+		t.Errorf("autologin with explicit next=/dashboard/browser: Location = %q, want /dashboard/browser", loc)
+	}
+}
+
+// TestExistingSessionWithBrainURLLandsOnGraph asserts that when RequireSession
+// SUCCEEDS (user already has a valid session) and they visit /dashboard/login
+// with no ?next= query param and BrainURL is set, the redirect goes to
+// /dashboard/graph. W3 coverage.
+func TestExistingSessionWithBrainURLLandsOnGraph(t *testing.T) {
+	mux := http.NewServeMux()
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			// Session is always valid — simulates a returning authenticated user.
+			return nil
+		},
+		IsAdmin:  func(_ *http.Request) bool { return false },
+		BrainURL: "https://engram.vivastudios.com/brain/",
+	})
+	rec := httptest.NewRecorder()
+	// No ?next= — should redirect to dashboardHomePath() = /dashboard/graph.
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 SeeOther for existing session, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if loc != "/dashboard/graph" {
+		t.Errorf("existing session with BrainURL set and no next: Location = %q, want /dashboard/graph", loc)
+	}
+}
+
+// ─── S3: iframe src scheme guard ─────────────────────────────────────────────
+
+// TestGraphHandlerRejectsBadSchemeInBrainURL asserts that when ENGRAM_BRAIN_URL
+// is set to a value that does not start with http:// or https://, handleGraph
+// renders the "Graph coming soon" placeholder instead of embedding it in an iframe
+// src (which would allow javascript: or data: URIs to be embedded).
+func TestGraphHandlerRejectsBadSchemeInBrainURL(t *testing.T) {
+	badURLs := []string{
+		"javascript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"//evil.example.com/xss",
+		"ftp://files.example.com/brain",
+	}
+	for _, bad := range badURLs {
+		bad := bad
+		t.Run(bad, func(t *testing.T) {
+			mux := http.NewServeMux()
+			Mount(mux, MountConfig{
+				RequireSession: func(r *http.Request) error {
+					if r.URL.Query().Get("auth") == "ok" {
+						return nil
+					}
+					return errUnauthorized
+				},
+				IsAdmin:  func(_ *http.Request) bool { return false },
+				BrainURL: bad,
+			})
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/dashboard/graph?auth=ok", nil)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("BrainURL=%q: expected 200, got %d", bad, rec.Code)
+			}
+			body := rec.Body.String()
+			// Must show the placeholder, not an iframe.
+			if !strings.Contains(body, "Graph coming soon") {
+				t.Errorf("BrainURL=%q: expected placeholder text, body=%q", bad, body)
+			}
+			if strings.Contains(body, "<iframe") {
+				t.Errorf("BrainURL=%q: must not embed an iframe with unsafe scheme, body=%q", bad, body)
+			}
+		})
 	}
 }

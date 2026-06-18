@@ -133,6 +133,12 @@ if [ -f "${CWD}/.engram/manifest.json" ]; then
   ) >/dev/null 2>&1 &
 fi
 
+# Refresh the local games vocabulary from the cloud server (per-session sync).
+# Non-fatal: if the user has no cloud configured or is offline this must not
+# break session start. Note: the MCP loads classrules once at startup, so a
+# synced change takes effect in the NEXT session, not the current one.
+timeout 5s engram games sync >/dev/null 2>&1 || true
+
 # Fetch memory context
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')

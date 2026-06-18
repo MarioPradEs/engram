@@ -353,6 +353,9 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
+	// /classrules/games: returns the canonical games vocabulary for per-session
+	// sync by member CLIs. Bearer JWT auth (same token members use for sync).
+	s.mux.HandleFunc("GET /classrules/games", s.withAuth(s.handleClassrulesGames))
 	// /auth endpoint: mint engram JWT from oauth2-proxy X-Forwarded-Email.
 	// Only registered when WithAuthEndpoint option is applied (authLoader set).
 	if s.authLoader != nil {
@@ -471,6 +474,22 @@ func dashboardCookieSecure(r *http.Request) bool {
 
 func (s *CloudServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"status": "ok", "service": "engram-cloud"})
+}
+
+// handleClassrulesGames handles GET /classrules/games.
+// Returns the canonical games vocabulary as {"games": [...]} so member CLI
+// instances can sync the list via `engram games sync` on session start.
+// Auth: Bearer JWT (same token members use for sync endpoints).
+// When classrulesCurrentGamesFn is nil or returns nil, responds with {"games": []}
+// — this is not an error; classrules simply are not configured on this server.
+func (s *CloudServer) handleClassrulesGames(w http.ResponseWriter, _ *http.Request) {
+	games := []string{}
+	if s.classrulesCurrentGamesFn != nil {
+		if got := s.classrulesCurrentGamesFn(); got != nil {
+			games = got
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"games": games})
 }
 
 // dashboardPrincipal decodes the request's session cookie and returns the JWT

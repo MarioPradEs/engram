@@ -4,11 +4,18 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/classrules"
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
+
+// hexColorRE matches a valid 6-digit CSS hex color (e.g. "#E5C07B").
+// Intentionally mirrors classrules.ValidateColors's regex — the handler
+// validates before delegating to WriteGameColor so it can return a 400
+// without a classrules import cycle.
+var hexColorRE = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
 
 // handleAdminGames serves GET /dashboard/admin/games.
 // Admin-only — returns 403 for non-admin principals.
@@ -92,6 +99,53 @@ func (h *handlers) handleAdminGamesPost(w http.ResponseWriter, r *http.Request) 
 	if err := component.Render(r.Context(), w); err != nil {
 		log.Printf("[dashboard] handleAdminGamesPost render success: %v", err)
 	}
+}
+
+// handleAdminGameColorPost handles POST /dashboard/admin/games/{name}/color.
+//
+// Admin-gated (403 when not admin). Accepts a form field "color" with a
+// 6-digit hex value (400 when invalid or empty). On success, calls
+// cfg.WriteGameColor(name, color) and returns 200.
+//
+// When cfg.WriteGameColor is nil, returns 501 Not Implemented.
+func (h *handlers) handleAdminGameColorPost(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		http.Error(w, "game name is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+
+	color := strings.TrimSpace(r.FormValue("color"))
+
+	// Allow empty string as a valid placeholder (clears the color).
+	// Non-empty values must be valid 6-digit hex.
+	if color != "" && !hexColorRE.MatchString(color) {
+		http.Error(w, "invalid color: must be a 6-digit hex string (e.g. #E5C07B)", http.StatusBadRequest)
+		return
+	}
+
+	if h.cfg.WriteGameColor == nil {
+		http.Error(w, "color write not configured", http.StatusNotImplemented)
+		return
+	}
+
+	if err := h.cfg.WriteGameColor(name, color); err != nil {
+		http.Error(w, "failed to save color: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // currentGames returns the current games list from the ListGames closure.

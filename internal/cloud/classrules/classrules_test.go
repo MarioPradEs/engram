@@ -263,3 +263,93 @@ func contains(s, sub string) bool {
 			return false
 		}())
 }
+
+// ─── B1: GraphColors schema parsing ──────────────────────────────────────────
+
+// TestParseClassRules_GraphColors_Games asserts that LoadFromFile reads
+// graph_colors.games["spark"]="#E5C07B" from YAML.
+func TestParseClassRules_GraphColors_Games(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	content := `
+games:
+  - "spark"
+graph_colors:
+  games:
+    spark: "#E5C07B"
+  departments:
+    dev: "#61AFEF"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	got := cfg.GraphColors.Games["spark"]
+	if got != "#E5C07B" {
+		t.Errorf("graph_colors.games[spark] = %q, want %q", got, "#E5C07B")
+	}
+}
+
+// TestParseClassRules_GraphColors_Departments asserts that LoadFromFile reads
+// graph_colors.departments["dev"]="#61AFEF" from YAML.
+func TestParseClassRules_GraphColors_Departments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	content := `
+graph_colors:
+  games:
+    spark: "#E5C07B"
+  departments:
+    dev: "#61AFEF"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	got := cfg.GraphColors.Departments["dev"]
+	if got != "#61AFEF" {
+		t.Errorf("graph_colors.departments[dev] = %q, want %q", got, "#61AFEF")
+	}
+}
+
+// TestParseClassRules_GraphColors_Missing asserts that a YAML without
+// graph_colors returns zero-value (nil maps) without error.
+func TestParseClassRules_GraphColors_Missing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.yaml")
+	content := `
+departments:
+  - name: engineering
+games:
+  - "spark"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	// Missing graph_colors block → zero-value GraphColors struct (nil maps), no error.
+	if len(cfg.GraphColors.Games) != 0 {
+		t.Errorf("expected empty GraphColors.Games map, got %v", cfg.GraphColors.Games)
+	}
+	if len(cfg.GraphColors.Departments) != 0 {
+		t.Errorf("expected empty GraphColors.Departments map, got %v", cfg.GraphColors.Departments)
+	}
+}

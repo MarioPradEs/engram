@@ -49,6 +49,18 @@ type ProjectPattern struct {
 	Description string `yaml:"description,omitempty"`
 }
 
+// GraphColors holds the color map for the brain-graph view.
+// Games maps canonical game slug to a hex color string (border color).
+// Departments maps users.yaml department key to a hex color string (fill color).
+// A missing graph_colors block in YAML yields a zero-value GraphColors (nil maps, no error).
+type GraphColors struct {
+	// Games maps a canonical game slug to a 6-digit hex color used as the node border.
+	Games map[string]string `yaml:"games,omitempty"`
+	// Departments maps a users.yaml department key (ceo/dev/art/qa/analytics/marketing)
+	// to a 6-digit hex color used as the node fill.
+	Departments map[string]string `yaml:"departments,omitempty"`
+}
+
 // Config is the top-level structure for classification-rules.yaml.
 type Config struct {
 	// Departments is the list of organisational units.
@@ -65,6 +77,10 @@ type Config struct {
 	// the MCP server instructions. This is the primary injection payload;
 	// the structured fields above are available for programmatic use.
 	Rules string `yaml:"rules,omitempty"`
+	// GraphColors holds per-game and per-department color assignments for the
+	// brain-graph view. A missing block is represented as zero-value (nil maps),
+	// not an error — operators may not have configured colors yet.
+	GraphColors GraphColors `yaml:"graph_colors,omitempty"`
 }
 
 // LoadFromFile reads classification-rules.yaml from path and returns the parsed

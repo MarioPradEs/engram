@@ -1,10 +1,13 @@
 package classrules
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
+	"github.com/natefinch/atomic"
 	"gopkg.in/yaml.v3"
 )
 
@@ -12,6 +15,86 @@ import (
 // WriteGames uses this interface so callers don't need to import the concrete type.
 type Reloader interface {
 	Reload() error
+}
+
+// hexColorRE matches exactly a 6-digit CSS hex color (e.g. "#E5C07B").
+var hexColorRE = regexp.MustCompile(`^#[0-9A-Fa-f]{6}$`)
+
+// ValidateColors validates a color map where every non-empty value must be a
+// valid 6-digit hex color string matching ^#[0-9A-Fa-f]{6}$.
+//
+// Empty string values are accepted as unset placeholders (the brain-graph
+// pipeline treats absent / empty values as "use the fallback color").
+//
+// Returns the first validation error encountered, or nil when all values are valid.
+func ValidateColors(colors map[string]string) error {
+	for k, v := range colors {
+		if v == "" {
+			continue // empty = placeholder; valid
+		}
+		if !hexColorRE.MatchString(v) {
+			return fmt.Errorf("classrules: invalid hex color for key %q: %q (want ^#[0-9A-Fa-f]{6}$)", k, v)
+		}
+	}
+	return nil
+}
+
+// WriteColors validates the given game and department color maps, then atomically
+// updates the graph_colors block in the YAML file at path while preserving all
+// other sections (departments, games, rules, conventions, etc.).
+//
+// Atomicity: uses natefinch/atomic.WriteFile which writes to a temp file and
+// renames it over the target — preventing partial writes on crash.
+//
+// On validate failure the file is NOT modified and error is returned immediately.
+//
+// reload is called exactly once after a successful atomic write so that the
+// running process can re-read the updated config without restart. It may be nil
+// if no reload signal is needed (e.g. in tests that don't care about reload).
+func WriteColors(path string, games, departments map[string]string, reload func()) error {
+	// Validate before touching the file — fail fast, zero side effects.
+	if err := ValidateColors(games); err != nil {
+		return err
+	}
+	if err := ValidateColors(departments); err != nil {
+		return err
+	}
+
+	// Load the current config so we can round-trip all existing fields unchanged.
+	// If the file doesn't exist yet we start from zero.
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("classrules: WriteColors: load current config: %w", err)
+	}
+	if cfg == nil {
+		cfg = &Config{}
+	}
+
+	// Patch only the GraphColors block; leave everything else untouched.
+	if games != nil {
+		cfg.GraphColors.Games = games
+	}
+	if departments != nil {
+		cfg.GraphColors.Departments = departments
+	}
+
+	// Marshal back to YAML.
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("classrules: WriteColors: marshal: %w", err)
+	}
+
+	// Atomic write: natefinch/atomic writes a temp file then renames it, so
+	// partial writes on crash are impossible.
+	if err := atomic.WriteFile(path, bytes.NewReader(out)); err != nil {
+		return fmt.Errorf("classrules: WriteColors: write %s: %w", path, err)
+	}
+
+	// Notify the process that the file has changed.
+	if reload != nil {
+		reload()
+	}
+	return nil
 }
 
 // WriteGames atomically writes an updated games list to the classification-rules.yaml

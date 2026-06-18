@@ -82,6 +82,11 @@ type MountConfig struct {
 	Store              DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
+	// WriteGameColor is an optional function called when an admin saves a game color
+	// via POST /dashboard/admin/games/{name}/color. It receives the canonical game name
+	// and the validated hex color string. When nil, the color-save route still registers
+	// but returns a 501 Not Implemented. Callers should wire classrules.WriteColors here.
+	WriteGameColor func(game, color string) error
 }
 
 type DashboardStore interface {
@@ -224,6 +229,9 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	// POST /dashboard/admin/games  → apply games update (validate → atomic write → reload).
 	mux.HandleFunc("GET /dashboard/admin/games", h.requireSession(h.handleAdminGames))
 	mux.HandleFunc("POST /dashboard/admin/games", h.requireSession(h.handleAdminGamesPost))
+
+	// Brain graph view — color map admin routes (Slice B).
+	mux.HandleFunc("POST /dashboard/admin/games/{name}/color", h.requireSession(h.handleAdminGameColorPost))
 }
 
 func Handler() http.Handler {

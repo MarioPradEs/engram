@@ -119,6 +119,38 @@ func TestAdminGames_AG1_MemberGets403(t *testing.T) {
 	}
 }
 
+// ─── AG1 (POST): member session → 403 on POST, file untouched ────────────────
+
+func TestAdminGames_AG1_MemberGets403_POST(t *testing.T) {
+	t.Parallel()
+
+	jwtSecret := strings.Repeat("g", 32)
+	_, usersPath, classrulesPath := initTempGamesFiles(t)
+	original, _ := os.ReadFile(classrulesPath)
+
+	srv, _ := buildGamesServer(t, jwtSecret, usersPath, classrulesPath)
+	memberCookie := mintSessionCookieForEmail(t, srv, "member@vivastudios.com", jwtSecret)
+
+	// A member attempts to overwrite the games list. The admin guard must fire
+	// BEFORE any write, so the request is rejected and the file stays intact.
+	form := url.Values{}
+	form.Set("games", "game-injected")
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/admin/games", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(memberCookie)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST /dashboard/admin/games for member: status=%d, want 403", rec.Code)
+	}
+
+	after, _ := os.ReadFile(classrulesPath)
+	if string(after) != string(original) {
+		t.Error("classification-rules.yaml was modified despite member 403 rejection")
+	}
+}
+
 // ─── AG2: admin session → 200 + current games list rendered ──────────────────
 
 func TestAdminGames_AG2_AdminGets200WithGamesList(t *testing.T) {

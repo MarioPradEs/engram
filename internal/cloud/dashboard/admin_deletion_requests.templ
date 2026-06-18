@@ -1,0 +1,103 @@
+package dashboard
+
+import (
+	"fmt"
+	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
+)
+
+// AdminDeletionRequestsPage renders the admin deletion-request review page.
+// Admin-only — caller must verify p.IsAdmin() before rendering.
+// Spec: deletion-requests.spec.md §admin-review.
+templ AdminDeletionRequestsPage(requests []cloudstore.StoredDeletionRequest, pendingCount int) {
+	<section class="frame-section">
+		<p class="section-kicker">ADMIN</p>
+		<h2>
+			Deletion Requests
+			if pendingCount > 0 {
+				<span class="pending-badge">{ fmt.Sprintf("%d pending", pendingCount) }</span>
+			}
+		</h2>
+		<p class="guiding-note">
+			By default, nothing is deleted. Memory evolves through corrections (observation revisions).
+			Hard deletion is the rare exception reserved for sensitive or erroneous content.
+		</p>
+		if len(requests) == 0 {
+			<p>No pending deletion requests.</p>
+		} else {
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th>ID</th>
+						<th>Requester</th>
+						<th>Observation (sync_id)</th>
+						<th>Reason</th>
+						<th>Status</th>
+						<th>Requested</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, req := range requests {
+						<tr>
+							<td>{ fmt.Sprintf("%d", req.ID) }</td>
+							<td>{ req.RequesterEmail }</td>
+							<td><code>{ req.TargetSyncID }</code></td>
+							<td>{ req.Reason }</td>
+							<td>{ req.Status }</td>
+							<td>{ req.RequestedAt.Format("2006-01-02 15:04") }</td>
+							<td>
+								if req.Status == "pending" {
+									<form method="POST" action="/dashboard/admin/deletion-requests/accept" style="display:inline">
+										<input type="hidden" name="id" value={ fmt.Sprintf("%d", req.ID) }/>
+										<button type="submit" class="action-btn danger-btn">Accept (hard-delete)</button>
+									</form>
+									<form method="POST" action="/dashboard/admin/deletion-requests/reject" style="display:inline">
+										<input type="hidden" name="id" value={ fmt.Sprintf("%d", req.ID) }/>
+										<button type="submit" class="action-btn">Reject</button>
+									</form>
+								} else {
+									<span class="decided-label">{ req.Status } by { req.DecidedBy }</span>
+								}
+							</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		}
+	</section>
+}
+
+// MemberDeletionRequestButton renders the "Request Removal" button for an observation.
+// Only shown when the observation's user_email matches the viewing member's email.
+// Spec: deletion-requests.spec.md §member-submit.
+templ MemberDeletionRequestButton(syncID string) {
+	<form method="POST" action={ templ.SafeURL("/dashboard/browser/observations/" + syncID + "/request-removal") }>
+		<label>
+			Reason (optional)
+			<input type="text" name="reason" placeholder="Why should this observation be removed?"/>
+		</label>
+		<button type="submit" class="action-btn danger-btn">Request Removal</button>
+	</form>
+}
+
+// MemberDeletionRequestNotice renders a notice to the member about decided requests.
+// Shown on Browser load when the member has accepted or rejected decisions.
+// Spec: deletion-requests.spec.md §notification.
+templ MemberDeletionRequestNotice(decisions []cloudstore.StoredDeletionRequest) {
+	if len(decisions) > 0 {
+		<div class="deletion-notice">
+			<p><strong>Deletion request updates:</strong></p>
+			<ul>
+				for _, d := range decisions {
+					<li>
+						Observation <code>{ d.TargetSyncID }</code>:
+						<strong>{ d.Status }</strong>
+						if d.DecidedBy != "" {
+							<span>by { d.DecidedBy }</span>
+						}
+					</li>
+				}
+			</ul>
+		</div>
+	}
+}

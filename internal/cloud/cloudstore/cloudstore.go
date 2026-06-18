@@ -649,6 +649,29 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		// Indices for scope-filter and audit queries on attribution columns.
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_user_email ON cloud_mutations(user_email)`,
 		`CREATE INDEX IF NOT EXISTS idx_cloud_mutations_department  ON cloud_mutations(department)`,
+
+		// ── Phase: per-observation deletion requests (D5) ──────────────────────────
+		// Additive only — no ALTER or DROP on existing tables.
+		// A member may request hard-deletion of a single observation they own;
+		// an admin accepts (hard-deletes the one sync_id) or rejects.
+		// Reversible by: DROP TABLE cloud_deletion_requests (no cascade to other tables).
+		`CREATE TABLE IF NOT EXISTS cloud_deletion_requests (
+			id               BIGSERIAL PRIMARY KEY,
+			target_sync_id   TEXT NOT NULL,
+			target_chunk     TEXT NOT NULL DEFAULT '',
+			requester_email  TEXT NOT NULL,
+			reason           TEXT NOT NULL DEFAULT '',
+			status           TEXT NOT NULL DEFAULT 'pending',
+			decided_by       TEXT NOT NULL DEFAULT '',
+			requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+			decided_at       TIMESTAMPTZ
+		)`,
+		// Partial unique index: prevents duplicate pending requests for the same observation.
+		// A new request for the same sync_id is allowed once the prior one is decided.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_pending ON cloud_deletion_requests(target_sync_id)
+		    WHERE status = 'pending'`,
+		`CREATE INDEX IF NOT EXISTS idx_cdr_status ON cloud_deletion_requests(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_cdr_requester ON cloud_deletion_requests(requester_email)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

@@ -117,6 +117,29 @@ func (s *scopingStoreStub) ListAuditEntriesPaginated(_ context.Context, _ clouds
 	return nil, 0, nil
 }
 
+// D5: deletion-request stubs — return zero values (scoping tests don't exercise these paths).
+func (s *scopingStoreStub) CreateDeletionRequest(_ context.Context, _ cloudstore.DeletionRequest) (int64, error) {
+	return 0, nil
+}
+func (s *scopingStoreStub) GetDeletionRequest(_ context.Context, _ int64) (cloudstore.StoredDeletionRequest, error) {
+	return cloudstore.StoredDeletionRequest{}, cloudstore.ErrDeletionRequestNotFound
+}
+func (s *scopingStoreStub) ListPendingDeletionRequests(_ context.Context) ([]cloudstore.StoredDeletionRequest, error) {
+	return nil, nil
+}
+func (s *scopingStoreStub) ListDeletionRequestsForRequester(_ context.Context, _ string) ([]cloudstore.StoredDeletionRequest, error) {
+	return nil, nil
+}
+func (s *scopingStoreStub) AcceptDeletionRequest(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (s *scopingStoreStub) RejectDeletionRequest(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (s *scopingStoreStub) PendingDeletionRequestCount(_ context.Context) (int, error) {
+	return 0, nil
+}
+
 // seedObservations contains one row owned by member@vivastudios.com and one by admin@vivastudios.com.
 var seedObservations = []cloudstore.DashboardObservationRow{
 	{

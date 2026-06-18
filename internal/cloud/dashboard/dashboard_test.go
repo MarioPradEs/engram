@@ -213,6 +213,29 @@ func (s parityStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudsto
 	return s.auditRows, len(s.auditRows), nil
 }
 
+// D5: deletion-request stubs — return zero values (parity tests don't exercise these paths).
+func (s parityStoreStub) CreateDeletionRequest(_ context.Context, _ cloudstore.DeletionRequest) (int64, error) {
+	return 0, nil
+}
+func (s parityStoreStub) GetDeletionRequest(_ context.Context, _ int64) (cloudstore.StoredDeletionRequest, error) {
+	return cloudstore.StoredDeletionRequest{}, cloudstore.ErrDeletionRequestNotFound
+}
+func (s parityStoreStub) ListPendingDeletionRequests(_ context.Context) ([]cloudstore.StoredDeletionRequest, error) {
+	return nil, nil
+}
+func (s parityStoreStub) ListDeletionRequestsForRequester(_ context.Context, _ string) ([]cloudstore.StoredDeletionRequest, error) {
+	return nil, nil
+}
+func (s parityStoreStub) AcceptDeletionRequest(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (s parityStoreStub) RejectDeletionRequest(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+func (s parityStoreStub) PendingDeletionRequestCount(_ context.Context) (int, error) {
+	return 0, nil
+}
+
 // ─── Batch 6 Tests ───────────────────────────────────────────────────────────
 
 // TestContributorDetailPageRendersDrillDown asserts that GET /dashboard/contributors/{name}

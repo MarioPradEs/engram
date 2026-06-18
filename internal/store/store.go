@@ -280,7 +280,9 @@ var decayReviewAfterMonths = map[string]int{
 // append it explicitly (see observationSelectColumnsWithClassification).
 const observationSelectColumns = `id, ifnull(sync_id, '') as sync_id, session_id, type, title, content, tool_name, project,
 	       scope, topic_key, revision_count, duplicate_count, last_seen_at, review_after, pinned, created_at, updated_at, deleted_at,
-	       tags_json`
+	       tags_json,
+	       coalesce(user_email, '') as user_email, coalesce(user_name, '') as user_name,
+	       coalesce(department, '') as department, coalesce(user_deleted, 0) as user_deleted`
 
 // observationSelectColumnsWithClassification extends observationSelectColumns
 // with the viva classified_by_v2 marker for the four single-observation read
@@ -1178,6 +1180,26 @@ func (s *Store) migrate() error {
 	// INTEGER NOT NULL DEFAULT 0 so legacy rows are treated as unclassified.
 	if err := s.addColumnIfNotExists("observations", "classified_by_v2", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+
+	// Phase: brain-graph data-gap fix — user attribution columns.
+	// These columns enable the obsidian-export / brain pipeline to surface
+	// created_by and department per node so the graph can color by department
+	// and glow the viewer's own observations.
+	// All four are nullable/defaulted so existing rows are unaffected.
+	attributionCols := []struct {
+		name string
+		defn string
+	}{
+		{name: "user_email", defn: "TEXT NOT NULL DEFAULT ''"},
+		{name: "user_name", defn: "TEXT NOT NULL DEFAULT ''"},
+		{name: "department", defn: "TEXT NOT NULL DEFAULT ''"},
+		{name: "user_deleted", defn: "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, c := range attributionCols {
+		if err := s.addColumnIfNotExists("observations", c.name, c.defn); err != nil {
+			return err
+		}
 	}
 
 	// Phase: OAuth — reclassify gate column on sync_state (design Q2).
@@ -3361,15 +3383,9 @@ func (s *Store) Search(query string, opts SearchOptions) ([]SearchResult, error)
 			defer tkRows.Close()
 			for tkRows.Next() {
 				var sr SearchResult
-				var tagsJSON sql.NullString
-				if err := tkRows.Scan(
-					&sr.ID, &sr.SyncID, &sr.SessionID, &sr.Type, &sr.Title, &sr.Content,
-					&sr.ToolName, &sr.Project, &sr.Scope, &sr.TopicKey, &sr.RevisionCount, &sr.DuplicateCount,
-					&sr.LastSeenAt, &sr.ReviewAfter, &sr.Pinned, &sr.CreatedAt, &sr.UpdatedAt, &sr.DeletedAt, &tagsJSON,
-				); err != nil {
+				if err := scanObservationRow(tkRows, &sr.Observation); err != nil {
 					break
 				}
-				sr.Tags = parseTagsJSON(tagsJSON)
 				sr.Rank = -1000
 				directResults = append(directResults, sr)
 			}
@@ -6059,8 +6075,8 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	existing, err := s.getObservationBySyncIDTx(tx, payload.SyncID, true)
 	if err == sql.ErrNoRows {
 		_, err = s.execHook(tx,
-			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+			`INSERT INTO observations (sync_id, session_id, type, title, content, tool_name, project, scope, topic_key, normalized_hash, tags_json, revision_count, duplicate_count, last_seen_at, created_at, updated_at, deleted_at, user_email, user_name, department, user_deleted)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
 			payload.SyncID,
 			payload.SessionID,
 			payload.Type,
@@ -6077,6 +6093,10 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 			payload.LastSeenAt,
 			createdAt,
 			updatedAt,
+			payload.UserEmail,
+			payload.UserName,
+			payload.Department,
+			boolToInt(payload.UserDeleted),
 		)
 		return err
 	}
@@ -6104,9 +6124,32 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 	// tagsJSONValue → SQL NULL) preserves existing local tags rather than clearing
 	// them. No tag-removal API exists today, so a NULL remote value must never wipe
 	// local tags. Revisit this semantics if a tag-delete operation is introduced.
+	//
+	// Attribution string fields (user_email, user_name, department) follow a
+	// preserve-on-empty pattern: a non-empty payload value wins; an empty payload
+	// preserves the existing stored value so a cloud re-push of an old mutation
+	// that lacks attribution does not wipe attribution already stored from a more
+	// recent, attributed mutation.
+	// user_deleted is NOT preserved — it is written from the payload value directly
+	// (last-write-wins, consistent with classified_by_v2). A bool has no "absent"
+	// sentinel here, so we cannot distinguish "explicitly false" from "field
+	// omitted"; making it sticky/preserve is a separate decision (see follow-ups).
+	newUserEmail := payload.UserEmail
+	if newUserEmail == "" {
+		newUserEmail = existing.UserEmail
+	}
+	newUserName := payload.UserName
+	if newUserName == "" {
+		newUserName = existing.UserName
+	}
+	newDepartment := payload.Department
+	if newDepartment == "" {
+		newDepartment = existing.Department
+	}
 	_, err = s.execHook(tx,
 		`UPDATE observations
-		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, tags_json = COALESCE(?, tags_json), revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL
+		 SET session_id = ?, type = ?, title = ?, content = ?, tool_name = ?, project = ?, scope = ?, topic_key = ?, normalized_hash = ?, tags_json = COALESCE(?, tags_json), revision_count = ?, duplicate_count = ?, last_seen_at = ?, created_at = ?, updated_at = ?, deleted_at = NULL,
+		     user_email = ?, user_name = ?, department = ?, user_deleted = ?
 		 WHERE id = ?`,
 		payload.SessionID,
 		payload.Type,
@@ -6123,6 +6166,10 @@ func (s *Store) applyObservationUpsertTx(tx *sql.Tx, payload syncObservationPayl
 		payload.LastSeenAt,
 		createdAt,
 		updatedAt,
+		newUserEmail,
+		newUserName,
+		newDepartment,
+		boolToInt(payload.UserDeleted),
 		existing.ID,
 	)
 	return err
@@ -6258,31 +6305,39 @@ type observationScanner interface {
 
 func scanObservationRow(scanner observationScanner, o *Observation) error {
 	var tagsJSON sql.NullString
+	var userDeletedInt int
 	if err := scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
 		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON,
+		&o.UserEmail, &o.UserName, &o.Department, &userDeletedInt,
 	); err != nil {
 		return err
 	}
 	o.Tags = parseTagsJSON(tagsJSON)
+	o.UserDeleted = userDeletedInt != 0
 	return nil
 }
 
 // scanObservationRowWithClassification scans observationSelectColumnsWithClassification:
-// the base columns + tags_json + classified_by_v2 (in that order). Used by the
-// four single-observation read sites that also surface the classified_by_v2 marker.
+// the base columns + tags_json + user_email/user_name/department/user_deleted +
+// classified_by_v2 (in that exact order). Used by the four single-observation
+// read sites that also surface the classified_by_v2 marker.
 func scanObservationRowWithClassification(scanner observationScanner, o *Observation) error {
 	var tagsJSON sql.NullString
+	var userDeletedInt int
 	var classifiedByV2Int int
 	if err := scanner.Scan(
 		&o.ID, &o.SyncID, &o.SessionID, &o.Type, &o.Title, &o.Content,
 		&o.ToolName, &o.Project, &o.Scope, &o.TopicKey, &o.RevisionCount, &o.DuplicateCount, &o.LastSeenAt, &o.ReviewAfter,
-		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON, &classifiedByV2Int,
+		&o.Pinned, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt, &tagsJSON,
+		&o.UserEmail, &o.UserName, &o.Department, &userDeletedInt,
+		&classifiedByV2Int,
 	); err != nil {
 		return err
 	}
 	o.Tags = parseTagsJSON(tagsJSON)
+	o.UserDeleted = userDeletedInt != 0
 	o.ClassifiedByV2 = classifiedByV2Int != 0
 	return nil
 }
@@ -6855,6 +6910,14 @@ func tagsJSONValue(tags map[string]string) any {
 		return nil
 	}
 	return string(b)
+}
+
+// boolToInt converts a boolean to 0 or 1 for SQLite INTEGER columns.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func dedupeWindowExpression(window time.Duration) string {

@@ -45,13 +45,21 @@ type MountConfig struct {
 	ClearSessionCookie  func(w http.ResponseWriter, r *http.Request)
 	IsAdmin             func(r *http.Request) bool
 	GetDisplayName      func(r *http.Request) string
+	// GetUserEmail returns the verified email address from the JWT email claim.
+	// Returns "" when no JWT session is present (e.g. static admin token).
+	// The email is NEVER derived from a client-supplied request param — it comes
+	// from the verified JWT decoded by the session codec (D2: server-derived identity).
+	GetUserEmail func(r *http.Request) string
 	// AutoLoginFromHeader resolves the proxy-injected identity into a bearer JWT.
 	// Returns ("", nil)  → no header present (render token-paste fallback).
 	// Returns ("", err)  → header present but principal denied (403, no cookie).
 	// Returns (jwt, nil) → mint succeeded; handleLoginPage wraps it via CreateSessionCookie.
 	// nil means auto-login is disabled (token-paste only).
 	AutoLoginFromHeader func(r *http.Request) (string, error)
-	Store               DashboardStore
+	// BrainURL is the base URL of the Engram Brain service rendered in the Graph tab iframe.
+	// When empty, the Graph tab shows a "Graph coming soon" placeholder. Set from ENGRAM_BRAIN_URL env. (D3)
+	BrainURL string
+	Store    DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
 }
@@ -65,18 +73,22 @@ type DashboardStore interface {
 	ListRecentObservations(project string, query string, limit int) ([]cloudstore.DashboardObservationRow, error)
 	ListRecentPrompts(project string, query string, limit int) ([]cloudstore.DashboardPromptRow, error)
 	AdminOverview() (cloudstore.DashboardAdminOverview, error)
+	// ScopedMemberOverview returns stats tailored to the caller's ReadScope.
+	// Admin → team-wide overview; member → own obs/sessions/prompts counts; missing identity → error.
+	ScopedMemberOverview(scope *cloudstore.ReadScope) (cloudstore.DashboardAdminOverview, error)
 
 	// Paginated list methods (from cloud-dashboard-visual-parity).
+	// All paginated + detail methods accept a *cloudstore.ReadScope as the first parameter (D2).
 	ListProjectsPaginated(query string, limit, offset int) ([]cloudstore.DashboardProjectRow, int, error)
-	ListRecentObservationsPaginated(project, query, obsType string, limit, offset int) ([]cloudstore.DashboardObservationRow, int, error)
-	ListRecentSessionsPaginated(project, query string, limit, offset int) ([]cloudstore.DashboardSessionRow, int, error)
-	ListRecentPromptsPaginated(project, query string, limit, offset int) ([]cloudstore.DashboardPromptRow, int, error)
-	ListContributorsPaginated(query string, limit, offset int) ([]cloudstore.DashboardContributorRow, int, error)
+	ListRecentObservationsPaginated(scope *cloudstore.ReadScope, project, query, obsType string, limit, offset int) ([]cloudstore.DashboardObservationRow, int, error)
+	ListRecentSessionsPaginated(scope *cloudstore.ReadScope, project, query string, limit, offset int) ([]cloudstore.DashboardSessionRow, int, error)
+	ListRecentPromptsPaginated(scope *cloudstore.ReadScope, project, query string, limit, offset int) ([]cloudstore.DashboardPromptRow, int, error)
+	ListContributorsPaginated(scope *cloudstore.ReadScope, query string, limit, offset int) ([]cloudstore.DashboardContributorRow, int, error)
 
 	// Detail methods.
-	GetSessionDetail(project, sessionID string) (cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error)
-	GetObservationDetail(project, sessionID, syncID string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error)
-	GetPromptDetail(project, sessionID, syncID string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error)
+	GetSessionDetail(scope *cloudstore.ReadScope, project, sessionID string) (cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, []cloudstore.DashboardPromptRow, error)
+	GetObservationDetail(scope *cloudstore.ReadScope, project, sessionID, syncID string) (cloudstore.DashboardObservationRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardObservationRow, error)
+	GetPromptDetail(scope *cloudstore.ReadScope, project, sessionID, syncID string) (cloudstore.DashboardPromptRow, cloudstore.DashboardSessionRow, []cloudstore.DashboardPromptRow, error)
 
 	// SystemHealth.
 	SystemHealth() (cloudstore.DashboardSystemHealth, error)
@@ -115,6 +127,8 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 
 	mux.HandleFunc("GET /dashboard", h.requireSession(h.handleDashboardHome))
 	mux.HandleFunc("GET /dashboard/", h.requireSession(h.handleDashboardHome))
+	// D3: Graph tab — iframe to Brain when ENGRAM_BRAIN_URL is set; placeholder otherwise.
+	mux.HandleFunc("GET /dashboard/graph", h.requireSession(h.handleGraph))
 	mux.HandleFunc("GET /dashboard/stats", h.requireSession(h.handleDashboardStats))
 	mux.HandleFunc("GET /dashboard/activity", h.requireSession(h.handleDashboardActivity))
 	mux.HandleFunc("GET /dashboard/browser", h.requireSession(h.handleBrowser))
@@ -328,22 +342,68 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName())))
 }
 
+// handleGraph serves the Graph tab (D3).
+// When MountConfig.BrainURL is non-empty, renders an iframe pointing to the Brain service.
+// When BrainURL is empty, shows a "Graph coming soon" placeholder.
+func (h *handlers) handleGraph(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	brainURL := strings.TrimSpace(h.cfg.BrainURL)
+	var body string
+	if brainURL != "" {
+		escapedURL := html.EscapeString(brainURL)
+		body = fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">GRAPH</p><h2>Knowledge Graph</h2><iframe src="%s" style="width:100%%;height:80vh;border:none;" title="Knowledge Graph"></iframe></section>`, escapedURL)
+	} else {
+		body = `<section class="frame-section"><p class="section-kicker">GRAPH</p><h2>Knowledge Graph</h2><p>Graph coming soon. Set <code>ENGRAM_BRAIN_URL</code> to enable the interactive graph.</p></section>`
+	}
+	if isHTMXRequest(r) {
+		renderHTML(w, body)
+		return
+	}
+	renderComponent(w, r, Layout("Graph", p.DisplayName(), "graph", p.IsAdmin(), templ.Raw(body)))
+}
+
 func (h *handlers) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	overview := cloudstore.DashboardAdminOverview{}
 	if h.cfg.Store != nil {
-		loaded, err := h.cfg.Store.AdminOverview()
-		if err != nil {
-			h.renderStoreError(w, r, "dashboard", "Stats", err)
-			return
+		// D2: when GetUserEmail is configured (JWT session mode), route via ScopedMemberOverview
+		// which enforces per-user scope. Admin → team-wide; member → own counts; missing identity → 403.
+		// When GetUserEmail is not configured (static-token/legacy bypass mode), fall back to
+		// AdminOverview (pre-scoping behaviour) so existing non-JWT tests remain valid.
+		if h.cfg.GetUserEmail != nil {
+			scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+			loaded, err := h.cfg.Store.ScopedMemberOverview(scope)
+			if err != nil {
+				if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				h.renderStoreError(w, r, "dashboard", "Stats", err)
+				return
+			}
+			overview = loaded
+		} else {
+			loaded, err := h.cfg.Store.AdminOverview()
+			if err != nil {
+				h.renderStoreError(w, r, "dashboard", "Stats", err)
+				return
+			}
+			overview = loaded
 		}
-		overview = loaded
 	}
 	// R5-1: Build the stats body as raw HTML then wrap in templ Layout so the
 	// status-ribbon, shell-footer, and "CLOUD ACTIVE" pill are always present on
 	// full-page navigation (non-HTMX). Previously renderPageOrHTMX called the
 	// string-based renderLayout which lacked those elements.
-	body := fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">STATS</p><h2>Cloud Stats</h2><div class="metric-strip"><a href="/dashboard/projects" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Projects</span></a><a href="/dashboard/contributors" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Contributors</span></a><a href="/dashboard/browser" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Chunks</span></a></div></section>`, overview.Projects, overview.Contributors, overview.Chunks)
+	//
+	// D2: admin (or legacy bypass) sees Projects/Contributors/Chunks (team-wide); member
+	// (JWT-authenticated, non-admin) sees Observations/Sessions/Prompts (own counts).
+	var body string
+	if p.IsAdmin() || h.cfg.GetUserEmail == nil {
+		body = fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">STATS</p><h2>Cloud Stats</h2><div class="metric-strip"><a href="/dashboard/projects" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Projects</span></a><a href="/dashboard/contributors" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Contributors</span></a><a href="/dashboard/browser" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Chunks</span></a></div></section>`, overview.Projects, overview.Contributors, overview.Chunks)
+	} else {
+		body = fmt.Sprintf(`<section class="frame-section"><p class="section-kicker">STATS</p><h2>My Activity</h2><div class="metric-strip"><a href="/dashboard/browser/observations" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Observations</span></a><a href="/dashboard/browser/sessions" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Sessions</span></a><a href="/dashboard/browser/prompts" class="metric-card stat-card-link"><span class="metric-value">%d</span><span class="metric-label">Prompts</span></a></div></section>`, overview.Observations, overview.Sessions, overview.Prompts)
+	}
 	if isHTMXRequest(r) {
 		renderHTML(w, body)
 		return
@@ -357,12 +417,30 @@ func (h *handlers) handleDashboardActivity(w http.ResponseWriter, r *http.Reques
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows := make([]cloudstore.DashboardObservationRow, 0)
 	if h.cfg.Store != nil {
-		loaded, err := h.cfg.Store.ListRecentObservations(project, query, 25)
-		if err != nil {
-			h.renderStoreError(w, r, "dashboard", "Activity", err)
-			return
+		// D2: when GetUserEmail is configured (JWT session mode), use the scoped paginated
+		// method which enforces per-user scope. Missing identity → 403.
+		// When GetUserEmail is nil (static-token/legacy bypass), fall back to the unscoped
+		// ListRecentObservations so existing non-JWT tests remain valid.
+		if h.cfg.GetUserEmail != nil {
+			scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
+			loaded, _, err := h.cfg.Store.ListRecentObservationsPaginated(scope, project, query, "", 25, 0)
+			if err != nil {
+				if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+					w.WriteHeader(http.StatusForbidden)
+					return
+				}
+				h.renderStoreError(w, r, "dashboard", "Activity", err)
+				return
+			}
+			rows = loaded
+		} else {
+			loaded, err := h.cfg.Store.ListRecentObservations(project, query, 25)
+			if err != nil {
+				h.renderStoreError(w, r, "dashboard", "Activity", err)
+				return
+			}
+			rows = loaded
 		}
-		rows = loaded
 	}
 	b := strings.Builder{}
 	b.WriteString(`<section class="frame-section"><p class="section-kicker">ACTIVITY</p><h2>Recent Observation Activity</h2>`)
@@ -415,14 +493,20 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	obsType := strings.TrimSpace(r.URL.Query().Get("type"))
+	// D2: build per-request read scope from the verified principal.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping (total not known yet).
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardObservationRow, 0)
 	total := 0
 	if h.cfg.Store != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, (reqPage-1)*pageSize)
+		rows, total, err = h.cfg.Store.ListRecentObservationsPaginated(scope, project, query, obsType, pageSize, (reqPage-1)*pageSize)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, ObservationsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "browser", "Observations", err)
 			return
 		}
@@ -432,12 +516,12 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, pg.Offset()); err == nil {
+		if refetched, _, err := h.cfg.Store.ListRecentObservationsPaginated(scope, project, query, obsType, pageSize, pg.Offset()); err == nil {
 			rows = refetched
 		} else {
 			log.Printf("dashboard: re-fetch observations page %d: %v (using first-page rows)", pg.Page, err)
 			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentObservationsPaginated(project, query, obsType, pageSize, 0); fallbackErr == nil {
+				if fallback, _, fallbackErr := h.cfg.Store.ListRecentObservationsPaginated(scope, project, query, obsType, pageSize, 0); fallbackErr == nil {
 					rows = fallback
 				} else {
 					log.Printf("dashboard: fallback observations page 1: %v", fallbackErr)
@@ -457,14 +541,20 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	// D2: build per-request read scope from the verified principal.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardSessionRow, 0)
 	total := 0
 	if h.cfg.Store != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, (reqPage-1)*pageSize)
+		rows, total, err = h.cfg.Store.ListRecentSessionsPaginated(scope, project, query, pageSize, (reqPage-1)*pageSize)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, SessionsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "browser", "Sessions", err)
 			return
 		}
@@ -474,12 +564,12 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, pg.Offset()); err == nil {
+		if refetched, _, err := h.cfg.Store.ListRecentSessionsPaginated(scope, project, query, pageSize, pg.Offset()); err == nil {
 			rows = refetched
 		} else {
 			log.Printf("dashboard: re-fetch sessions page %d: %v (using first-page rows)", pg.Page, err)
 			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentSessionsPaginated(project, query, pageSize, 0); fallbackErr == nil {
+				if fallback, _, fallbackErr := h.cfg.Store.ListRecentSessionsPaginated(scope, project, query, pageSize, 0); fallbackErr == nil {
 					rows = fallback
 				} else {
 					log.Printf("dashboard: fallback sessions page 1: %v", fallbackErr)
@@ -499,14 +589,20 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	// D2: build per-request read scope from the verified principal.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardPromptRow, 0)
 	total := 0
 	if h.cfg.Store != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, (reqPage-1)*pageSize)
+		rows, total, err = h.cfg.Store.ListRecentPromptsPaginated(scope, project, query, pageSize, (reqPage-1)*pageSize)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, PromptsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "browser", "Prompts", err)
 			return
 		}
@@ -516,12 +612,12 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	// R4-9: when re-fetch fails and rows are empty, attempt one additional fetch at page 1.
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, pg.Offset()); err == nil {
+		if refetched, _, err := h.cfg.Store.ListRecentPromptsPaginated(scope, project, query, pageSize, pg.Offset()); err == nil {
 			rows = refetched
 		} else {
 			log.Printf("dashboard: re-fetch prompts page %d: %v (using first-page rows)", pg.Page, err)
 			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListRecentPromptsPaginated(project, query, pageSize, 0); fallbackErr == nil {
+				if fallback, _, fallbackErr := h.cfg.Store.ListRecentPromptsPaginated(scope, project, query, pageSize, 0); fallbackErr == nil {
 					rows = fallback
 				} else {
 					log.Printf("dashboard: fallback prompts page 1: %v", fallbackErr)
@@ -608,13 +704,16 @@ func (h *handlers) handleContributors(w http.ResponseWriter, r *http.Request) {
 // pagination targets can swap just the content div.
 // R6-2: on store error, always renders a fragment (no Layout wrapper) — partial-only contract.
 func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	// D2: contributors are admin-only data — pass admin scope; the store method accepts scope for interface consistency.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardContributorRow, 0)
 	total := 0
 	if h.cfg.Store != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListContributorsPaginated(query, pageSize, (reqPage-1)*pageSize)
+		rows, total, err = h.cfg.Store.ListContributorsPaginated(scope, query, pageSize, (reqPage-1)*pageSize)
 		if err != nil {
 			log.Printf("dashboard: contributors list store error: %v", err)
 			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
@@ -623,12 +722,12 @@ func (h *handlers) handleContributorsList(w http.ResponseWriter, r *http.Request
 	}
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListContributorsPaginated(query, pageSize, pg.Offset()); err == nil {
+		if refetched, _, err := h.cfg.Store.ListContributorsPaginated(scope, query, pageSize, pg.Offset()); err == nil {
 			rows = refetched
 		} else {
 			log.Printf("dashboard: re-fetch contributors list page %d: %v", pg.Page, err)
 			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated(query, pageSize, 0); fallbackErr == nil {
+				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated(scope, query, pageSize, 0); fallbackErr == nil {
 					rows = fallback
 				} else {
 					log.Printf("dashboard: fallback contributors list page 1: %v", fallbackErr)
@@ -756,14 +855,20 @@ func (h *handlers) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectObservationsPartial handles GET /dashboard/projects/{name}/observations.
 func (h *handlers) handleProjectObservationsPartial(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	name := strings.TrimSpace(r.PathValue("name"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	obsType := strings.TrimSpace(r.URL.Query().Get("type"))
 	rows := make([]cloudstore.DashboardObservationRow, 0)
 	if h.cfg.Store != nil {
 		var err error
-		rows, _, err = h.cfg.Store.ListRecentObservationsPaginated(name, query, obsType, 50, 0)
+		rows, _, err = h.cfg.Store.ListRecentObservationsPaginated(scope, name, query, obsType, 50, 0)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, ObservationsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "projects", "Project observations", err)
 			return
 		}
@@ -773,13 +878,19 @@ func (h *handlers) handleProjectObservationsPartial(w http.ResponseWriter, r *ht
 
 // handleProjectSessionsPartial handles GET /dashboard/projects/{name}/sessions.
 func (h *handlers) handleProjectSessionsPartial(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	name := strings.TrimSpace(r.PathValue("name"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows := make([]cloudstore.DashboardSessionRow, 0)
 	if h.cfg.Store != nil {
 		var err error
-		rows, _, err = h.cfg.Store.ListRecentSessionsPaginated(name, query, 50, 0)
+		rows, _, err = h.cfg.Store.ListRecentSessionsPaginated(scope, name, query, 50, 0)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, SessionsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "projects", "Project sessions", err)
 			return
 		}
@@ -789,13 +900,19 @@ func (h *handlers) handleProjectSessionsPartial(w http.ResponseWriter, r *http.R
 
 // handleProjectPromptsPartial handles GET /dashboard/projects/{name}/prompts.
 func (h *handlers) handleProjectPromptsPartial(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	name := strings.TrimSpace(r.PathValue("name"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	rows := make([]cloudstore.DashboardPromptRow, 0)
 	if h.cfg.Store != nil {
 		var err error
-		rows, _, err = h.cfg.Store.ListRecentPromptsPaginated(name, query, 50, 0)
+		rows, _, err = h.cfg.Store.ListRecentPromptsPaginated(scope, name, query, 50, 0)
 		if err != nil {
+			if errors.Is(err, cloudstore.ErrDashboardIdentityRequired) {
+				renderComponentStatus(w, r, http.StatusForbidden, PromptsPartial(nil, Pagination{}))
+				return
+			}
 			h.renderStoreError(w, r, "projects", "Project prompts", err)
 			return
 		}
@@ -829,12 +946,14 @@ func (h *handlers) handleAdminUsersList(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// Admin users list: admin scope, no per-member filtering.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardContributorRow, 0)
 	total := 0
 	if h.cfg.Store != nil {
 		var err error
-		rows, total, err = h.cfg.Store.ListContributorsPaginated("", pageSize, (reqPage-1)*pageSize)
+		rows, total, err = h.cfg.Store.ListContributorsPaginated(scope, "", pageSize, (reqPage-1)*pageSize)
 		if err != nil {
 			log.Printf("dashboard: admin users list store error: %v", err)
 			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Dashboard data is temporarily unavailable."))
@@ -843,12 +962,12 @@ func (h *handlers) handleAdminUsersList(w http.ResponseWriter, r *http.Request) 
 	}
 	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
 	if needsRefetch && h.cfg.Store != nil {
-		if refetched, _, err := h.cfg.Store.ListContributorsPaginated("", pageSize, pg.Offset()); err == nil {
+		if refetched, _, err := h.cfg.Store.ListContributorsPaginated(scope, "", pageSize, pg.Offset()); err == nil {
 			rows = refetched
 		} else {
 			log.Printf("dashboard: re-fetch admin users list page %d: %v", pg.Page, err)
 			if len(rows) == 0 {
-				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated("", pageSize, 0); fallbackErr == nil {
+				if fallback, _, fallbackErr := h.cfg.Store.ListContributorsPaginated(scope, "", pageSize, 0); fallbackErr == nil {
 					rows = fallback
 				} else {
 					log.Printf("dashboard: fallback admin users list page 1: %v", fallbackErr)
@@ -945,11 +1064,13 @@ func (h *handlers) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Session", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Session Not Found", "Invalid session identifier.")))
 		return
 	}
+	// D2: build per-request read scope for session detail.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	var sess *cloudstore.DashboardSessionRow
 	var obs []cloudstore.DashboardObservationRow
 	var prompts []cloudstore.DashboardPromptRow
 	if h.cfg.Store != nil {
-		s, o, pr, err := h.cfg.Store.GetSessionDetail(project, sessionID)
+		s, o, pr, err := h.cfg.Store.GetSessionDetail(scope, project, sessionID)
 		if err != nil {
 			h.renderStoreError(w, r, "browser", "Session detail", err)
 			return
@@ -972,11 +1093,13 @@ func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Reques
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Observation", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Observation Not Found", "Invalid observation identifier.")))
 		return
 	}
+	// D2: build per-request read scope for observation detail.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	var obs *cloudstore.DashboardObservationRow
 	var sess *cloudstore.DashboardSessionRow
 	var related []cloudstore.DashboardObservationRow
 	if h.cfg.Store != nil {
-		o, s, rel, err := h.cfg.Store.GetObservationDetail(project, sessionID, syncID)
+		o, s, rel, err := h.cfg.Store.GetObservationDetail(scope, project, sessionID, syncID)
 		if err != nil {
 			h.renderStoreError(w, r, "browser", "Observation detail", err)
 			return
@@ -999,11 +1122,13 @@ func (h *handlers) handlePromptDetail(w http.ResponseWriter, r *http.Request) {
 		renderComponentStatus(w, r, http.StatusNotFound, Layout("Prompt", p.DisplayName(), "browser", p.IsAdmin(), EmptyState("Prompt Not Found", "Invalid prompt identifier.")))
 		return
 	}
+	// D2: build per-request read scope for prompt detail.
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	var prompt *cloudstore.DashboardPromptRow
 	var sess *cloudstore.DashboardSessionRow
 	var related []cloudstore.DashboardPromptRow
 	if h.cfg.Store != nil {
-		pr, s, rel, err := h.cfg.Store.GetPromptDetail(project, sessionID, syncID)
+		pr, s, rel, err := h.cfg.Store.GetPromptDetail(scope, project, sessionID, syncID)
 		if err != nil {
 			h.renderStoreError(w, r, "browser", "Prompt detail", err)
 			return

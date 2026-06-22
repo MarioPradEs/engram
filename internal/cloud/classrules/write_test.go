@@ -9,6 +9,19 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/classrules"
 )
 
+// mockReloader is a test implementation of classrules.Reloader that records
+// whether Reload was called.
+type mockReloader struct {
+	fn func() error
+}
+
+func (m *mockReloader) Reload() error {
+	if m.fn != nil {
+		return m.fn()
+	}
+	return nil
+}
+
 // ─── B3: ValidateColors ───────────────────────────────────────────────────────
 
 // TestValidateColors_RejectsInvalidHex asserts that ValidateColors returns an
@@ -174,6 +187,448 @@ func TestWriteColors_ReloadsAfterSuccessfulWrite(t *testing.T) {
 	}
 }
 
+// ─── WriteGameEntry ──────────────────────────────────────────────────────────
+
+// TestWriteGameEntry_AddGame asserts that WriteGameEntry with a new games list
+// (including a new entry) + its color writes both atomically, preserving other sections.
+func TestWriteGameEntry_AddGame(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: engineering
+games:
+  - "spark"
+graph_colors:
+  games:
+    spark: "#E5C07B"
+  departments:
+    dev: "#528BFF"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	newGames := []string{"spark", "nova"}
+	newColors := map[string]string{"spark": "#E5C07B", "nova": "#61AFEF"}
+
+	reloadCalled := false
+	type reloader struct{ called *bool }
+	r := &struct{ called *bool }{called: &reloadCalled}
+	_ = r
+
+	// Use a nil reloader for this test; verify file contents only.
+	if err := classrules.WriteGameEntry(path, nil, newGames, newColors); err != nil {
+		t.Fatalf("WriteGameEntry: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteGameEntry: %v", err)
+	}
+	if len(cfg.Games) != 2 {
+		t.Errorf("expected 2 games, got %d: %v", len(cfg.Games), cfg.Games)
+	}
+	if cfg.GraphColors.Games["nova"] != "#61AFEF" {
+		t.Errorf("nova color = %q, want #61AFEF", cfg.GraphColors.Games["nova"])
+	}
+	if cfg.GraphColors.Games["spark"] != "#E5C07B" {
+		t.Errorf("spark color = %q, want #E5C07B", cfg.GraphColors.Games["spark"])
+	}
+	// Department color must be preserved.
+	if cfg.GraphColors.Departments["dev"] != "#528BFF" {
+		t.Errorf("dev dept color = %q after WriteGameEntry, want #528BFF (should be preserved)", cfg.GraphColors.Departments["dev"])
+	}
+	// Departments list must be preserved.
+	if len(cfg.Departments) == 0 {
+		t.Error("departments section was not preserved after WriteGameEntry")
+	}
+}
+
+// TestWriteGameEntry_RenameGame asserts that renaming a game (updating games list
+// + migrating color) leaves no old key and adds the new key.
+func TestWriteGameEntry_RenameGame(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `games:
+  - "old-name"
+  - "other-game"
+graph_colors:
+  games:
+    old-name: "#AABBCC"
+    other-game: "#112233"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Rename "old-name" → "new-name"; migrate color.
+	newGames := []string{"new-name", "other-game"}
+	newColors := map[string]string{"new-name": "#AABBCC", "other-game": "#112233"}
+
+	if err := classrules.WriteGameEntry(path, nil, newGames, newColors); err != nil {
+		t.Fatalf("WriteGameEntry rename: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after rename: %v", err)
+	}
+	if _, exists := cfg.GraphColors.Games["old-name"]; exists {
+		t.Error("old-name color key should not exist after rename")
+	}
+	if cfg.GraphColors.Games["new-name"] != "#AABBCC" {
+		t.Errorf("new-name color = %q, want #AABBCC", cfg.GraphColors.Games["new-name"])
+	}
+	found := false
+	for _, g := range cfg.Games {
+		if g == "new-name" {
+			found = true
+		}
+		if g == "old-name" {
+			t.Error("old-name still in games list after rename")
+		}
+	}
+	if !found {
+		t.Error("new-name not found in games list after rename")
+	}
+}
+
+// TestWriteGameEntry_DeleteGame asserts that removing a game from the list and
+// its color leaves the file consistent.
+func TestWriteGameEntry_DeleteGame(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `games:
+  - "alpha"
+  - "beta"
+graph_colors:
+  games:
+    alpha: "#111111"
+    beta: "#222222"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Delete "beta" — pass remaining game + its color only.
+	if err := classrules.WriteGameEntry(path, nil, []string{"alpha"}, map[string]string{"alpha": "#111111"}); err != nil {
+		t.Fatalf("WriteGameEntry delete: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after delete: %v", err)
+	}
+	if len(cfg.Games) != 1 || cfg.Games[0] != "alpha" {
+		t.Errorf("expected [alpha], got %v", cfg.Games)
+	}
+	if _, exists := cfg.GraphColors.Games["beta"]; exists {
+		t.Error("beta color key should not exist after delete")
+	}
+}
+
+// TestWriteGameEntry_InvalidColorRejected asserts that an invalid color value
+// causes an error without modifying the file.
+func TestWriteGameEntry_InvalidColorRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := "games:\n  - spark\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	err := classrules.WriteGameEntry(path, nil, []string{"spark"}, map[string]string{"spark": "bad-color"})
+	if err == nil {
+		t.Error("WriteGameEntry with invalid color must return error")
+	}
+
+	got, _ := os.ReadFile(path)
+	if string(got) != initial {
+		t.Errorf("file must not be modified on validate failure; got:\n%s", string(got))
+	}
+}
+
+// ─── WriteGameEntryAllowEmpty ────────────────────────────────────────────────
+
+// TestWriteGameEntryAllowEmpty_WritesEmptyGamesList asserts that
+// WriteGameEntryAllowEmpty with an empty games list writes an empty games:
+// block to disk (not leaving a stale list) and preserves dept colors.
+func TestWriteGameEntryAllowEmpty_WritesEmptyGamesList(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+games:
+  - "last-game"
+graph_colors:
+  games:
+    last-game: "#AABBCC"
+  departments:
+    dev: "#528BFF"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Delete the last game — empty games list, empty game colors.
+	if err := classrules.WriteGameEntryAllowEmpty(path, nil, []string{}, map[string]string{}); err != nil {
+		t.Fatalf("WriteGameEntryAllowEmpty: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after empty write: %v", err)
+	}
+	if len(cfg.Games) != 0 {
+		t.Errorf("expected empty games list on disk, got %v", cfg.Games)
+	}
+	if _, exists := cfg.GraphColors.Games["last-game"]; exists {
+		t.Error("last-game color key must not exist after delete")
+	}
+	// Dept color must be preserved.
+	if cfg.GraphColors.Departments["dev"] != "#528BFF" {
+		t.Errorf("dev dept color = %q after empty-game write, want #528BFF (must be preserved)", cfg.GraphColors.Departments["dev"])
+	}
+}
+
+// TestWriteGameEntryAllowEmpty_InvalidColorRejected asserts that an invalid color
+// causes an error without modifying the file, even for an empty games list.
+func TestWriteGameEntryAllowEmpty_InvalidColorRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := "games:\n  - spark\n"
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	err := classrules.WriteGameEntryAllowEmpty(path, nil, []string{}, map[string]string{"orphan": "bad-color"})
+	if err == nil {
+		t.Error("WriteGameEntryAllowEmpty with invalid color must return error")
+	}
+
+	got, _ := os.ReadFile(path)
+	if string(got) != initial {
+		t.Errorf("file must not be modified on validate failure; got:\n%s", string(got))
+	}
+}
+
+// ─── WriteDeptEntry ──────────────────────────────────────────────────────────
+
+// TestWriteDeptEntry_AddDept asserts that WriteDeptEntry with a new departments
+// list (including a new entry) + its color writes both atomically, preserving games.
+func TestWriteDeptEntry_AddDept(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+    aliases:
+      - engineering
+games:
+  - "spark"
+graph_colors:
+  games:
+    spark: "#E5C07B"
+  departments:
+    dev: "#528BFF"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	newDepts := []classrules.Department{
+		{Name: "dev", Aliases: []string{"engineering"}},
+		{Name: "art"},
+	}
+	newColors := map[string]string{"dev": "#528BFF", "art": "#C678DD"}
+
+	if err := classrules.WriteDeptEntry(path, nil, newDepts, newColors); err != nil {
+		t.Fatalf("WriteDeptEntry: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteDeptEntry: %v", err)
+	}
+	if len(cfg.Departments) != 2 {
+		t.Errorf("expected 2 departments, got %d: %v", len(cfg.Departments), cfg.Departments)
+	}
+	if cfg.GraphColors.Departments["art"] != "#C678DD" {
+		t.Errorf("art dept color = %q, want #C678DD", cfg.GraphColors.Departments["art"])
+	}
+	if cfg.GraphColors.Departments["dev"] != "#528BFF" {
+		t.Errorf("dev dept color = %q, want #528BFF", cfg.GraphColors.Departments["dev"])
+	}
+	// Game color must be preserved.
+	if cfg.GraphColors.Games["spark"] != "#E5C07B" {
+		t.Errorf("spark game color = %q after WriteDeptEntry, want #E5C07B (should be preserved)", cfg.GraphColors.Games["spark"])
+	}
+	// Games list must be preserved.
+	if len(cfg.Games) == 0 {
+		t.Error("games section was not preserved after WriteDeptEntry")
+	}
+}
+
+// TestWriteDeptEntry_RenamePreservesAliasesAndMigratesColor asserts that renaming a
+// department (updating departments list + migrating color) preserves aliases on the
+// renamed entry and leaves no old color key.
+func TestWriteDeptEntry_RenamePreservesAliasesAndMigratesColor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+    aliases:
+      - engineering
+      - eng
+  - name: art
+graph_colors:
+  departments:
+    dev: "#528BFF"
+    art: "#C678DD"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Rename "dev" → "engineering-team"; preserve its aliases.
+	newDepts := []classrules.Department{
+		{Name: "engineering-team", Aliases: []string{"engineering", "eng"}},
+		{Name: "art"},
+	}
+	newColors := map[string]string{"engineering-team": "#528BFF", "art": "#C678DD"}
+
+	if err := classrules.WriteDeptEntry(path, nil, newDepts, newColors); err != nil {
+		t.Fatalf("WriteDeptEntry rename: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after rename: %v", err)
+	}
+	if _, exists := cfg.GraphColors.Departments["dev"]; exists {
+		t.Error("dev color key should not exist after rename")
+	}
+	if cfg.GraphColors.Departments["engineering-team"] != "#528BFF" {
+		t.Errorf("engineering-team color = %q, want #528BFF", cfg.GraphColors.Departments["engineering-team"])
+	}
+	// Verify aliases were preserved in the renamed entry.
+	found := false
+	for _, d := range cfg.Departments {
+		if d.Name == "dev" {
+			t.Error("dev still in departments list after rename")
+		}
+		if d.Name == "engineering-team" {
+			found = true
+			if len(d.Aliases) != 2 {
+				t.Errorf("expected 2 aliases on engineering-team, got %v", d.Aliases)
+			}
+		}
+	}
+	if !found {
+		t.Error("engineering-team not found in departments list after rename")
+	}
+}
+
+// TestWriteDeptEntry_DeleteDept asserts that removing a dept from the list and
+// its color leaves the file consistent.
+func TestWriteDeptEntry_DeleteDept(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+  - name: art
+graph_colors:
+  departments:
+    dev: "#528BFF"
+    art: "#C678DD"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Delete "art" — pass remaining dept + its color only.
+	if err := classrules.WriteDeptEntry(path, nil, []classrules.Department{{Name: "dev"}}, map[string]string{"dev": "#528BFF"}); err != nil {
+		t.Fatalf("WriteDeptEntry delete: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after delete: %v", err)
+	}
+	if len(cfg.Departments) != 1 || cfg.Departments[0].Name != "dev" {
+		t.Errorf("expected [dev], got %v", cfg.Departments)
+	}
+	if _, exists := cfg.GraphColors.Departments["art"]; exists {
+		t.Error("art color key should not exist after delete")
+	}
+}
+
+// TestWriteDeptEntry_InvalidColorRejected asserts that an invalid color value
+// causes an error without modifying the file.
+func TestWriteDeptEntry_InvalidColorRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	err := classrules.WriteDeptEntry(path, nil, []classrules.Department{{Name: "dev"}}, map[string]string{"dev": "bad-color"})
+	if err == nil {
+		t.Error("WriteDeptEntry with invalid color must return error")
+	}
+
+	got, _ := os.ReadFile(path)
+	if string(got) != initial {
+		t.Errorf("file must not be modified on validate failure; got:\n%s", string(got))
+	}
+}
+
+// TestWriteDeptEntry_PreservesGamesSection asserts that WriteDeptEntry never
+// touches the games list or game colors.
+func TestWriteDeptEntry_PreservesGamesSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	initial := `departments:
+  - name: dev
+games:
+  - "spark"
+  - "nova"
+graph_colors:
+  games:
+    spark: "#E5C07B"
+    nova: "#61AFEF"
+  departments:
+    dev: "#528BFF"
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Add "art" dept; games must remain untouched.
+	newDepts := []classrules.Department{{Name: "dev"}, {Name: "art"}}
+	newColors := map[string]string{"dev": "#528BFF", "art": "#C678DD"}
+
+	if err := classrules.WriteDeptEntry(path, nil, newDepts, newColors); err != nil {
+		t.Fatalf("WriteDeptEntry: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteDeptEntry: %v", err)
+	}
+	if len(cfg.Games) != 2 {
+		t.Errorf("expected 2 games preserved, got %d: %v", len(cfg.Games), cfg.Games)
+	}
+	if cfg.GraphColors.Games["spark"] != "#E5C07B" {
+		t.Errorf("spark color = %q after WriteDeptEntry, want #E5C07B (should be preserved)", cfg.GraphColors.Games["spark"])
+	}
+	if cfg.GraphColors.Games["nova"] != "#61AFEF" {
+		t.Errorf("nova color = %q after WriteDeptEntry, want #61AFEF (should be preserved)", cfg.GraphColors.Games["nova"])
+	}
+}
+
 // TestWriteColors_ParsesBackCorrectly asserts the written YAML can be loaded
 // back via LoadFromFile and returns the same color values.
 func TestWriteColors_ParsesBackCorrectly(t *testing.T) {
@@ -203,5 +658,143 @@ func TestWriteColors_ParsesBackCorrectly(t *testing.T) {
 		if got := cfg.GraphColors.Departments[k]; got != want {
 			t.Errorf("round-trip: departments[%q] = %q, want %q", k, got, want)
 		}
+	}
+}
+
+// ─── WriteRules ──────────────────────────────────────────────────────────────
+
+// TestWriteRules_RoundTrip asserts that WriteRules writes the new rules string
+// to the YAML file and that LoadFromFile returns it unchanged.
+func TestWriteRules_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+
+	initial := `games:
+  - spark
+departments:
+  - name: dev
+graph_colors:
+  games:
+    spark: "#E5C07B"
+  departments:
+    dev: "#528BFF"
+rules: old rules text
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	newRules := "## New Classification Rules\n\nUse project scope for all personal work."
+	reloadCalled := false
+	loader := &mockReloader{fn: func() error { reloadCalled = true; return nil }}
+
+	if err := classrules.WriteRules(path, loader, newRules); err != nil {
+		t.Fatalf("WriteRules: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteRules: %v", err)
+	}
+	if cfg.Rules != newRules {
+		t.Errorf("WriteRules round-trip: got Rules=%q, want %q", cfg.Rules, newRules)
+	}
+	if !reloadCalled {
+		t.Error("WriteRules must call loader.Reload() after a successful write")
+	}
+}
+
+// TestWriteRules_PreservesGamesDeptsAndColors asserts that WriteRules patches
+// ONLY cfg.Rules, leaving cfg.Games, cfg.Departments, and cfg.GraphColors intact.
+func TestWriteRules_PreservesGamesDeptsAndColors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+
+	initial := `games:
+  - spark
+  - nova
+departments:
+  - name: dev
+    aliases:
+      - engineering
+graph_colors:
+  games:
+    spark: "#E5C07B"
+    nova: "#61AFEF"
+  departments:
+    dev: "#528BFF"
+rules: old rules
+`
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	if err := classrules.WriteRules(path, nil, "new rules text"); err != nil {
+		t.Fatalf("WriteRules: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteRules: %v", err)
+	}
+
+	// Games must be preserved.
+	if len(cfg.Games) != 2 {
+		t.Errorf("games count = %d, want 2 (games must be preserved)", len(cfg.Games))
+	}
+	// Departments must be preserved (including aliases).
+	if len(cfg.Departments) == 0 {
+		t.Error("departments must be preserved after WriteRules")
+	}
+	if len(cfg.Departments[0].Aliases) == 0 {
+		t.Error("department aliases must be preserved after WriteRules")
+	}
+	// GraphColors must be preserved.
+	if cfg.GraphColors.Games["spark"] != "#E5C07B" {
+		t.Errorf("spark color = %q after WriteRules, want #E5C07B (must be preserved)", cfg.GraphColors.Games["spark"])
+	}
+	if cfg.GraphColors.Departments["dev"] != "#528BFF" {
+		t.Errorf("dev dept color = %q after WriteRules, want #528BFF (must be preserved)", cfg.GraphColors.Departments["dev"])
+	}
+	// Rules must be the new value.
+	if cfg.Rules != "new rules text" {
+		t.Errorf("rules = %q, want %q", cfg.Rules, "new rules text")
+	}
+}
+
+// TestWriteRules_EmptyRulesAllowed asserts that WriteRules accepts an empty
+// string (clearing the rules field) without error.
+func TestWriteRules_EmptyRulesAllowed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	if err := os.WriteFile(path, []byte("rules: some text\ngames:\n  - spark\n"), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	if err := classrules.WriteRules(path, nil, ""); err != nil {
+		t.Fatalf("WriteRules with empty string must succeed, got: %v", err)
+	}
+
+	cfg, err := classrules.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile after WriteRules(empty): %v", err)
+	}
+	if cfg.Rules != "" {
+		t.Errorf("expected empty rules after WriteRules(\"\"), got %q", cfg.Rules)
+	}
+}
+
+// TestWriteRules_NilLoaderIsNoOp asserts that WriteRules with a nil loader
+// succeeds and does not panic (reload is skipped).
+func TestWriteRules_NilLoaderIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "classification-rules.yaml")
+	if err := os.WriteFile(path, []byte("rules: original\n"), 0o600); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+
+	// Must not panic with nil loader.
+	if err := classrules.WriteRules(path, nil, "updated"); err != nil {
+		t.Fatalf("WriteRules(nil loader): %v", err)
 	}
 }

@@ -156,8 +156,10 @@ func TestW1_EditGuard_SoleActiveAdmin_CannotSetStatusOffboarding(t *testing.T) {
 }
 
 // TestW1_EditGuard_TwoActiveAdmins_AllowsStatusChange verifies that when a second
-// active admin exists, editing one admin's status to "removed" is allowed.
-// The guard must NOT fire because there remains one active admin.
+// active admin exists, the global lockout guard does NOT fire when editing the
+// OTHER admin's status to "removed" (because one active admin still remains).
+// Note: admin1 is the caller; admin2 is the target — this avoids the self-protection
+// guard (D4-SP) so we can isolate the global lockout guard behavior.
 func TestW1_EditGuard_TwoActiveAdmins_AllowsStatusChange(t *testing.T) {
 	initialUsers := []users.Principal{
 		{Email: "admin1@vivastudios.com", Name: "Admin1", Role: "admin", Status: "active", Department: "dev"},
@@ -166,10 +168,12 @@ func TestW1_EditGuard_TwoActiveAdmins_AllowsStatusChange(t *testing.T) {
 	var written []users.Principal
 	mux := newW1Mux(t, initialUsers, "admin1@vivastudios.com", &written)
 
-	rec := postMembersEdit(mux, "admin1@vivastudios.com", "admin", "dev", "removed")
-	// Should succeed (200 or 303) because admin2 is still an active admin.
+	// Edit admin2 (not the caller), so self-protection does not fire.
+	// Global lockout guard must NOT fire because admin1 remains active.
+	rec := postMembersEdit(mux, "admin2@vivastudios.com", "admin", "dev", "removed")
+	// Should succeed (200 or 303) because admin1 is still an active admin.
 	if rec.Code == http.StatusBadRequest {
-		t.Errorf("W1: guard fired when two active admins exist; edit should be allowed. body=%q", rec.Body.String())
+		t.Errorf("W1: lockout guard fired when two active admins exist; edit should be allowed. body=%q", rec.Body.String())
 	}
 	if rec.Code != http.StatusOK && rec.Code != http.StatusSeeOther {
 		t.Errorf("W1: expected 200/303 with two active admins, got %d; body=%q", rec.Code, rec.Body.String())

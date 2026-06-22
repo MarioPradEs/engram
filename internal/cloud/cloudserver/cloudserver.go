@@ -84,6 +84,39 @@ type CloudServer struct {
 	// classrulesFilePath is the absolute path to classification-rules.yaml inside the
 	// container. Used by admin games handlers for atomic write + local git commit (D6).
 	classrulesFilePath string
+	// classrulesCurrentColorsFn returns the current (gameColors, deptColors) maps from
+	// the in-memory ClassrulesLoader. Used by the admin games color section. (Slice B)
+	classrulesCurrentColorsFn func() (map[string]string, map[string]string)
+	// classrulesWriteColorFn persists a color for a game slug in graph_colors.games.
+	// Performs read-modify-write on the classrules YAML, calling reload after success. (Slice B)
+	classrulesWriteColorFn func(name, color string) error
+	// classrulesWriteDeptColorFn persists a color for a dept key in graph_colors.departments.
+	// Performs read-modify-write on the classrules YAML, calling reload after success. (Block A)
+	classrulesWriteDeptColorFn func(name, color string) error
+	// classrulesSaveGameFn is the combined save closure used by POST /dashboard/admin/games/save.
+	// It receives the full new games list and game-color map and writes them atomically.
+	classrulesSaveGameFn func(newGames []string, newGameColors map[string]string) error
+	// classrulesDeleteGameFn is the combined delete closure used by POST /dashboard/admin/games/delete.
+	// It receives the full new games list and game-color map (with the deleted entry removed) and writes atomically.
+	classrulesDeleteGameFn func(newGames []string, newGameColors map[string]string) error
+	// classrulesCurrentDeptsFn returns the current canonical department names from the
+	// ClassrulesLoader (cfg.Departments[].Name). Used by the admin departments UI.
+	classrulesCurrentDeptsFn func() []string
+	// classrulesCurrentDeptEntriesFn returns the full department entries (name + aliases)
+	// from the ClassrulesLoader. Used by save/delete handlers to preserve aliases.
+	classrulesCurrentDeptEntriesFn func() []dashboard.DeptEntry
+	// classrulesSaveDeptFn is the combined save closure used by POST /dashboard/admin/departments/save.
+	// It receives the full new departments list and dept-color map and writes them atomically.
+	classrulesSaveDeptFn func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error
+	// classrulesDeleteDeptFn is the combined delete closure used by POST /dashboard/admin/departments/delete.
+	// It receives the remaining departments list and dept-color map (deleted entry already removed).
+	classrulesDeleteDeptFn func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error
+	// classrulesListRulesFn returns the current free-form rules text from the in-memory
+	// ClassrulesLoader. Used by GET /dashboard/admin/rules to pre-fill the textarea.
+	classrulesListRulesFn func() string
+	// classrulesSaveRulesFn persists updated rules text via classrules.WriteRules.
+	// Called by POST /dashboard/admin/rules with the submitted rules form field.
+	classrulesSaveRulesFn func(rules string) error
 }
 
 const defaultHost = "127.0.0.1"
@@ -169,6 +202,107 @@ func WithClassrulesFilePath(path string) Option {
 func WithClassrulesCurrentGames(fn func() []string) Option {
 	return func(s *CloudServer) {
 		s.classrulesCurrentGamesFn = fn
+	}
+}
+
+// WithClassrulesCurrentColors registers a closure that returns the current game and
+// department color maps from the in-memory ClassrulesLoader. The admin color-map
+// editor calls this on every GET /dashboard/admin/games request. (Slice B)
+func WithClassrulesCurrentColors(fn func() (map[string]string, map[string]string)) Option {
+	return func(s *CloudServer) {
+		s.classrulesCurrentColorsFn = fn
+	}
+}
+
+// WithClassrulesWriteColor registers the color-save closure used by
+// POST /dashboard/admin/games/{name}/color. The closure receives a game slug
+// plus a validated hex color and must persist via classrules.WriteColors
+// (read-modify-write on graph_colors.games). (Slice B)
+func WithClassrulesWriteColor(fn func(name, color string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesWriteColorFn = fn
+	}
+}
+
+// WithClassrulesWriteDeptColor registers the color-save closure used by
+// POST /dashboard/admin/departments/{name}/color. The closure receives a dept key
+// plus a validated hex color and must persist via classrules.WriteColors
+// (read-modify-write on graph_colors.departments). (Block A)
+func WithClassrulesWriteDeptColor(fn func(name, color string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesWriteDeptColorFn = fn
+	}
+}
+
+// WithSaveGame registers the combined save closure used by
+// POST /dashboard/admin/games/save. The closure receives the full updated games
+// list and game-color map and must write both atomically via classrules.WriteGameEntry.
+func WithSaveGame(fn func(newGames []string, newGameColors map[string]string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesSaveGameFn = fn
+	}
+}
+
+// WithDeleteGame registers the combined delete closure used by
+// POST /dashboard/admin/games/delete. The closure receives the remaining games
+// list and game-color map (deleted entry already removed) and writes atomically.
+func WithDeleteGame(fn func(newGames []string, newGameColors map[string]string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesDeleteGameFn = fn
+	}
+}
+
+// WithClassrulesCurrentDepts registers a closure that returns the current canonical
+// department names from the ClassrulesLoader (cfg.Departments[].Name). The admin
+// departments UI calls this on every GET /dashboard/admin/departments request.
+func WithClassrulesCurrentDepts(fn func() []string) Option {
+	return func(s *CloudServer) {
+		s.classrulesCurrentDeptsFn = fn
+	}
+}
+
+// WithClassrulesCurrentDeptEntries registers a closure that returns the full department
+// entries (name + aliases) from the ClassrulesLoader. Save/delete handlers use this to
+// preserve aliases through rename operations.
+func WithClassrulesCurrentDeptEntries(fn func() []dashboard.DeptEntry) Option {
+	return func(s *CloudServer) {
+		s.classrulesCurrentDeptEntriesFn = fn
+	}
+}
+
+// WithSaveDept registers the combined save closure used by
+// POST /dashboard/admin/departments/save. The closure receives the full updated
+// departments list and dept-color map and must write both atomically.
+func WithSaveDept(fn func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesSaveDeptFn = fn
+	}
+}
+
+// WithDeleteDept registers the combined delete closure used by
+// POST /dashboard/admin/departments/delete. The closure receives the remaining
+// departments list and dept-color map (deleted entry already removed) and writes atomically.
+func WithDeleteDept(fn func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesDeleteDeptFn = fn
+	}
+}
+
+// WithClassrulesListRules registers a closure that returns the current free-form
+// classification rules text from the ClassrulesLoader. The admin rules editor
+// calls this on every GET /dashboard/admin/rules request to pre-fill the textarea.
+func WithClassrulesListRules(fn func() string) Option {
+	return func(s *CloudServer) {
+		s.classrulesListRulesFn = fn
+	}
+}
+
+// WithClassrulesSaveRules registers the rules-save closure used by
+// POST /dashboard/admin/rules. The closure receives the new rules text and
+// must persist it via classrules.WriteRules (atomic write + reload).
+func WithClassrulesSaveRules(fn func(rules string) error) Option {
+	return func(s *CloudServer) {
+		s.classrulesSaveRulesFn = fn
 	}
 }
 
@@ -334,6 +468,27 @@ func (s *CloudServer) routes() {
 		ListGames:          s.listGamesFunc(),
 		ClassrulesReload:   s.classrulesReloadFn,
 		ClassrulesFilePath: s.resolveClassrulesFilePath(),
+		// Slice B: ListColors returns the current game and department color maps from the
+		// in-memory classrules config. Nil when classrules is not configured.
+		ListColors: s.listColorsFunc(),
+		// Block A: WriteGameColor writes graph_colors.games[name] only.
+		// Separated from dept colors (no longer uses isDeptKey disambiguation).
+		WriteGameColor: s.writeGameColorFunc(),
+		// Block A: WriteDeptColor writes graph_colors.departments[name] only.
+		// Called by the new POST /dashboard/admin/departments/{name}/color route.
+		WriteDeptColor: s.writeDeptColorFunc(),
+		// Save/Delete: combined game list + color writes (POST /dashboard/admin/games/save and /delete).
+		SaveGame:   s.saveGameFunc(),
+		DeleteGame: s.deleteGameFunc(),
+		// Departments editable table: canonical list + save/delete closures.
+		ListDepartmentsCanonical: s.listDeptsFunc(),
+		ListDeptEntriesCanonical: s.listDeptEntriesFunc(),
+		SaveDept:                 s.saveDeptFunc(),
+		DeleteDept:               s.deleteDeptFunc(),
+		// Rules editor: ListRules returns the current cfg.Rules text; SaveRules persists
+		// updates atomically via classrules.WriteRules + loader.Reload.
+		ListRules: s.listRulesFunc(),
+		SaveRules: s.saveRulesFunc(),
 		// D4: ListProvisionedUsers — closure that sources the admin member list from
 		// users.yaml (YAMLLoader.List) rather than cloud_chunks contributors. Only
 		// wired when the authLoader implements the listableUserDirectory interface

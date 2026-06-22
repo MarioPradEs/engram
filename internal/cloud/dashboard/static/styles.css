@@ -848,6 +848,75 @@ tbody tr:hover {
 	background: rgba(245, 130, 31, 0.06);
 }
 
+/* Compact spreadsheet-style admin tables (Games / Departments).
+   Dense rows, grid cell borders, small inline inputs. */
+.spreadsheet-table {
+	width: auto;
+	border-collapse: collapse;
+	font-size: 0.8rem;
+}
+
+.spreadsheet-table th,
+.spreadsheet-table td {
+	padding: 0.18rem 0.45rem;
+	vertical-align: middle;
+	border: 1px solid rgba(154, 154, 162, 0.32);
+	line-height: 1.25;
+}
+
+.spreadsheet-table th {
+	font-size: 0.62rem;
+	padding: 0.22rem 0.45rem;
+}
+
+.spreadsheet-table .inline-game-row-form,
+.spreadsheet-table .inline-color-form,
+.spreadsheet-table .inline-delete-form {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	margin: 0;
+}
+
+.spreadsheet-table td {
+	vertical-align: middle;
+}
+
+.spreadsheet-table .input-game-name {
+	padding: 0.1rem 0.45rem;
+	font-size: 0.8rem;
+	height: 2rem;
+	margin: 0;
+	width: 14rem;
+	box-sizing: border-box;
+	vertical-align: middle;
+}
+
+.spreadsheet-table input[type="color"] {
+	width: 2.4rem;
+	height: 2rem;
+	padding: 0;
+	margin: 0;
+	border: 1px solid rgba(154, 154, 162, 0.4);
+	background: transparent;
+	cursor: pointer;
+	vertical-align: middle;
+	box-sizing: border-box;
+}
+
+.spreadsheet-table .btn-small {
+	padding: 0.1rem 0.7rem;
+	font-size: 0.72rem;
+	height: 2rem;
+	line-height: 1;
+	box-sizing: border-box;
+	vertical-align: middle;
+}
+
+.spreadsheet-table .games-add-row td {
+	background: rgba(255, 255, 255, 0.02);
+}
+
 .muted {
 	color: var(--engram-muted);
 	font-family: var(--engram-font-display);

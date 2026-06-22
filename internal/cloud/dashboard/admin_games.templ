@@ -1,31 +1,22 @@
 package dashboard
 
-import "strings"
-
-// AdminGamesPage renders the admin games-editing page.
-// Admin-only — caller must verify p.IsAdmin() before rendering.
+// AdminGamesCompactPage renders the admin games page with a unified editable table:
+//   - One row per existing game: editable name input + color picker + Save + Delete (X).
+//   - One extra "add" row at the bottom: empty name + color + Add button.
+//   - The separate "Games Vocabulary" textarea is removed; its function is absorbed here.
 //
-// games is the current list from the cloud server's in-memory ClassrulesLoader.
-// flashMessage is a non-empty success or error message to display after a write.
-// flashIsError is true when flashMessage describes an error (shown in red).
-//
-// Open-item notice: MCP clients pick up games changes on their next reconnect
-// (restart of `engram mcp`). The cloud server cannot push into running client
-// processes. Per-dev propagation (hook-pull) is a follow-up slice (S4).
-templ AdminGamesPage(games []string, flashMessage string, flashIsError bool) {
+// games is the current list from the in-memory ClassrulesLoader.
+// gameColors maps slug → current hex color (empty string = unset).
+// flashMessage / flashIsError carry flash state surfaced via the redirect query param.
+templ AdminGamesCompactPage(games []string, gameColors map[string]string, flashMessage string, flashIsError bool) {
 	<section class="frame-section">
-		<p class="section-kicker">ADMIN</p>
-		<h2>Games Vocabulary</h2>
-		<p class="section-description">
-			Edit the canonical games list used for memory tagging.
-			Changes are written atomically to <code>classification-rules.yaml</code>
-			and take effect in the cloud server immediately.
-		</p>
-		<div class="open-item-notice">
-			<strong>Note:</strong> Running <code>engram mcp</code> client processes pick up changes
-			on their next reconnect/restart — the cloud server cannot push into running client
-			processes. Per-dev propagation is a follow-up feature (S4, hook-pull).
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN</p>
+				<h2>Games</h2>
+			</div>
 		</div>
+		@adminNav("games")
 		if flashMessage != "" {
 			if flashIsError {
 				<div class="flash-message flash-error">{ flashMessage }</div>
@@ -33,141 +24,198 @@ templ AdminGamesPage(games []string, flashMessage string, flashIsError bool) {
 				<div class="flash-message flash-success">{ flashMessage }</div>
 			}
 		}
-		<div class="games-edit-section">
-			<h3>Current Games ({ formatCount(len(games)) })</h3>
-			<form method="POST" action="/dashboard/admin/games">
-				<div class="form-group">
-					<label for="games-textarea">
-						Games list (one per line):
-					</label>
-					<textarea
-						id="games-textarea"
-						name="games"
-						rows="20"
-						cols="60"
-						placeholder="Enter one game slug per line&#10;e.g. my-game-title"
-					>{ strings.Join(games, "\n") }</textarea>
-				</div>
-				<div class="form-actions">
-					<button type="submit" class="btn-primary">Save Games</button>
-					<a href="/dashboard/admin/games" class="btn-secondary">Reset</a>
-				</div>
-			</form>
+		<div class="open-item-notice">
+			<strong>Note:</strong> Running <code>engram mcp</code> client processes pick up changes
+			on their next reconnect/restart — the cloud server cannot push into running client
+			processes. Per-dev propagation is a follow-up feature (S4, hook-pull).
 		</div>
+		<p class="section-note">
+			Edit game names and border colors for the brain graph view.
+			Changes are written atomically to <code>classification-rules.yaml</code>.
+		</p>
+		<table class="data-table spreadsheet-table">
+			<thead>
+				<tr>
+					<th>Game</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, game := range games {
+					<tr>
+						<td>
+							<form
+								method="POST"
+								action="/dashboard/admin/games/save"
+								class="inline-game-row-form"
+							>
+								<input type="hidden" name="original" value={ game }/>
+								<input
+									type="text"
+									name="name"
+									value={ game }
+									class="input-game-name"
+									aria-label={ "Game name for " + game }
+									required
+								/>
+								<input
+									type="color"
+									name="color"
+									value={ colorOrFallback(gameColors[game], "#888888") }
+									aria-label={ "Border color for " + game }
+								/>
+								<button type="submit" class="btn-small">Save</button>
+							</form>
+						</td>
+						<td>
+							<form
+								method="POST"
+								action="/dashboard/admin/games/delete"
+								class="inline-delete-form"
+							>
+								<input type="hidden" name="name" value={ game }/>
+								<button type="submit" class="btn-small btn-danger">X</button>
+							</form>
+						</td>
+					</tr>
+				}
+				<tr class="games-add-row">
+					<td colspan="2">
+						<form
+							method="POST"
+							action="/dashboard/admin/games/save"
+							class="inline-game-row-form"
+						>
+							<input type="hidden" name="original" value=""/>
+							<input
+								type="text"
+								name="name"
+								value=""
+								class="input-game-name"
+								placeholder="+ new game"
+								aria-label="New game name"
+							/>
+							<input
+								type="color"
+								name="color"
+								value="#888888"
+								aria-label="Color for new game"
+							/>
+							<button type="submit" class="btn-small btn-primary">Add</button>
+						</form>
+					</td>
+				</tr>
+			</tbody>
+		</table>
 	</section>
 }
 
-// ─── Brain Graph View — Admin Color Map UI (Slice B) ─────────────────────────
+// AdminDepartmentsPage renders the admin departments page with a unified editable table:
+//   - One row per existing department: editable name input + color picker + Save + Delete (X).
+//   - One extra "add" row at the bottom: empty name + color + Add button.
+//   - Sourced from the canonical departments list in classification-rules.yaml.
 //
-// AdminGamesColorPage renders the color-map editor for the brain graph view.
-// Only rendered when isAdmin is true. Provides:
-//   - A color input (type=color) per game name, with an HTMX or plain-form POST
-//     to /dashboard/admin/games/{name}/color.
-//   - A department color section for the users.yaml department vocabulary
-//     (ceo/dev/art/qa/analytics/marketing).
-//
-// Design reference: Slice B spec, graph-color-map.
-
-// AdminGamesColorPage renders the full admin page for editing game and department
-// colors used in the brain graph view.
-//
-// games is the list of canonical game slugs (from classification-rules.yaml games:).
-// gameColors maps slug → current hex color (may be empty string for unset).
-// deptColors maps dept key → current hex color (may be empty string for unset).
-// isAdmin must be true to render the edit UI; when false, an access-denied note is shown.
-templ AdminGamesColorPage(games []string, gameColors map[string]string, deptColors map[string]string, isAdmin bool) {
+// departments is the current list of department names from the ClassrulesLoader.
+// deptColors maps dept name → current hex color (empty string = unset).
+// flashMessage / flashIsError carry flash state surfaced via the redirect query param.
+templ AdminDepartmentsPage(departments []string, deptColors map[string]string, flashMessage string, flashIsError bool) {
 	<section class="frame-section">
-		<p class="section-kicker">BRAIN GRAPH</p>
-		<h2>Graph Color Map</h2>
-		<p>Set the border color (per game) and fill color (per department) for the brain graph view. Colors are saved to <code>classification-rules.yaml</code> and take effect on the next graph rebuild.</p>
-		if isAdmin {
-			<div class="color-map-editor">
-				<h3>Game Colors (border)</h3>
-				<p class="section-note">Each game node's border uses the color assigned to its <code>juego</code> tag.</p>
-				<table class="data-table">
-					<thead>
-						<tr>
-							<th>Game</th>
-							<th>Color</th>
-							<th>Action</th>
-						</tr>
-					</thead>
-					<tbody>
-						for _, game := range games {
-							<tr>
-								<td>{ game }</td>
-								<td>
-									<span
-										class="color-swatch"
-										style={ "display:inline-block;width:1.2em;height:1.2em;border:1px solid #555;border-radius:3px;background:" + colorOrFallback(gameColors[game], "#888888") }
-									></span>
-									{ colorOrFallback(gameColors[game], "(unset)") }
-								</td>
-								<td>
-									<form
-										method="POST"
-										action={ templ.SafeURL("/dashboard/admin/games/" + game + "/color") }
-										class="inline-color-form"
-									>
-										<input
-											type="color"
-											name="color"
-											value={ colorOrFallback(gameColors[game], "#888888") }
-											aria-label={ "Color for " + game }
-										/>
-										<button type="submit" class="btn-small">Save</button>
-									</form>
-								</td>
-							</tr>
-						}
-					</tbody>
-				</table>
-				<h3>Department Colors (fill)</h3>
-				<p class="section-note">Each game node's fill uses the color assigned to the author's department from <code>users.yaml</code>.</p>
-				<table class="data-table">
-					<thead>
-						<tr>
-							<th>Department</th>
-							<th>Color</th>
-							<th>Action</th>
-						</tr>
-					</thead>
-					<tbody>
-						for _, dept := range deptVocab() {
-							<tr>
-								<td>{ dept }</td>
-								<td>
-									<span
-										class="color-swatch"
-										style={ "display:inline-block;width:1.2em;height:1.2em;border:1px solid #555;border-radius:3px;background:" + colorOrFallback(deptColors[dept], "#555555") }
-									></span>
-									{ colorOrFallback(deptColors[dept], "(unset)") }
-								</td>
-								<td>
-									<form
-										method="POST"
-										action={ templ.SafeURL("/dashboard/admin/games/" + dept + "/color") }
-										class="inline-color-form"
-									>
-										<input
-											type="color"
-											name="color"
-											value={ colorOrFallback(deptColors[dept], "#555555") }
-											aria-label={ "Color for department " + dept }
-										/>
-										<button type="submit" class="btn-small">Save</button>
-									</form>
-								</td>
-							</tr>
-						}
-					</tbody>
-				</table>
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN</p>
+				<h2>Departments</h2>
 			</div>
-		} else {
-			<div class="empty-state">
-				<p>Admin access is required to edit the color map.</p>
-			</div>
+		</div>
+		@adminNav("departments")
+		if flashMessage != "" {
+			if flashIsError {
+				<div class="flash-message flash-error">{ flashMessage }</div>
+			} else {
+				<div class="flash-message flash-success">{ flashMessage }</div>
+			}
 		}
+		<div class="open-item-notice">
+			<strong>Note:</strong> Department names must match the <code>department</code> field
+			in <code>users.yaml</code> so the brain graph can apply fill colors correctly.
+		</div>
+		<p class="section-note">
+			Edit department names and fill colors for the brain graph view.
+			Changes are written atomically to <code>classification-rules.yaml</code>.
+		</p>
+		<table class="data-table spreadsheet-table">
+			<thead>
+				<tr>
+					<th>Department</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody>
+				for _, dept := range departments {
+					<tr>
+						<td>
+							<form
+								method="POST"
+								action="/dashboard/admin/departments/save"
+								class="inline-game-row-form"
+							>
+								<input type="hidden" name="original" value={ dept }/>
+								<input
+									type="text"
+									name="name"
+									value={ dept }
+									class="input-game-name"
+									aria-label={ "Department name for " + dept }
+									required
+								/>
+								<input
+									type="color"
+									name="color"
+									value={ colorOrFallback(deptColors[dept], "#555555") }
+									aria-label={ "Fill color for department " + dept }
+								/>
+								<button type="submit" class="btn-small">Save</button>
+							</form>
+						</td>
+						<td>
+							<form
+								method="POST"
+								action="/dashboard/admin/departments/delete"
+								class="inline-delete-form"
+							>
+								<input type="hidden" name="name" value={ dept }/>
+								<button type="submit" class="btn-small btn-danger">X</button>
+							</form>
+						</td>
+					</tr>
+				}
+				<tr class="games-add-row">
+					<td colspan="2">
+						<form
+							method="POST"
+							action="/dashboard/admin/departments/save"
+							class="inline-game-row-form"
+						>
+							<input type="hidden" name="original" value=""/>
+							<input
+								type="text"
+								name="name"
+								value=""
+								class="input-game-name"
+								placeholder="+ new department"
+								aria-label="New department name"
+							/>
+							<input
+								type="color"
+								name="color"
+								value="#555555"
+								aria-label="Color for new department"
+							/>
+							<button type="submit" class="btn-small btn-primary">Add</button>
+						</form>
+					</td>
+				</tr>
+			</tbody>
+		</table>
 	</section>
 }
 
@@ -177,42 +225,4 @@ func colorOrFallback(value, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-// deptVocab returns the canonical department keys from users.yaml.
-// This list is the single source of truth for department-fill color keys.
-func deptVocab() []string {
-	return []string{"ceo", "dev", "art", "qa", "analytics", "marketing"}
-}
-
-// formatCount returns a human-readable count string.
-func formatCount(n int) string {
-	if n == 0 {
-		return "none"
-	}
-	if n == 1 {
-		return "1 game"
-	}
-	return strings.Join([]string{intToStr(n), "games"}, " ")
-}
-
-// intToStr converts an int to its decimal string representation.
-// Using a manual approach to avoid importing strconv in the templ file.
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 10)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		buf = append([]byte{byte('0' + n%10)}, buf...)
-		n /= 10
-	}
-	if neg {
-		buf = append([]byte{'-'}, buf...)
-	}
-	return string(buf)
 }

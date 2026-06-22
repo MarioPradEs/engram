@@ -82,11 +82,64 @@ type MountConfig struct {
 	Store              DashboardStore
 	MaxLoginBodyBytes   int64
 	StatusProvider      SyncStatusProvider
-	// WriteGameColor is an optional function called when an admin saves a game color
-	// via POST /dashboard/admin/games/{name}/color. It receives the canonical game name
-	// and the validated hex color string. When nil, the color-save route still registers
-	// but returns a 501 Not Implemented. Callers should wire classrules.WriteColors here.
+	// WriteGameColor is called when an admin saves a game color via
+	// POST /dashboard/admin/games/{name}/color. It receives the game slug and
+	// validated hex color string. When nil, the route returns 501 Not Implemented.
 	WriteGameColor func(game, color string) error
+	// WriteDeptColor is called when an admin saves a department color via
+	// POST /dashboard/admin/departments/{name}/color. It receives the dept key and
+	// validated hex color string. When nil, the route returns 501 Not Implemented.
+	WriteDeptColor func(dept, color string) error
+	// ListColors returns the current game-color map and department-color map from
+	// the in-memory classrules config. Used by handleAdminGames and handleAdminDepartments
+	// to populate color pickers. When nil (classrules not configured), both maps are nil.
+	ListColors func() (gameColors map[string]string, deptColors map[string]string)
+	// SaveGame is called by POST /dashboard/admin/games/save.
+	// It receives the complete new games list (with rename/add already applied) and
+	// the complete new game-color map so both are written atomically.
+	// When nil, the route returns 501 Not Implemented.
+	SaveGame func(newGames []string, newGameColors map[string]string) error
+	// DeleteGame is called by POST /dashboard/admin/games/delete.
+	// It receives the complete new games list (with the deleted game removed) and
+	// the complete new game-color map (with the deleted game's color removed).
+	// When nil, the route returns 501 Not Implemented.
+	DeleteGame func(newGames []string, newGameColors map[string]string) error
+	// ListDepartmentsCanonical returns the current department names from the canonical
+	// classification-rules.yaml departments list (not users.yaml). Used by the admin
+	// departments editable table GET handler.
+	// When nil (classrules not configured), returns nil.
+	ListDepartmentsCanonical func() []string
+	// ListDeptEntriesCanonical returns the full department entries (name + aliases)
+	// from the canonical classification-rules.yaml departments list. Used by save/delete
+	// handlers to preserve aliases through rename operations.
+	// When nil, the handlers fall back to names-only (aliases lost on rename).
+	ListDeptEntriesCanonical func() []DeptEntry
+	// SaveDept is called by POST /dashboard/admin/departments/save.
+	// It receives the complete new departments list (with rename/add already applied) and
+	// the complete new dept-color map so both are written atomically.
+	// When nil, the route returns 501 Not Implemented.
+	SaveDept func(newDepts []DeptEntry, newDeptColors map[string]string) error
+	// DeleteDept is called by POST /dashboard/admin/departments/delete.
+	// It receives the complete new departments list (with the deleted dept removed) and
+	// the complete new dept-color map (with the deleted dept's color removed).
+	// When nil, the route returns 501 Not Implemented.
+	DeleteDept func(newDepts []DeptEntry, newDeptColors map[string]string) error
+	// ListRules returns the current free-form classification rules text from the
+	// in-memory ClassrulesLoader. Used by GET /dashboard/admin/rules to pre-fill
+	// the textarea with the current value. Returns "" when classrules is not configured.
+	ListRules func() string
+	// SaveRules persists updated free-form rules text via classrules.WriteRules.
+	// Called by POST /dashboard/admin/rules with the submitted rules form field.
+	// When nil, the route returns 501 Not Implemented.
+	SaveRules func(rules string) error
+}
+
+// DeptEntry is the dashboard-layer representation of a canonical department entry.
+// Name is the canonical department name. Aliases preserves the original aliases
+// from classification-rules.yaml so they survive a rename or color-only update.
+type DeptEntry struct {
+	Name    string
+	Aliases []string
 }
 
 type DashboardStore interface {
@@ -197,6 +250,12 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/projects/{name}/prompts", h.requireSession(h.handleProjectPromptsPartial))
 	mux.HandleFunc("GET /dashboard/admin/users", h.requireSession(h.handleAdminUsers))
 	mux.HandleFunc("GET /dashboard/admin/users/list", h.requireSession(h.handleAdminUsersList))
+	// Users management write actions — delegate to the same member handlers (D4 write path).
+	// These are the canonical write endpoints surfaced by the Users sub-nav page.
+	mux.HandleFunc("POST /dashboard/admin/users/add", h.requireSession(h.handleAdminMembersAdd))
+	mux.HandleFunc("POST /dashboard/admin/users/edit", h.requireSession(h.handleAdminMembersEdit))
+	mux.HandleFunc("POST /dashboard/admin/users/deactivate", h.requireSession(h.handleAdminMembersDeactivate))
+	mux.HandleFunc("POST /dashboard/admin/users/delete", h.requireSession(h.handleAdminUsersDelete))
 	mux.HandleFunc("GET /dashboard/admin/health", h.requireSession(h.handleAdminHealth))
 	mux.HandleFunc("POST /dashboard/admin/projects/{name}/sync", h.requireSession(h.handleAdminSyncTogglePost))
 	mux.HandleFunc("GET /dashboard/admin/projects/{name}/sync/form", h.requireSession(h.handleAdminSyncToggleForm))
@@ -225,13 +284,34 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("POST /dashboard/admin/deletion-requests/reject", h.requireSession(h.handleAdminDeletionRequestReject))
 
 	// D6: Admin games-editing routes — admin-gated.
-	// GET  /dashboard/admin/games  → show current games list + edit form.
-	// POST /dashboard/admin/games  → apply games update (validate → atomic write → reload).
+	// GET  /dashboard/admin/games         → show editable games table (one row per game).
+	// POST /dashboard/admin/games/save    → save/rename/add a game row (name + color, atomic).
+	// POST /dashboard/admin/games/delete  → delete a game row (removes list entry + color).
+	// POST /dashboard/admin/games         → legacy textarea bulk-update (kept for backwards compat).
 	mux.HandleFunc("GET /dashboard/admin/games", h.requireSession(h.handleAdminGames))
+	mux.HandleFunc("POST /dashboard/admin/games/save", h.requireSession(h.handleAdminGameSavePost))
+	mux.HandleFunc("POST /dashboard/admin/games/delete", h.requireSession(h.handleAdminGameDeletePost))
 	mux.HandleFunc("POST /dashboard/admin/games", h.requireSession(h.handleAdminGamesPost))
 
-	// Brain graph view — color map admin routes (Slice B).
+	// Block A: per-game color route (kept for backwards compat; save handler supersedes it).
+	// POST /dashboard/admin/games/{name}/color       → write graph_colors.games[name]
+	// POST /dashboard/admin/departments/{name}/color → write graph_colors.departments[name] (legacy, kept for compat)
 	mux.HandleFunc("POST /dashboard/admin/games/{name}/color", h.requireSession(h.handleAdminGameColorPost))
+	mux.HandleFunc("POST /dashboard/admin/departments/{name}/color", h.requireSession(h.handleAdminDeptColorPost))
+
+	// Departments editable table routes (mirrors games routes).
+	// GET  /dashboard/admin/departments         → show editable departments table.
+	// POST /dashboard/admin/departments/save    → save/rename/add a dept row (name + color, atomic).
+	// POST /dashboard/admin/departments/delete  → delete a dept row (removes list entry + color).
+	mux.HandleFunc("GET /dashboard/admin/departments", h.requireSession(h.handleAdminDepartments))
+	mux.HandleFunc("POST /dashboard/admin/departments/save", h.requireSession(h.handleAdminDeptSavePost))
+	mux.HandleFunc("POST /dashboard/admin/departments/delete", h.requireSession(h.handleAdminDeptDeletePost))
+
+	// Rules editor — admin-gated.
+	// GET  /dashboard/admin/rules → show textarea pre-filled with cfg.Rules markdown.
+	// POST /dashboard/admin/rules → save new rules text and redirect 303 with flash.
+	mux.HandleFunc("GET /dashboard/admin/rules", h.requireSession(h.handleAdminRules))
+	mux.HandleFunc("POST /dashboard/admin/rules", h.requireSession(h.handleAdminRulesPost))
 }
 
 func Handler() http.Handler {
@@ -1024,14 +1104,30 @@ func (h *handlers) handleProjectPromptsPartial(w http.ResponseWriter, r *http.Re
 }
 
 // handleAdminUsers handles GET /dashboard/admin/users.
-// R6-1: serves only the shell; the list is loaded via HTMX from /dashboard/admin/users/list.
+// Renders the unified Users management page: provisioned-user list + add form +
+// per-row role/status edit + activate/deactivate controls. Sources users from
+// ListProvisionedUsers (users.yaml) and department names from ListDepartmentsCanonical.
 func (h *handlers) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	if !p.IsAdmin() {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	component := AdminUsersPage()
+
+	members := h.provisionedUsersList()
+
+	// Source department names from the canonical classrules list when available;
+	// fall back to nil so the templ renders sensible hardcoded defaults.
+	var departments []string
+	if h.cfg.ListDepartmentsCanonical != nil {
+		departments = h.cfg.ListDepartmentsCanonical()
+	}
+
+	// Flash messages are passed via query param after a redirect.
+	flash := r.URL.Query().Get("flash")
+	flashErr := r.URL.Query().Get("error") == "1"
+
+	component := AdminUsersManagementPage(members, departments, flash, flashErr, strings.ToLower(strings.TrimSpace(p.Email())))
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return

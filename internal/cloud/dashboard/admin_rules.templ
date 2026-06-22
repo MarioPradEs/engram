@@ -1,0 +1,40 @@
+package dashboard
+
+// AdminRulesPage renders the admin Rules editor page.
+//
+// rules is the current free-form markdown text from cfg.Rules in
+// classification-rules.yaml. It is the primary payload injected verbatim into
+// the MCP server instructions so every connected AI agent receives it.
+//
+// flashMessage / flashIsError carry flash state surfaced via the redirect query param.
+templ AdminRulesPage(rules string, flashMessage string, flashIsError bool) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN</p>
+				<h2>Rules Editor</h2>
+			</div>
+		</div>
+		@adminNav("rules")
+		if flashMessage != "" {
+			if flashIsError {
+				<div class="flash-message flash-error">{ flashMessage }</div>
+			} else {
+				<div class="flash-message flash-success">{ flashMessage }</div>
+			}
+		}
+		<div class="open-item-notice">
+			<strong>Note:</strong> This markdown text is injected verbatim into the instructions
+			every connected AI agent receives via the MCP server. Changes take effect for new
+			agent connections after the server reloads the config.
+		</div>
+		<form method="POST" action="/dashboard/admin/rules">
+			<div class="form-row">
+				<textarea name="rules" rows="20" style="width:100%;font-family:monospace;">{ rules }</textarea>
+			</div>
+			<div class="form-row">
+				<button type="submit">Save</button>
+			</div>
+		</form>
+	</section>
+}

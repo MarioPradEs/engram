@@ -1759,11 +1759,11 @@ func TestAdminHealthPageRendersMetrics(t *testing.T) {
 	}
 }
 
-// TestAdminUsersPageRendersContributors asserts admin users page shell has the correct
-// HTMX trigger for the list partial. Satisfies REQ-106.
-// R6-1 update: the shell no longer embeds inline rows — it contains hx-get="/dashboard/admin/users/list".
-// Contributor rows are served by the /list partial endpoint (tested separately).
-func TestAdminUsersPageRendersContributors(t *testing.T) {
+// TestAdminUsersPageRendersManagementUI asserts the admin users page renders the
+// full management UI (add form + provisioned users table) instead of the old
+// HTMX-lazy contributor list. Updated when /admin/users was promoted from a
+// read-only contributors page to the canonical user-management surface (D4-B).
+func TestAdminUsersPageRendersManagementUI(t *testing.T) {
 	mux := newAuthedAdminMux(parityStoreStub{
 		contributors: []cloudstore.DashboardContributorRow{
 			{CreatedBy: "agent@example.com", Chunks: 10, Projects: 2},
@@ -1775,9 +1775,13 @@ func TestAdminUsersPageRendersContributors(t *testing.T) {
 		t.Fatalf("expected 200 for admin users page, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	// Shell must carry the HTMX load trigger so the list partial is fetched by the browser.
-	if !strings.Contains(body, `hx-get="/dashboard/admin/users/list"`) {
-		t.Errorf("expected hx-get trigger for /dashboard/admin/users/list in admin users shell body")
+	// Management page must contain the add-user form under /users/add.
+	if !strings.Contains(body, "/dashboard/admin/users/add") {
+		t.Errorf("expected add-user form with action /dashboard/admin/users/add in admin users page body")
+	}
+	// Management page must contain the Users sub-nav entry.
+	if !strings.Contains(body, "/dashboard/admin/users") {
+		t.Errorf("expected /dashboard/admin/users link in admin sub-nav")
 	}
 }
 
@@ -2844,10 +2848,11 @@ func TestContributorsPageLoadsListPartialViaHTMX(t *testing.T) {
 	}
 }
 
-// TestAdminUsersPageLoadsListPartialViaHTMX (R6-1 RED) asserts that
-// GET /dashboard/admin/users (non-HTMX) renders a shell with
-// hx-get="/dashboard/admin/users/list" and no inline contributor rows.
-func TestAdminUsersPageLoadsListPartialViaHTMX(t *testing.T) {
+// TestAdminUsersPageIsManagementSurface (D4-B) asserts that GET /dashboard/admin/users
+// renders the full management surface (add form + adminNav "users" active link) rather
+// than the old HTMX-lazy contributors shell. The /admin/users page was promoted from a
+// read-only contributor listing to the canonical user-management surface.
+func TestAdminUsersPageIsManagementSurface(t *testing.T) {
 	store := parityStoreStub{
 		contributors: []cloudstore.DashboardContributorRow{
 			{CreatedBy: "carol", Chunks: 7, Projects: 3, LastChunkAt: "2026-04-23T12:00:00Z"},
@@ -2858,14 +2863,16 @@ func TestAdminUsersPageLoadsListPartialViaHTMX(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/admin/users?auth=ok", nil)
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("R6-1: expected 200 from /dashboard/admin/users, got %d body=%q", rec.Code, rec.Body.String())
+		t.Fatalf("D4-B: expected 200 from /dashboard/admin/users, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `hx-get="/dashboard/admin/users/list"`) {
-		t.Errorf("R6-1: /dashboard/admin/users shell missing hx-get trigger for list partial, body=%q", body[:min(len(body), 800)])
+	// Management page must expose the add-user form endpoint (always present even with no users).
+	if !strings.Contains(body, "/dashboard/admin/users/add") {
+		t.Errorf("D4-B: /dashboard/admin/users missing add-user form, body=%q", body[:min(len(body), 800)])
 	}
-	if strings.Contains(body, "carol") {
-		t.Errorf("R6-1: /dashboard/admin/users shell should not embed contributor rows directly, body=%q", body[:min(len(body), 800)])
+	// adminNav must link to the Users section.
+	if !strings.Contains(body, "/dashboard/admin/users") {
+		t.Errorf("D4-B: /dashboard/admin/users missing admin sub-nav Users link, body=%q", body[:min(len(body), 800)])
 	}
 }
 

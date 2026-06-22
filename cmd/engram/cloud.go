@@ -211,6 +211,157 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			}(),
 			// D6: set classrulesFilePath so admin games handlers know where to write.
 			cloudserver.WithClassrulesFilePath(classrulesFile),
+			// Slice B: wire ListColors — returns current GraphColors from in-memory config.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader // capture
+					return cloudserver.WithClassrulesCurrentColors(func() (map[string]string, map[string]string) {
+						cfg := cl.Current()
+						if cfg == nil {
+							return nil, nil
+						}
+						return cfg.GraphColors.Games, cfg.GraphColors.Departments
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// Block A: WriteGameColor — writes graph_colors.games[name] only.
+			// Separated from dept colors (no isDeptKey disambiguation needed).
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithClassrulesWriteColor(func(name, color string) error {
+						return writeColorToMap(cl, path, name, color, true /* isGame */)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// Block A: WriteDeptColor — writes graph_colors.departments[name] only.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithClassrulesWriteDeptColor(func(name, color string) error {
+						return writeColorToMap(cl, path, name, color, false /* isGame */)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// SaveGame: combined games list + game colors write (atomic via WriteGameEntry).
+			// Used by POST /dashboard/admin/games/save (add, rename, color-only update).
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithSaveGame(func(newGames []string, newGameColors map[string]string) error {
+						return writeGameEntry(cl, path, newGames, newGameColors)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// DeleteGame: combined games list + game colors write after removing one entry.
+			// Used by POST /dashboard/admin/games/delete.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithDeleteGame(func(newGames []string, newGameColors map[string]string) error {
+						return writeGameEntryAllowEmpty(cl, path, newGames, newGameColors)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// ListDepartmentsCanonical: returns dept names from the canonical classrules config.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					return cloudserver.WithClassrulesCurrentDepts(func() []string {
+						cfg := cl.Current()
+						if cfg == nil {
+							return nil
+						}
+						names := make([]string, 0, len(cfg.Departments))
+						for _, d := range cfg.Departments {
+							names = append(names, d.Name)
+						}
+						return names
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// ListDeptEntriesCanonical: returns full dept entries (name + aliases) from classrules.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					return cloudserver.WithClassrulesCurrentDeptEntries(func() []dashboard.DeptEntry {
+						cfg := cl.Current()
+						if cfg == nil {
+							return nil
+						}
+						entries := make([]dashboard.DeptEntry, 0, len(cfg.Departments))
+						for _, d := range cfg.Departments {
+							entries = append(entries, dashboard.DeptEntry{
+								Name:    d.Name,
+								Aliases: d.Aliases,
+							})
+						}
+						return entries
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// SaveDept: combined dept list + dept colors write (atomic via WriteDeptEntry).
+			// Used by POST /dashboard/admin/departments/save (add, rename, color-only update).
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithSaveDept(func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error {
+						return writeDeptEntry(cl, path, newDepts, newDeptColors)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// DeleteDept: combined dept list + dept colors write after removing one entry.
+			// Used by POST /dashboard/admin/departments/delete.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithDeleteDept(func(newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error {
+						return writeDeptEntry(cl, path, newDepts, newDeptColors)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// ListRules: returns current cfg.Rules text from the in-memory ClassrulesLoader.
+			// Used by GET /dashboard/admin/rules to pre-fill the textarea.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					return cloudserver.WithClassrulesListRules(func() string {
+						cfg := cl.Current()
+						if cfg == nil {
+							return ""
+						}
+						return cfg.Rules
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
+			// SaveRules: persists updated rules text atomically via classrules.WriteRules.
+			// Used by POST /dashboard/admin/rules.
+			func() cloudserver.Option {
+				if classrulesLoader != nil {
+					cl := classrulesLoader
+					path := classrulesFile
+					return cloudserver.WithClassrulesSaveRules(func(newRules string) error {
+						return classrules.WriteRules(path, cl, newRules)
+					})
+				}
+				return func(*cloudserver.CloudServer) {} // no-op option
+			}(),
 		)
 		return runtime, nil
 	}
@@ -937,6 +1088,94 @@ func normalizeAllowedProjects(projects []string) []string {
 		normalized = append(normalized, name)
 	}
 	return normalized
+}
+
+// writeColorToMap performs a read-modify-write of the classrules graph_colors block.
+// When isGame is true, name updates graph_colors.games; otherwise graph_colors.departments.
+// Clones maps to avoid mutating the live in-memory config; initialises nil maps on first use.
+func writeColorToMap(cl *classrules.ClassrulesLoader, path, name, color string, isGame bool) error {
+	cfg := cl.Current()
+	var gameColors, deptColors map[string]string
+	if cfg != nil {
+		if cfg.GraphColors.Games != nil {
+			gameColors = make(map[string]string, len(cfg.GraphColors.Games))
+			for k, v := range cfg.GraphColors.Games {
+				gameColors[k] = v
+			}
+		}
+		if cfg.GraphColors.Departments != nil {
+			deptColors = make(map[string]string, len(cfg.GraphColors.Departments))
+			for k, v := range cfg.GraphColors.Departments {
+				deptColors[k] = v
+			}
+		}
+	}
+	if gameColors == nil {
+		gameColors = make(map[string]string)
+	}
+	if deptColors == nil {
+		deptColors = make(map[string]string)
+	}
+	if isGame {
+		gameColors[name] = color
+	} else {
+		deptColors[name] = color
+	}
+	return classrules.WriteColors(path, gameColors, deptColors, func() {
+		if err := cl.Reload(); err != nil {
+			log.Printf("[engram-cloud] classrules.Reload after color write: %v (retaining last-good)", err)
+		}
+	})
+}
+
+// writeGameEntry performs a combined atomic write of the games list and game-color
+// map to the classrules YAML. Both fields are patched in a single write so rename
+// operations never leave the list and color map inconsistent.
+// Delegates to classrules.WriteGameEntry which validates and writes atomically.
+func writeGameEntry(cl *classrules.ClassrulesLoader, path string, newGames []string, newGameColors map[string]string) error {
+	bridge := &classrulesBridge{cl: cl}
+	return classrules.WriteGameEntry(path, bridge, newGames, newGameColors)
+}
+
+// writeGameEntryAllowEmpty is like writeGameEntry but permits an empty games list
+// (used by the delete handler — deleting the last game empties the list).
+// Delegates to classrules.WriteGameEntryAllowEmpty which writes both the games list
+// and color map atomically without the non-empty constraint.
+func writeGameEntryAllowEmpty(cl *classrules.ClassrulesLoader, path string, newGames []string, newGameColors map[string]string) error {
+	bridge := &classrulesBridge{cl: cl}
+	return classrules.WriteGameEntryAllowEmpty(path, bridge, newGames, newGameColors)
+}
+
+// classrulesBridge adapts *classrules.ClassrulesLoader to the classrules.Reloader interface
+// so WriteGameEntry can call Reload after a successful atomic write.
+type classrulesBridge struct {
+	cl *classrules.ClassrulesLoader
+}
+
+func (b *classrulesBridge) Reload() error {
+	if err := b.cl.Reload(); err != nil {
+		log.Printf("[engram-cloud] classrules.Reload after game entry write: %v (retaining last-good)", err)
+		return err
+	}
+	return nil
+}
+
+// writeDeptEntry converts dashboard.DeptEntry slice to classrules.Department slice and
+// performs a combined atomic write of the departments list and dept-color map to the
+// classrules YAML. Both fields are patched in a single write so rename operations never
+// leave the list and color map inconsistent.
+// Delegates to classrules.WriteDeptEntry which validates and writes atomically.
+func writeDeptEntry(cl *classrules.ClassrulesLoader, path string, newDepts []dashboard.DeptEntry, newDeptColors map[string]string) error {
+	bridge := &classrulesBridge{cl: cl}
+	// Convert dashboard.DeptEntry → classrules.Department.
+	depts := make([]classrules.Department, 0, len(newDepts))
+	for _, d := range newDepts {
+		depts = append(depts, classrules.Department{
+			Name:    d.Name,
+			Aliases: d.Aliases,
+		})
+	}
+	return classrules.WriteDeptEntry(path, bridge, depts, newDeptColors)
 }
 
 func cloudConfigPath(cfg store.Config) string {

@@ -511,6 +511,10 @@ func (s *CloudServer) routes() {
 	// /classrules/games: returns the canonical games vocabulary for per-session
 	// sync by member CLIs. Bearer JWT auth (same token members use for sync).
 	s.mux.HandleFunc("GET /classrules/games", s.withAuth(s.handleClassrulesGames))
+	// /api/brain/identity: echoes the X-Forwarded-Email header injected by oauth2-proxy.
+	// No withAuth wrapper — reachable by any authenticated viewer (same-origin brain iframe JS).
+	// Must be registered OUTSIDE /brain/* so the dashboard brain static prefix does not shadow it.
+	s.mux.HandleFunc("GET /api/brain/identity", s.handleBrainIdentity)
 	// /auth endpoint: mint engram JWT from oauth2-proxy X-Forwarded-Email.
 	// Only registered when WithAuthEndpoint option is applied (authLoader set).
 	if s.authLoader != nil {

@@ -1608,3 +1608,22 @@ select option:checked, select option:hover, select option:focus {
 .user-meta { flex: 0 0 auto; }
 .user-actions { display: flex; align-items: center; gap: 0.35rem; margin-left: auto; }
 .user-actions form { margin: 0; }
+
+/* fix: admin selects — adequate width so the selected text shows + readable value */
+.user-edit select, .user-add-bar select {
+	padding-right: 1.6rem;
+	background-color: rgba(255, 255, 255, 0.06);
+	color: var(--engram-text);
+}
+.user-edit .u-dept, .user-add-bar select[name="department"] { min-width: 8.5rem; }
+.user-edit .u-role, .user-add-bar select[name="role"] { min-width: 6.5rem; }
+
+/* fix: admin fields — height auto so the select/input text isn't clipped */
+.user-edit input, .user-edit select,
+.user-add-bar input, .user-add-bar select {
+	height: auto;
+	min-height: 2.3rem;
+	padding-top: 0.3rem;
+	padding-bottom: 0.3rem;
+	line-height: 1.4;
+}

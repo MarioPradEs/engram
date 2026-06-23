@@ -1,93 +1,26 @@
 #!/bin/bash
-# Engram — UserPromptSubmit hook for Claude Code
+# Engram — UserPromptSubmit hook for Codex
 #
 # On the FIRST message of a session: injects a ToolSearch instruction to force
-# Claude Code to load all engram memory tools (which are deferred by default).
+# Codex to load all engram memory tools (which are deferred by default).
 #
 # On subsequent messages: checks when the last mem_save was for the current
 # project. If it's been > 15 minutes AND the session has been active > 5
 # minutes, injects a nudge reminding the agent to save.
 #
 # The nudge is debounced per session: once shown, it stays quiet for
-# ENGRAM_NUDGE_COOLDOWN_SECS (default 900s) before it can fire again. Without
-# this, an agent that genuinely has nothing to save never resets the
-# last-save clock, so the reminder would fire on every single message forever.
+# ENGRAM_NUDGE_COOLDOWN_SECS (default 900s) before it can fire again.
 #
-# MUST exit 0 always and output valid JSON — otherwise Claude Code blocks the message.
+# MUST exit 0 always and output valid JSON — otherwise Codex blocks the message.
 
 ENGRAM_PORT="${ENGRAM_PORT:-7437}"
 ENGRAM_URL="http://127.0.0.1:${ENGRAM_PORT}"
-
-# Windows Git Bash/MSYS2 can fail while forking helper processes under
-# enterprise Defender/EDR, which makes Claude Code wait on prompt submission.
-# Keep the Windows path bash-builtin-only: no jq, git, curl, date, dirname, cat,
-# touch, or command substitutions. It preserves first-message tool loading and
-# degrades subsequent save nudges to a fast no-op instead of risking a hang.
-is_windows_bash() {
-  case "${OSTYPE:-}" in
-    msys*|cygwin*|win32*) return 0 ;;
-  esac
-  [ -n "${MSYSTEM:-}" ] || [ -n "${MINGW_PREFIX:-}" ]
-}
-
-set_json_string_value() {
-  local key="$1"
-  local json="$2"
-  local pattern='"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)"'
-  JSON_VALUE=""
-  if [[ "$json" =~ $pattern ]]; then
-    JSON_VALUE="${BASH_REMATCH[1]}"
-  fi
-}
-
-sanitize_session_key_part() {
-  local raw="$1"
-  local safe=""
-  local i char
-  for (( i=0; i<${#raw}; i++ )); do
-    char="${raw:i:1}"
-    if [[ "$char" =~ [a-zA-Z0-9_-] ]]; then
-      safe+="$char"
-    else
-      safe+="_"
-    fi
-  done
-  JSON_VALUE="$safe"
-}
 
 print_toolsearch_message() {
   printf '%s\n' '{"systemMessage":"CRITICAL FIRST ACTION — Execute this ToolSearch NOW before responding to the user:\nselect:mcp__engram__mem_save,mcp__engram__mem_search,mcp__engram__mem_context,mcp__engram__mem_session_summary,mcp__engram__mem_session_start,mcp__engram__mem_session_end,mcp__engram__mem_get_observation,mcp__engram__mem_suggest_topic_key,mcp__engram__mem_capture_passive,mcp__engram__mem_save_prompt,mcp__engram__mem_update,mcp__engram__mem_current_project,mcp__engram__mem_judge\n\nAfter loading tools, call mem_context to check for prior session history before responding."}'
 }
 
-if is_windows_bash && [ "${ENGRAM_CLAUDE_WINDOWS_BASH_SAFE_MODE:-auto}" != "0" ]; then
-  INPUT=""
-  while IFS= read -r LINE || [ -n "$LINE" ]; do
-    INPUT+="${LINE}"$'\n'
-  done
-
-  set_json_string_value "session_id" "$INPUT"
-  SESSION_ID="$JSON_VALUE"
-  if [ -n "$SESSION_ID" ]; then
-    sanitize_session_key_part "$SESSION_ID"
-    SESSION_KEY="engram-claude-${JSON_VALUE}-tools-loaded"
-  else
-    SESSION_KEY="engram-claude-windows-$$-tools-loaded"
-  fi
-  STATE_DIR="${TMPDIR:-/tmp}"
-  STATE_FILE="${STATE_DIR}/${SESSION_KEY}"
-
-  if [ ! -f "$STATE_FILE" ]; then
-    : > "$STATE_FILE" 2>/dev/null || true
-    print_toolsearch_message
-    exit 0
-  fi
-
-  printf '%s\n' '{}'
-  exit 0
-fi
-
-# Load shared helpers after the Windows-safe fast path so Git Bash does not fork
-# for dirname/pwd before deciding whether the safe path applies.
+# Load shared helpers
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/_helpers.sh"
 
@@ -100,19 +33,17 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 # PROMPT PERSIST
 #
 # Every user message is captured to POST /prompts so mem_save can attach the
-# originating prompt via SessionActivity.  Fire-and-forget: never blocks and
+# originating prompt via SessionActivity. Detached subshell: never blocks and
 # never fails the hook.
 # ──────────────────────────────────────────────────────────────────────────────
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 if [ -n "$PROMPT" ] && [ -n "$SESSION_ID" ]; then
-  # Detached subshell so the POST never stalls the hook. The server derives the
-  # prompt's project from the session, so project lookup stays off the hot path
-  # here (the hook keys by session_id first and only resolves the project later).
   (
+    _PROMPT_PROJECT=$(detect_project "$CWD")
     curl -sf -X POST "${ENGRAM_URL}/prompts" --max-time 2 \
       -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg s "$SESSION_ID" --arg c "$PROMPT" \
-            '{session_id:$s, content:$c}')" >/dev/null 2>&1 || true
+      -d "$(jq -n --arg s "$SESSION_ID" --arg p "${_PROMPT_PROJECT:-}" --arg c "$PROMPT" \
+            '{session_id:$s, project:$p, content:$c}')" >/dev/null 2>&1 || true
   ) &
 fi
 
@@ -165,12 +96,12 @@ OUTPUT="{}"
 
 # Build a stable session key — prefer SESSION_ID, fall back to project name
 if [ -n "$SESSION_ID" ]; then
-  SESSION_KEY="engram-claude-${SESSION_ID}-tools-loaded"
+  SESSION_KEY="engram-codex-${SESSION_ID}-tools-loaded"
 else
   # No session ID available — only then detect project for the fallback state key.
   PROJECT=$(detect_project "$CWD")
   SAFE_PROJECT=$(printf '%s' "${PROJECT:-unknown}" | tr -cs 'a-zA-Z0-9_-' '_')
-  SESSION_KEY="engram-claude-${SAFE_PROJECT}-$$-tools-loaded"
+  SESSION_KEY="engram-codex-${SAFE_PROJECT}-$$-tools-loaded"
 fi
 
 STATE_FILE="/tmp/${SESSION_KEY}"
@@ -186,7 +117,7 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SUBSEQUENT MESSAGES — existing save-nudge logic
+# SUBSEQUENT MESSAGES — save-nudge logic
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Detect project only after the first-message path has had a chance to return.

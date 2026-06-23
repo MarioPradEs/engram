@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -206,6 +207,21 @@ type handlers struct {
 	cfg MountConfig
 }
 
+// overlayFS serves a file from primary first, falling back to fallback on any
+// error. Powers the live-editable dashboard static override
+// (ENGRAM_DASHBOARD_STATIC_DIR) so styles.css can be tweaked without a rebuild.
+type overlayFS struct {
+	primary  http.FileSystem
+	fallback http.FileSystem
+}
+
+func (o overlayFS) Open(name string) (http.File, error) {
+	if f, err := o.primary.Open(name); err == nil {
+		return f, nil
+	}
+	return o.fallback.Open(name)
+}
+
 func Mount(mux *http.ServeMux, cfg MountConfig) {
 	h := &handlers{cfg: cfg}
 
@@ -213,7 +229,13 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	if err != nil {
 		log.Fatalf("dashboard: failed to create static sub FS: %v", err)
 	}
-	mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", http.FileServer(http.FS(staticSub))))
+	// Live-editable override: when ENGRAM_DASHBOARD_STATIC_DIR points at a directory,
+	// files found there are served first; anything missing falls back to the embed.
+	var staticFS http.FileSystem = http.FS(staticSub)
+	if dir := strings.TrimSpace(os.Getenv("ENGRAM_DASHBOARD_STATIC_DIR")); dir != "" {
+		staticFS = overlayFS{primary: http.Dir(dir), fallback: staticFS}
+	}
+	mux.Handle("GET /dashboard/static/", http.StripPrefix("/dashboard/static/", http.FileServer(staticFS)))
 
 	mux.HandleFunc("GET /dashboard/health", h.handleHealth)
 	mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
@@ -508,7 +530,7 @@ func (h *handlers) handleBrain(w http.ResponseWriter, r *http.Request) {
 		escapedURL := html.EscapeString(brainURL)
 		// S6: iframe fills the full viewport height minus the nav bar (~56px) so the
 		// knowledge graph is the prominent main view with no wasted whitespace below it.
-		body = fmt.Sprintf(`<section class="frame-section brain-full-bleed"><p class="section-kicker">BRAIN</p><h2>Knowledge Graph</h2><iframe src="%s" style="width:100%%;height:calc(100vh - 56px);border:none;display:block;" title="Knowledge Graph"></iframe></section>`, escapedURL)
+		body = fmt.Sprintf(`<section class="brain-stage"><header class="brain-bar"><span class="brain-title">Knowledge Graph</span></header><iframe src="%s" class="brain-frame" title="Knowledge Graph"></iframe></section>`, escapedURL)
 	} else {
 		body = `<section class="frame-section"><p class="section-kicker">BRAIN</p><h2>Knowledge Graph</h2><p>Graph coming soon. Set <code>ENGRAM_BRAIN_URL</code> to enable the interactive graph.</p></section>`
 	}

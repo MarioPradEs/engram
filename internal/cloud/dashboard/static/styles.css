@@ -1297,3 +1297,43 @@ select:focus {
 		align-items: flex-start;
 	}
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Brain stage + modern pass (live-editable via ENGRAM_DASHBOARD_STATIC_DIR)
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* Rounded, modern buttons (overrides the earlier border-radius: 0). */
+button,
+button[type="submit"],
+button.outline.secondary,
+.shell-button {
+	border-radius: 10px;
+}
+
+/* Brain tab: full-height flex stage so the graph fills the viewport with no
+   scroll; a compact, centered title bar sits above the iframe. */
+.brain-stage {
+	display: flex;
+	flex-direction: column;
+	height: calc(100vh - 56px);
+	overflow: hidden;
+}
+.brain-bar {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	padding: 6px 12px;
+}
+.brain-title {
+	font-size: 0.78rem;
+	font-weight: 600;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	opacity: 0.65;
+}
+.brain-frame {
+	flex: 1 1 auto;
+	width: 100%;
+	border: none;
+	display: block;
+}

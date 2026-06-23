@@ -1627,3 +1627,8 @@ select option:checked, select option:hover, select option:focus {
 	padding-bottom: 0.3rem;
 	line-height: 1.4;
 }
+
+/* sync status pill states (header) */
+.status-pill.sync-active { background: rgba(61, 214, 140, 0.16); color: var(--engram-success); }
+.status-pill.sync-stale { background: rgba(246, 193, 119, 0.18); color: var(--engram-warning); }
+.status-pill.sync-off { background: rgba(235, 111, 146, 0.2); color: var(--engram-danger); }

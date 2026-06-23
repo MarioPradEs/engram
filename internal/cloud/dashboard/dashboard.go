@@ -241,6 +241,7 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	mux.HandleFunc("GET /dashboard/login", h.handleLoginPage)
 	mux.HandleFunc("POST /dashboard/login", h.handleLoginSubmit)
 	mux.HandleFunc("POST /dashboard/logout", h.handleLogout)
+	mux.HandleFunc("GET /dashboard/sync-status", h.handleSyncStatus)
 
 	mux.HandleFunc("GET /dashboard", h.requireSession(h.handleDashboardHome))
 	mux.HandleFunc("GET /dashboard/", h.requireSession(h.handleDashboardHome))
@@ -501,7 +502,79 @@ func (h *handlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.ClearSessionCookie != nil {
 		h.cfg.ClearSessionCookie(w, r)
 	}
-	http.Redirect(w, r, "/dashboard/login", http.StatusSeeOther)
+	// Clearing only the engram session is not enough: oauth2-proxy keeps its own
+	// Google session and re-injects X-Forwarded-Email on the next request, which
+	// AutoLoginFromHeader would immediately turn back into a session. Redirect to
+	// the proxy's sign-out so its cookie is cleared too — otherwise logout no-ops.
+	http.Redirect(w, r, "/oauth2/sign_out?rd=%2Fdashboard%2Flogin", http.StatusSeeOther)
+}
+
+// handleSyncStatus renders the live cloud-sync status pill for the current user.
+// It reflects how recently the caller last pushed a chunk (their own data), so a
+// stale/expired CLI token surfaces as a visible warning instead of a permanently
+// green "CLOUD ACTIVE" label. Loaded via htmx from the header.
+func (h *handlers) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	email := ""
+	if h.cfg.GetUserEmail != nil {
+		email = h.cfg.GetUserEmail(r)
+	}
+	lastAt := ""
+	if h.cfg.Store != nil && email != "" {
+		if contribs, err := h.cfg.Store.ListContributors(""); err == nil {
+			for _, c := range contribs {
+				if strings.EqualFold(c.CreatedBy, email) {
+					lastAt = c.LastChunkAt
+					break
+				}
+			}
+		}
+	}
+	cls, label, title := syncStatusFor(lastAt)
+	renderComponent(w, r, SyncStatusPill(cls, label, title))
+}
+
+// syncStatusFor maps the caller's last chunk-push time to a pill (class, label,
+// tooltip). The dashboard can't directly observe an expired CLI JWT (that auth is
+// separate from the browser's oauth2-proxy session), but it can show sync recency
+// so a silently-dead sync becomes obvious.
+func syncStatusFor(lastChunkAt string) (cssClass, label, title string) {
+	s := strings.TrimSpace(lastChunkAt)
+	if s == "" {
+		return "sync-off", "NOT SYNCING", "No cloud sync recorded for your account. Run `engram login` in your terminal to authenticate and sync."
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse("2006-01-02 15:04:05.999999-07", s)
+	}
+	if err != nil {
+		t, err = time.Parse("2006-01-02 15:04:05", s)
+	}
+	if err != nil {
+		return "sync-off", "SYNC UNKNOWN", "Could not determine your last sync time."
+	}
+	age := time.Since(t)
+	rel := humanizeAge(age)
+	switch {
+	case age < 6*time.Hour:
+		return "sync-active", "CLOUD ACTIVE", "Synced " + rel + "."
+	case age < 48*time.Hour:
+		return "sync-stale", "SYNC STALE · " + rel, "Last synced " + rel + ". If you've worked since, run `engram login` to re-authenticate."
+	default:
+		return "sync-off", "NOT SYNCING · " + rel, "Last synced " + rel + ". Run `engram login` in your terminal to re-authenticate and resume cloud sync."
+	}
+}
+
+func humanizeAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
 }
 
 func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {

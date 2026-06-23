@@ -45,7 +45,7 @@ func Layout(title string, username string, activeTab string, isAdmin bool, conte
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " — Engram Cloud</title><link rel=\"stylesheet\" href=\"/dashboard/static/pico.min.css\"><link rel=\"stylesheet\" href=\"/dashboard/static/styles.css\"><script src=\"/dashboard/static/htmx.min.js\"></script></head><body class=\"shell-body\"><div class=\"shell-backdrop\"><div class=\"app-shell\"><header class=\"shell-header\"><div class=\"shell-status\"><span class=\"status-pill\">CLOUD ACTIVE</span></div><a href=\"/dashboard/\" class=\"brand\">Engram Cloud</a><div class=\"user-info\"><span class=\"user-name\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " — Engram Cloud</title><link rel=\"stylesheet\" href=\"/dashboard/static/pico.min.css\"><link rel=\"stylesheet\" href=\"/dashboard/static/styles.css\"><script src=\"/dashboard/static/htmx.min.js\"></script></head><body class=\"shell-body\"><div class=\"shell-backdrop\"><div class=\"app-shell\"><header class=\"shell-header\"><div class=\"shell-status\" hx-get=\"/dashboard/sync-status\" hx-trigger=\"load, every 120s\" hx-swap=\"innerHTML\"><span class=\"status-pill\">CLOUD ACTIVE</span></div><a href=\"/dashboard/\" class=\"brand\">Engram Cloud</a><div class=\"user-info\"><span class=\"user-name\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

@@ -18,7 +18,7 @@ templ Layout(title string, username string, activeTab string, isAdmin bool, cont
 			<div class="shell-backdrop">
 				<div class="app-shell">
 					<header class="shell-header">
-						<div class="shell-status">
+						<div class="shell-status" hx-get="/dashboard/sync-status" hx-trigger="load, every 120s" hx-swap="innerHTML">
 							<span class="status-pill">CLOUD ACTIVE</span>
 						</div>
 						<a href="/dashboard/" class="brand">Engram Cloud</a>

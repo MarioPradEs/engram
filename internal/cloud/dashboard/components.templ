@@ -40,6 +40,12 @@ templ StatusBadge(label string, variant string) {
 	<span class={ "badge badge-" + variant }>{ label }</span>
 }
 
+// SyncStatusPill renders the header cloud-sync status (green active / amber stale
+// / red not-syncing) from the caller's last push recency. Loaded via htmx.
+templ SyncStatusPill(cssClass string, label string, title string) {
+	<span class={ "status-pill " + cssClass } title={ title }>{ label }</span>
+}
+
 // EmptyState renders a centered empty-state placeholder.
 templ EmptyState(title string, message string) {
 	<div class="empty-state">

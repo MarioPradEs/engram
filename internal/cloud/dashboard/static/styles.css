@@ -1523,3 +1523,88 @@ nav [role="tab"][aria-selected="true"], .browser-subtabs [role="tab"].active, .a
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table tbody tr:hover { background: rgba(245, 130, 31, 0.07); }
 .section-header h2, .section-header h3 { letter-spacing: -0.02em; }
+
+/* ── Modernize remaining bordered boxes to match dashboard ── */
+.browser-shell, .browser-content-frame, .login-shell, .login-console,
+.project-stats, .stat, .structured-block {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012));
+	box-shadow: var(--viva-shadow);
+}
+
+/* ── Browser search/filter controls: modern rounded container + pill inputs ── */
+.browser-controls {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.012);
+	padding: 0.85rem 1rem;
+}
+.browser-controls input, .browser-controls select {
+	border-radius: var(--viva-pill);
+}
+
+/* ── Round + modernize ALL remaining boxes (admin sections, panels) ── */
+.section-block, .linked-session-panel, .observation-detail-body {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.012));
+	box-shadow: var(--viva-shadow);
+}
+/* alerts: round, keep semantic colors */
+.alert-success, .alert-danger, .login-error { border-radius: var(--viva-radius); }
+
+/* ── Admin: modern rounded inputs/cells (Games/Departments/Users name + color boxes) ── */
+.spreadsheet-table input, .spreadsheet-table select, .spreadsheet-table .input-game-name,
+.inline-game-row-form input, .inline-game-row-form select,
+.inline-color-form input, .inline-color-form select {
+	border-radius: var(--viva-radius-sm) !important;
+	border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.03);
+	color: var(--engram-text);
+}
+.spreadsheet-table input[type="color"] {
+	border-radius: var(--viva-radius-sm);
+	border: 1px solid var(--viva-hairline);
+	padding: 2px;
+}
+.spreadsheet-table .btn-small, .inline-game-row-form .btn-small,
+.inline-delete-form .btn-small, .inline-color-form .btn-small {
+	border-radius: var(--viva-pill);
+}
+
+/* fix: select dropdown options readable (black text, light-orange selected) */
+select option {
+	background: #ffffff;
+	color: #1a1a1a;
+}
+select option:checked, select option:hover, select option:focus {
+	background: #ffd9b0;
+	color: #1a1a1a;
+}
+
+/* ── Admin Users: compact modern card-row layout ── */
+.user-add-bar {
+	display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem;
+	padding: 0.6rem 0.75rem; margin-bottom: 1rem;
+	border-radius: var(--viva-radius); border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.014);
+}
+.user-add-bar input, .user-add-bar select { margin: 0; }
+.user-add-bar input[type="email"] { flex: 1 1 15rem; min-width: 14rem; }
+.user-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.user-row {
+	display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem;
+	padding: 0.4rem 0.65rem;
+	border-radius: var(--viva-radius); border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.018);
+}
+.user-row:hover { border-color: rgba(245, 130, 31, 0.3); }
+.user-edit { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1 1 auto; margin: 0; }
+.user-edit input, .user-edit select { margin: 0; height: 2.1rem; font-size: 0.82rem; }
+.user-edit .u-email { flex: 1 1 14rem; min-width: 11rem; }
+.user-edit .u-email:disabled { opacity: 0.55; }
+.user-edit .u-name { flex: 1 1 8rem; min-width: 6rem; }
+.user-meta { flex: 0 0 auto; }
+.user-actions { display: flex; align-items: center; gap: 0.35rem; margin-left: auto; }
+.user-actions form { margin: 0; }

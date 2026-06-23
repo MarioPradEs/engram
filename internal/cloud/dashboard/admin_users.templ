@@ -3,18 +3,17 @@ package dashboard
 import "strings"
 
 // AdminUsersManagementPage renders the unified admin Users page:
-//   - Add-user form (email, name, department, role).
-//   - Spreadsheet table of provisioned users with per-row inline editable fields
-//     (email, name, department, role) + activate/deactivate + delete controls.
+//   - Add-user toolbar (email, name, department, role).
+//   - Compact card-row list of provisioned users with per-row inline editable
+//     fields (email, name, department, role) + activate/deactivate + delete.
 //
-// All write actions POST to /dashboard/admin/users/add|edit|deactivate|delete, which
-// delegate to the member-management handlers and redirect back here.
+// All write actions POST to /dashboard/admin/users/add|edit|deactivate|delete,
+// which delegate to the member-management handlers and redirect back here.
 // Admin-only — caller must verify p.IsAdmin() before rendering.
 //
-// callerEmail is the current principal's email (from GetUserEmail). When a table row
-// matches the caller's email (case-insensitive), self-destructive controls (role
-// selector, deactivate, delete) are disabled and annotated with a "your account" hint.
-// The server-side self-protection guard is authoritative; the UI disabling is UX only.
+// callerEmail is the current principal's email. When a row matches the caller's
+// email (case-insensitive), self-destructive controls (email/role edit,
+// deactivate, delete) are disabled. The server-side guard is authoritative.
 templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, flashMessage string, flashIsError bool, callerEmail string) {
 	<section class="frame-section">
 		<div class="section-header">
@@ -32,9 +31,9 @@ templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, 
 			}
 		}
 		<h3 class="section-block-title">Add User</h3>
-		<form method="POST" action="/dashboard/admin/users/add" class="inline-game-row-form" style="flex-wrap:wrap;gap:0.4rem;margin-bottom:1rem;">
-			<input type="email" name="email" placeholder="user@vivastudios.com" required style="min-width:16rem;"/>
-			<input type="text" name="name" placeholder="Full Name" style="min-width:10rem;"/>
+		<form method="POST" action="/dashboard/admin/users/add" class="user-add-bar">
+			<input type="email" name="email" placeholder="user@vivastudios.com" required/>
+			<input type="text" name="name" placeholder="Full name"/>
 			<select name="department" aria-label="Department">
 				if len(departments) == 0 {
 					<option value="dev">dev</option>
@@ -56,127 +55,73 @@ templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, 
 		if len(members) == 0 {
 			@EmptyState("No Provisioned Users", "Add a user above or provision users by editing users.yaml directly.")
 		} else {
-			<table class="data-table spreadsheet-table">
-				<thead>
-					<tr>
-						<th>Email / Name / Dept / Role</th>
-						<th>Status</th>
-						<th>Save</th>
-						<th>Activate / Deactivate</th>
-						<th>Delete</th>
-					</tr>
-				</thead>
-				<tbody>
-					for _, m := range members {
-						// isSelf is true when this row is the currently logged-in admin's own account.
-						// Self-destructive controls are disabled to prevent accidental lockout.
-						// The server-side self-protection guard is authoritative.
-						if strings.EqualFold(m.Email, callerEmail) {
-							<tr>
-								<td colspan="3">
-									<form method="POST" action="/dashboard/admin/users/edit" class="inline-game-row-form" style="flex-wrap:wrap;gap:0.3rem;">
-										<input type="hidden" name="original_email" value={ m.Email }/>
-										<input type="email" name="email" value={ m.Email } required aria-label="Email" disabled title="You can't change your own email here." style="min-width:14rem;opacity:0.6;"/>
-										<input type="text" name="name" value={ m.Name } aria-label="Name" style="min-width:8rem;"/>
-										<select name="department" aria-label="Department">
-											if len(departments) == 0 {
-												<option value={ m.Department } selected>{ m.Department }</option>
-											} else {
-												for _, d := range departments {
-													<option value={ d } selected?={ m.Department == d }>{ d }</option>
-												}
-											}
-										</select>
-										<select name="role" aria-label="Role" disabled title="You can't remove your own admin role.">
-											<option value="admin" selected?={ m.Role == "admin" }>admin</option>
-											<option value="member" selected?={ m.Role == "member" }>member</option>
-										</select>
-										<button type="submit" class="btn-small">Save</button>
-									</form>
-								</td>
-								<td>
-									if m.Status == "active" {
-										@StatusBadge("Active", "success")
-									} else if m.Status == "offboarding" {
-										@StatusBadge("Offboarding", "warning")
-									} else {
-										@StatusBadge(m.Status, "danger")
+			<div class="user-list">
+				for _, m := range members {
+					<div class="user-row">
+						<form method="POST" action="/dashboard/admin/users/edit" class="user-edit">
+							<input type="hidden" name="original_email" value={ m.Email }/>
+							<input
+								type="email"
+								name="email"
+								value={ m.Email }
+								required
+								aria-label="Email"
+								class="u-email"
+								disabled?={ strings.EqualFold(m.Email, callerEmail) }
+							/>
+							<input type="text" name="name" value={ m.Name } aria-label="Name" placeholder="Name" class="u-name"/>
+							<select name="department" aria-label="Department" class="u-dept">
+								if len(departments) == 0 {
+									<option value={ m.Department } selected>{ m.Department }</option>
+								} else {
+									for _, d := range departments {
+										<option value={ d } selected?={ m.Department == d }>{ d }</option>
 									}
-								</td>
-								<td>
-									<span class="btn-small" style="opacity:0.4;cursor:default;" title="You can't deactivate yourself. (your account)">Deactivate</span>
-								</td>
-								<td>
-									<span class="btn-small btn-danger" style="opacity:0.4;cursor:default;" title="You can't delete your own account. (your account)">X</span>
-								</td>
-							</tr>
-						} else {
-							<tr>
-								<td colspan="3">
-									<form method="POST" action="/dashboard/admin/users/edit" class="inline-game-row-form" style="flex-wrap:wrap;gap:0.3rem;">
-										<input type="hidden" name="original_email" value={ m.Email }/>
-										<input type="email" name="email" value={ m.Email } required aria-label="Email" style="min-width:14rem;"/>
-										<input type="text" name="name" value={ m.Name } aria-label="Name" style="min-width:8rem;"/>
-										<select name="department" aria-label="Department">
-											if len(departments) == 0 {
-												<option value={ m.Department } selected>{ m.Department }</option>
-											} else {
-												for _, d := range departments {
-													<option value={ d } selected?={ m.Department == d }>{ d }</option>
-												}
-											}
-										</select>
-										<select name="role" aria-label="Role">
-											<option value="admin" selected?={ m.Role == "admin" }>admin</option>
-											<option value="member" selected?={ m.Role == "member" }>member</option>
-										</select>
-										<button type="submit" class="btn-small">Save</button>
-									</form>
-								</td>
-								<td>
-									if m.Status == "active" {
-										@StatusBadge("Active", "success")
-									} else if m.Status == "offboarding" {
-										@StatusBadge("Offboarding", "warning")
-									} else {
-										@StatusBadge(m.Status, "danger")
-									}
-								</td>
-								<td>
-									if m.Status == "active" {
-										<form method="POST" action="/dashboard/admin/users/deactivate" class="inline-delete-form">
-											<input type="hidden" name="email" value={ m.Email }/>
-											<input type="hidden" name="status" value="removed"/>
-											<button
-												type="submit"
-												class="btn-small btn-danger"
-												onclick="return confirm('Deactivate ' + this.closest('form').email.value + '?')"
-											>Deactivate</button>
-										</form>
-									} else {
-										<form method="POST" action="/dashboard/admin/users/edit" class="inline-game-row-form">
-											<input type="hidden" name="original_email" value={ m.Email }/>
-											<input type="hidden" name="email" value={ m.Email }/>
-											<input type="hidden" name="status" value="active"/>
-											<button type="submit" class="btn-small">Activate</button>
-										</form>
-									}
-								</td>
-								<td>
-									<form method="POST" action="/dashboard/admin/users/delete" class="inline-delete-form">
+								}
+							</select>
+							<select name="role" aria-label="Role" class="u-role" disabled?={ strings.EqualFold(m.Email, callerEmail) }>
+								<option value="admin" selected?={ m.Role == "admin" }>admin</option>
+								<option value="member" selected?={ m.Role == "member" }>member</option>
+							</select>
+							<button type="submit" class="btn-small" title="Save changes">Save</button>
+						</form>
+						<div class="user-meta">
+							if m.Status == "active" {
+								@StatusBadge("Active", "success")
+							} else if m.Status == "offboarding" {
+								@StatusBadge("Offboarding", "warning")
+							} else {
+								@StatusBadge(m.Status, "danger")
+							}
+						</div>
+						<div class="user-actions">
+							if strings.EqualFold(m.Email, callerEmail) {
+								<span class="btn-small" style="opacity:0.4;cursor:default;" title="You can't deactivate your own account.">Deactivate</span>
+								<span class="btn-small btn-danger" style="opacity:0.4;cursor:default;" title="You can't delete your own account.">✕</span>
+							} else {
+								if m.Status == "active" {
+									<form method="POST" action="/dashboard/admin/users/deactivate" class="inline-delete-form">
 										<input type="hidden" name="email" value={ m.Email }/>
-										<button
-											type="submit"
-											class="btn-small btn-danger"
-											onclick="return confirm('Permanently delete ' + this.closest('form').email.value + '? This cannot be undone.')"
-										>X</button>
+										<input type="hidden" name="status" value="removed"/>
+										<button type="submit" class="btn-small btn-danger" onclick="return confirm('Deactivate ' + this.closest('form').email.value + '?')">Deactivate</button>
 									</form>
-								</td>
-							</tr>
-						}
-					}
-				</tbody>
-			</table>
+								} else {
+									<form method="POST" action="/dashboard/admin/users/edit" class="inline-delete-form">
+										<input type="hidden" name="original_email" value={ m.Email }/>
+										<input type="hidden" name="email" value={ m.Email }/>
+										<input type="hidden" name="status" value="active"/>
+										<button type="submit" class="btn-small">Activate</button>
+									</form>
+								}
+								<form method="POST" action="/dashboard/admin/users/delete" class="inline-delete-form">
+									<input type="hidden" name="email" value={ m.Email }/>
+									<button type="submit" class="btn-small btn-danger" onclick="return confirm('Permanently delete ' + this.closest('form').email.value + '? This cannot be undone.')">✕</button>
+								</form>
+							}
+						</div>
+					</div>
+				}
+			</div>
 		}
 	</section>
 }

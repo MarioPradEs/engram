@@ -45,14 +45,14 @@ func Layout(title string, username string, activeTab string, isAdmin bool, conte
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " — Engram Cloud</title><link rel=\"stylesheet\" href=\"/dashboard/static/pico.min.css\"><link rel=\"stylesheet\" href=\"/dashboard/static/styles.css\"><script src=\"/dashboard/static/htmx.min.js\"></script></head><body class=\"shell-body\"><div class=\"shell-backdrop\"><div class=\"status-ribbon\"><span class=\"status-pill\">CLOUD ACTIVE</span> <span class=\"status-copy\">shared memory index / local-first replication / org policy controls</span></div><div class=\"app-shell\"><header class=\"shell-header\"><div class=\"brand-stack\"><a href=\"/dashboard/\" class=\"brand\">Engram Cloud</a><p class=\"brand-subtitle\">An elephant never forgets.</p></div><div class=\"user-info\"><span class=\"user-name\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, " — Engram Cloud</title><link rel=\"stylesheet\" href=\"/dashboard/static/pico.min.css\"><link rel=\"stylesheet\" href=\"/dashboard/static/styles.css\"><script src=\"/dashboard/static/htmx.min.js\"></script></head><body class=\"shell-body\"><div class=\"shell-backdrop\"><div class=\"app-shell\"><header class=\"shell-header\"><div class=\"shell-status\"><span class=\"status-pill\">CLOUD ACTIVE</span></div><a href=\"/dashboard/\" class=\"brand\">Engram Cloud</a><div class=\"user-info\"><span class=\"user-name\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var3 string
 		templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(username)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/cloud/dashboard/layout.templ`, Line: 30, Col: 41}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/cloud/dashboard/layout.templ`, Line: 26, Col: 41}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 		if templ_7745c5c3_Err != nil {

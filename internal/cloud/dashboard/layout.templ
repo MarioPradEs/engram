@@ -16,16 +16,12 @@ templ Layout(title string, username string, activeTab string, isAdmin bool, cont
 		</head>
 		<body class="shell-body">
 			<div class="shell-backdrop">
-				<div class="status-ribbon">
-					<span class="status-pill">CLOUD ACTIVE</span>
-					<span class="status-copy">shared memory index / local-first replication / org policy controls</span>
-				</div>
 				<div class="app-shell">
 					<header class="shell-header">
-						<div class="brand-stack">
-							<a href="/dashboard/" class="brand">Engram Cloud</a>
-							<p class="brand-subtitle">An elephant never forgets.</p>
+						<div class="shell-status">
+							<span class="status-pill">CLOUD ACTIVE</span>
 						</div>
+						<a href="/dashboard/" class="brand">Engram Cloud</a>
 						<div class="user-info">
 							<span class="user-name">{ username }</span>
 							<form method="post" action="/dashboard/logout" style="margin:0">

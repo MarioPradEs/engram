@@ -1337,3 +1337,189 @@ button.outline.secondary,
 	border: none;
 	display: block;
 }
+
+/* ===== VIVA-PASS-START (live, iterate below this line) ===== */
+:root {
+	--engram-font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Inter", "Helvetica Neue", Arial, sans-serif;
+	--engram-font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Inter", "Helvetica Neue", Arial, sans-serif;
+	--viva-radius: 14px;
+	--viva-radius-sm: 10px;
+	--viva-pill: 999px;
+	--viva-shadow: 0 12px 34px -16px rgba(0, 0, 0, 0.7);
+	--viva-hairline: rgba(255, 255, 255, 0.07);
+	--viva-bg: #060607;
+}
+h1, h2, h3 { font-weight: 700; letter-spacing: -0.01em; line-height: 1.18; }
+article { border-radius: var(--viva-radius); border: 1px solid var(--viva-hairline); box-shadow: var(--viva-shadow); }
+input, select, textarea { border-radius: var(--viva-radius-sm); }
+button, button[type="submit"], button.outline.secondary, .shell-button { border-radius: var(--viva-pill); font-weight: 600; }
+
+/* ── Menu / nav: pill tabs ── */
+.shell-nav { border-bottom: none; padding-bottom: 0.6rem; }
+nav [role="tab"], .browser-subtabs [role="tab"], .admin-nav a {
+	border-radius: 999px; border: 1px solid transparent; background: rgba(255, 255, 255, 0.045);
+	color: var(--engram-muted); text-transform: none; letter-spacing: 0.01em;
+	font-size: 0.85rem; font-weight: 600; padding: 0.5rem 1.1rem;
+}
+nav [role="tab"]:hover, .browser-subtabs [role="tab"]:hover, .admin-nav a:hover {
+	background: rgba(255, 255, 255, 0.09); border-color: transparent; color: var(--engram-text); transform: none;
+}
+nav [role="tab"][aria-selected="true"], .browser-subtabs [role="tab"].active, .admin-nav a.active {
+	background: var(--engram-primary); border-color: transparent; color: #0b0b0d; box-shadow: 0 6px 16px -6px rgba(245, 130, 31, 0.6);
+}
+
+/* ── Header: status left · title center · logout right ── */
+.shell-header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding-top: 1rem; padding-bottom: 1rem; }
+.shell-status { justify-self: start; }
+.shell-header .brand { justify-self: center; text-align: center; font-size: 1.55rem; text-shadow: none; text-transform: uppercase; letter-spacing: 0.03em; }
+.shell-header .brand::after { content: " Vivagames"; }
+.shell-header .user-info { justify-self: end; padding-top: 0; }
+.status-pill { display: inline-block; padding: 0.32rem 0.85rem; border-radius: 999px; background: rgba(61, 214, 140, 0.14); color: var(--engram-success); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.12em; }
+
+/* ── Full-width + seamless background (matches the graph #060607) ── */
+body.shell-body { background: var(--viva-bg); }
+.app-shell { max-width: none; margin: 0; border: none; border-radius: 0; box-shadow: none; overflow: visible; background: var(--viva-bg); backdrop-filter: none; }
+.shell-header, .shell-nav, .shell-main, .shell-footer { padding-left: clamp(0.75rem, 1.5vw, 1.5rem); padding-right: clamp(0.75rem, 1.5vw, 1.5rem); }
+
+/* ── Brain page: full-screen graph (edge-to-edge, no footer/padding) ── */
+body:has(.brain-stage) .shell-main { padding-top: 0; padding-bottom: 0; }
+body:has(.brain-stage) .shell-footer { display: none; }
+.brain-stage { width: 100vw; margin-left: calc(50% - 50vw); height: calc(100vh - 118px); background: var(--viva-bg); }
+.brain-frame { height: 100%; }
+/* ===== VIVA-PASS-END ===== */
+
+/* tweak: center the nav tabs */
+nav [role="tablist"] { justify-content: center; }
+
+/* tweak: force-center the main nav tabs */
+.shell-nav { display: flex; justify-content: center; }
+.shell-nav [role="tablist"] { justify-content: center !important; }
+
+/* ── Dashboard home: modern KPI cards + cleaner hero ── */
+.metric-strip {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+	gap: 1rem;
+}
+.metric-card, .stat-card {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+	box-shadow: var(--viva-shadow);
+	padding: 1.35rem 1.45rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+.metric-card.stat-card-link:hover, .stat-card-link:hover {
+	transform: translateY(-3px);
+	border-color: rgba(245, 130, 31, 0.45);
+	box-shadow: 0 18px 40px -18px rgba(245, 130, 31, 0.35);
+}
+.metric-value, .stat-value {
+	font-size: clamp(2rem, 4vw, 2.8rem);
+	font-weight: 800;
+	letter-spacing: -0.03em;
+	line-height: 1;
+	color: var(--engram-text);
+}
+.metric-label, .stat-label {
+	font-size: 0.72rem;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--engram-muted);
+}
+.hero-panel { gap: 1.5rem; }
+.hero-lead { color: var(--engram-muted); font-size: 0.98rem; line-height: 1.6; }
+
+/* ── Modern card treatment, consistent across ALL panels ── */
+.card, .project-card, .stat-card, .metric-card,
+.login-container, .login-sidepanel, .empty-state, .hero-console, .terminal-note {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.012));
+	box-shadow: var(--viva-shadow);
+}
+/* layout containers stay light (no nested-card look) */
+.hero-panel { border: none; background: transparent; box-shadow: none; }
+.data-frame {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.012);
+	box-shadow: none;
+}
+/* hover lift for clickable cards everywhere */
+.stat-card-link:hover, .project-card:hover, a.card:hover {
+	transform: translateY(-3px);
+	border-color: rgba(245, 130, 31, 0.45);
+	box-shadow: 0 18px 40px -18px rgba(245, 130, 31, 0.35);
+}
+
+/* tweak: menu tabs white with gray text (differentiate from dark bg) */
+nav [role="tab"], .browser-subtabs [role="tab"], .admin-nav a {
+	background: #ffffff;
+	color: #5f5f66;
+}
+nav [role="tab"]:hover, .browser-subtabs [role="tab"]:hover, .admin-nav a:hover {
+	background: #ececee;
+	color: #2c2c30;
+}
+
+/* tweak: active tab = orange bg + white text */
+nav [role="tab"][aria-selected="true"], .browser-subtabs [role="tab"].active, .admin-nav a.active {
+	color: #ffffff;
+}
+
+/* tweak v2: menu inactive light gray, active white + orange text */
+nav [role="tab"], .browser-subtabs [role="tab"], .admin-nav a {
+	background: #cfcfd5;
+	color: #4d4d55;
+}
+nav [role="tab"]:hover, .browser-subtabs [role="tab"]:hover, .admin-nav a:hover {
+	background: #e3e3e7;
+	color: #2a2a30;
+}
+nav [role="tab"][aria-selected="true"], .browser-subtabs [role="tab"].active, .admin-nav a.active {
+	background: #ffffff;
+	color: var(--engram-primary);
+	box-shadow: 0 6px 16px -6px rgba(0, 0, 0, 0.55);
+}
+
+/* tweak: selected tab ORANGE bg + white text (inactives stay light gray) */
+nav [role="tab"][aria-selected="true"], .browser-subtabs [role="tab"].active, .admin-nav a.active {
+	background: var(--engram-primary);
+	color: #ffffff;
+	box-shadow: 0 6px 16px -6px rgba(245, 130, 31, 0.6);
+}
+
+/* ── Tags / badges: modern rounded pills (colors kept as-is) ── */
+.badge {
+	border-radius: 999px;
+	padding: 0.32rem 0.78rem;
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+}
+.project-chip-list, .stat-badges { gap: 0.5rem; }
+
+/* ── Browser filter pills (.type-pill): modern rounded, colors kept ── */
+.type-pill {
+	border-radius: 999px;
+	padding: 0.35rem 0.85rem;
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+}
+
+/* ── General modern pass across all pages: tables + headers ── */
+.data-table {
+	border-radius: var(--viva-radius);
+	border: 1px solid var(--viva-hairline);
+	background: rgba(255, 255, 255, 0.014);
+}
+.data-table th, .data-table td { border-bottom-color: var(--viva-hairline); }
+.data-table th { background: rgba(255, 255, 255, 0.028); font-weight: 600; }
+.data-table tbody tr:last-child td { border-bottom: none; }
+.data-table tbody tr:hover { background: rgba(245, 130, 31, 0.07); }
+.section-header h2, .section-header h3 { letter-spacing: -0.02em; }

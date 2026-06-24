@@ -935,6 +935,13 @@ func cmdMCP(cfg store.Config) {
 			os.Getenv("ENGRAM_DEFAULT_PROJECT"),
 		)
 	}
+	// MAJOR-5: normalize the resolved name so cmdMCP is consistent with
+	// resolveServeSyncStatusProject (which also calls NormalizeProject).
+	if projectOverride != "" {
+		if normalized, _ := store.NormalizeProject(projectOverride); normalized != "" {
+			projectOverride = normalized
+		}
+	}
 
 	s, err := storeNew(cfg)
 	if err != nil {

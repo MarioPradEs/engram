@@ -39,6 +39,13 @@ var newTriageServer = func(s *store.Store, port int) triageStarter {
 		detected,
 		os.Getenv("ENGRAM_DEFAULT_PROJECT"),
 	)
+	// MAJOR-5: normalize the resolved name so newTriageServer is consistent with
+	// resolveServeSyncStatusProject and cmdMCP (all call sites must normalize).
+	if cwdProject != "" {
+		if normalized, _ := store.NormalizeProject(cwdProject); normalized != "" {
+			cwdProject = normalized
+		}
+	}
 
 	// Build a nil-safe mutable store adapter (guard for test stubs where s==nil).
 	var ms triage.MutableTriageStore

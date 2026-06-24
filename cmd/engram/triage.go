@@ -28,12 +28,17 @@ type triageStarter interface {
 // are live, and calls SetCwdProject so the classify boundary (Option A) is
 // enforced correctly. A nil adapter is passed when s is nil (test stub path).
 var newTriageServer = func(s *store.Store, port int) triageStarter {
-	// Resolve cwd and the project name that matches it.
+	// Resolve cwd and the project name that matches it (D1 precedence).
 	cwdDir, _ := os.Getwd()
-	cwdProject := ""
+	var detected string
 	if cwdDir != "" {
-		cwdProject = detectProject(cwdDir)
+		detected = detectProject(cwdDir)
 	}
+	cwdProject := resolveProjectName(
+		os.Getenv("ENGRAM_PROJECT"),
+		detected,
+		os.Getenv("ENGRAM_DEFAULT_PROJECT"),
+	)
 
 	// Build a nil-safe mutable store adapter (guard for test stubs where s==nil).
 	var ms triage.MutableTriageStore

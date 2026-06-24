@@ -2,7 +2,8 @@
   "mcpServers": {
     "engram": {
       "command": "engram",
-      "args": ["mcp", "--tools=agent"]
+      "args": ["mcp", "--tools=agent"],
+      "env": { "ENGRAM_CLOUD_AUTOSYNC": "1" }
     }
   }
 }

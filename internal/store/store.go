@@ -4011,13 +4011,15 @@ func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]Pendin
 	targetKey = normalizeSyncTargetKey(targetKey)
 	// local-only entity filter (prompts/sessions are never exported to cloud):
 	// exclude them from the count so they do not block sync readiness or enrollment checks.
+	// WARNING-2: include project='' (orphan mutations) in the count so the
+	// diagnostic is honest about ALL unenrolled pending mutations. Removing
+	// AND sm.project != '' ensures empty-project orphans are not silently hidden.
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.project, COUNT(*)
 		FROM sync_mutations sm
 		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
 		WHERE sm.target_key = ?
 		  AND sm.acked_at IS NULL
-		  AND sm.project != ''
 		  AND sep.project IS NULL
 		  AND sm.entity NOT IN ('prompt', 'session')
 		GROUP BY sm.project
@@ -4642,10 +4644,18 @@ func (s *Store) GetObservationBySyncID(syncID string) (*Observation, error) {
 
 // EnrollProject registers a project for cloud sync. Idempotent — re-enrolling
 // an already-enrolled project is a no-op.
+//
+// MAJOR-4 privacy guard: the private default project ("personal") is never
+// enrollable. Orphan observations are migrated into "personal" and must only
+// be shared by explicitly reassigning them to a real project. Enrolling
+// "personal" would exfiltrate all private data to the cloud.
 func (s *Store) EnrollProject(project string) error {
 	project, _ = NormalizeProject(project)
 	if project == "" {
 		return fmt.Errorf("project name must not be empty")
+	}
+	if project == privateDefaultProject {
+		return fmt.Errorf("project %q is the private default bucket and cannot be enrolled for cloud sync; reassign specific observations to a named project to share them", project)
 	}
 	return s.withTx(func(tx *sql.Tx) error {
 		res, err := s.execHook(tx,
@@ -5049,6 +5059,12 @@ type OrphanMigrateResult struct {
 // records a completed orphan migration.  Its presence means done.
 const migrateEmptyProjectDoneKey = "migrate_empty_project_to_personal_done"
 
+// privateDefaultProject is the well-known bucket that orphan observations are
+// migrated into.  It is intentionally non-enrollable — observations that live
+// here are private by default until the user explicitly reassigns them to a
+// named project.
+const privateDefaultProject = "personal"
+
 // MigrateEmptyProjectToPersonal is an idempotent one-time migration (D3/D4)
 // that reassigns all records with project='' to the given target project name
 // (typically "personal").
@@ -5090,6 +5106,25 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 	result := &OrphanMigrateResult{}
 
 	err := s.withTx(func(tx *sql.Tx) error {
+		// BLOCKER-2: in-transaction authoritative idempotency guard.
+		// Even if two concurrent processes both passed the outer pre-read (TOCTOU
+		// window), only one can win the INSERT OR IGNORE here. The loser gets
+		// RowsAffected==0 and returns early with a no-op result.
+		guardRes, err := s.execHook(tx,
+			`INSERT OR IGNORE INTO migration_flags (key, completed_at)
+			 VALUES (?, datetime('now'))`,
+			migrateEmptyProjectDoneKey,
+		)
+		if err != nil {
+			return fmt.Errorf("migrate in-tx guard: %w", err)
+		}
+		if n, _ := guardRes.RowsAffected(); n == 0 {
+			// Another process (or the outer fast-path race winner) already set the
+			// marker; abort this transaction body — nothing to migrate.
+			result.AlreadyDone = true
+			return nil
+		}
+
 		// Update entity tables.
 		res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ''`, target)
 		if err != nil {
@@ -5113,11 +5148,15 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 		result.PromptsUpdated = n
 
 		// D4 dual-write: update sync_mutations.project column AND payload.$.project.
+		// Only rewrite PENDING (acked_at IS NULL) mutations — already-synced historical
+		// rows must not be rewritten (MAJOR-3: acked_at filter prevents overwriting
+		// mutations that cloud has already acknowledged).
 		res, err = s.execHook(tx,
 			`UPDATE sync_mutations
 			 SET project = ?,
 			     payload = json_set(payload, '$.project', ?)
-			 WHERE project = ''`,
+			 WHERE project = ''
+			   AND acked_at IS NULL`,
 			target, target,
 		)
 		if err != nil {
@@ -5132,13 +5171,7 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 			return fmt.Errorf("backfill sync mutations for %q: %w", target, err)
 		}
 
-		// Record completion marker to make subsequent calls idempotent.
-		_, err = s.execHook(tx,
-			`INSERT OR REPLACE INTO migration_flags (key, completed_at)
-			 VALUES (?, datetime('now'))`,
-			migrateEmptyProjectDoneKey,
-		)
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, err

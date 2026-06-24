@@ -5034,6 +5034,119 @@ func (s *Store) MergeProjects(sources []string, canonical string) (*MergeResult,
 	return result, nil
 }
 
+// OrphanMigrateResult summarizes the outcome of MigrateEmptyProjectToPersonal.
+type OrphanMigrateResult struct {
+	// AlreadyDone is true when the migration has been completed in a previous
+	// call — this run made no changes.
+	AlreadyDone         bool  `json:"already_done"`
+	ObservationsUpdated int64 `json:"observations_updated"`
+	SessionsUpdated     int64 `json:"sessions_updated"`
+	PromptsUpdated      int64 `json:"prompts_updated"`
+	MutationsUpdated    int64 `json:"mutations_updated"`
+}
+
+// migrateEmptyProjectDoneKey is the marker key stored in migration_flags that
+// records a completed orphan migration.  Its presence means done.
+const migrateEmptyProjectDoneKey = "migrate_empty_project_to_personal_done"
+
+// MigrateEmptyProjectToPersonal is an idempotent one-time migration (D3/D4)
+// that reassigns all records with project='' to the given target project name
+// (typically "personal").
+//
+// D4 dual-write: it updates both the sync_mutations.project column AND the
+// JSON payload field ($.project) so that cloud-side storage also receives the
+// correct project name on next push.
+//
+// Completion is recorded in the migration_flags table (auto-created) so that
+// a second call returns early with AlreadyDone=true without modifying any rows.
+func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResult, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("MigrateEmptyProjectToPersonal: target must not be empty")
+	}
+
+	// Ensure the migration_flags table exists (idempotent).
+	if _, err := s.execHook(s.db,
+		`CREATE TABLE IF NOT EXISTS migration_flags (
+			key        TEXT PRIMARY KEY,
+			completed_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+	); err != nil {
+		return nil, fmt.Errorf("MigrateEmptyProjectToPersonal: create migration_flags: %w", err)
+	}
+
+	// Idempotency check — read outside a transaction to avoid holding a
+	// read cursor while also beginning a write tx.
+	var markerCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM migration_flags WHERE key = ?`, migrateEmptyProjectDoneKey,
+	).Scan(&markerCount); err != nil {
+		return nil, fmt.Errorf("MigrateEmptyProjectToPersonal: check marker: %w", err)
+	}
+	if markerCount > 0 {
+		return &OrphanMigrateResult{AlreadyDone: true}, nil
+	}
+
+	result := &OrphanMigrateResult{}
+
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Update entity tables.
+		res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project = ''`, target)
+		if err != nil {
+			return fmt.Errorf("migrate observations: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		result.ObservationsUpdated = n
+
+		res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project = ''`, target)
+		if err != nil {
+			return fmt.Errorf("migrate sessions: %w", err)
+		}
+		n, _ = res.RowsAffected()
+		result.SessionsUpdated = n
+
+		res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project = ''`, target)
+		if err != nil {
+			return fmt.Errorf("migrate prompts: %w", err)
+		}
+		n, _ = res.RowsAffected()
+		result.PromptsUpdated = n
+
+		// D4 dual-write: update sync_mutations.project column AND payload.$.project.
+		res, err = s.execHook(tx,
+			`UPDATE sync_mutations
+			 SET project = ?,
+			     payload = json_set(payload, '$.project', ?)
+			 WHERE project = ''`,
+			target, target,
+		)
+		if err != nil {
+			return fmt.Errorf("migrate sync_mutations: %w", err)
+		}
+		n, _ = res.RowsAffected()
+		result.MutationsUpdated = n
+
+		// Backfill any missing sync_mutation rows for the target project so
+		// newly enrolled data is fully represented in the journal.
+		if err := s.backfillProjectSyncMutationsTx(tx, target); err != nil {
+			return fmt.Errorf("backfill sync mutations for %q: %w", target, err)
+		}
+
+		// Record completion marker to make subsequent calls idempotent.
+		_, err = s.execHook(tx,
+			`INSERT OR REPLACE INTO migration_flags (key, completed_at)
+			 VALUES (?, datetime('now'))`,
+			migrateEmptyProjectDoneKey,
+		)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // sqlPlaceholders returns a comma-separated list of parameter markers only.
 // Values are still passed separately through query arguments; no user data is
 // interpolated into SQL here.

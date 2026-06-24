@@ -808,13 +808,34 @@ func cmdServe(cfg store.Config) {
 	}
 }
 
-func resolveServeSyncStatusProject() string {
-	projectName := strings.TrimSpace(os.Getenv("ENGRAM_PROJECT"))
-	if projectName == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			projectName = detectProject(cwd)
+// resolveProjectName returns the first non-empty (after trimming) of:
+//
+//  1. envProject  — value of ENGRAM_PROJECT (explicit deployment override)
+//  2. detected    — value from detectProject(cwd)
+//  3. envDefault  — value of ENGRAM_DEFAULT_PROJECT
+//  4. "personal"  — hard-coded private fallback (D1)
+//
+// Callers pass already-read strings so this function is pure and testable
+// without touching the environment or filesystem directly.
+func resolveProjectName(envProject, detected, envDefault string) string {
+	for _, candidate := range []string{envProject, detected, envDefault} {
+		if v := strings.TrimSpace(candidate); v != "" {
+			return v
 		}
 	}
+	return "personal"
+}
+
+func resolveServeSyncStatusProject() string {
+	var detected string
+	if cwd, err := os.Getwd(); err == nil {
+		detected = detectProject(cwd)
+	}
+	projectName := resolveProjectName(
+		os.Getenv("ENGRAM_PROJECT"),
+		detected,
+		os.Getenv("ENGRAM_DEFAULT_PROJECT"),
+	)
 	projectName, _ = store.NormalizeProject(projectName)
 	return strings.TrimSpace(projectName)
 }
@@ -872,7 +893,8 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 
 func cmdMCP(cfg store.Config) {
 	toolsFilter := ""
-	projectOverride := strings.TrimSpace(os.Getenv("ENGRAM_PROJECT"))
+	// flagProject holds an explicit --project flag value (takes highest priority).
+	flagProject := ""
 	for i := 2; i < len(os.Args); i++ {
 		if strings.HasPrefix(os.Args[i], "--tools=") {
 			toolsFilter = strings.TrimPrefix(os.Args[i], "--tools=")
@@ -880,20 +902,38 @@ func cmdMCP(cfg store.Config) {
 			toolsFilter = os.Args[i+1]
 			i++
 		} else if strings.HasPrefix(os.Args[i], "--project=") {
-			projectOverride = strings.TrimSpace(strings.TrimPrefix(os.Args[i], "--project="))
-			if projectOverride == "" {
+			flagProject = strings.TrimSpace(strings.TrimPrefix(os.Args[i], "--project="))
+			if flagProject == "" {
 				fatal(fmt.Errorf("--project requires a value"))
 			}
 		} else if os.Args[i] == "--project" {
 			if i+1 >= len(os.Args) {
 				fatal(fmt.Errorf("--project requires a value"))
 			}
-			projectOverride = strings.TrimSpace(os.Args[i+1])
-			if projectOverride == "" {
+			flagProject = strings.TrimSpace(os.Args[i+1])
+			if flagProject == "" {
 				fatal(fmt.Errorf("--project requires a value"))
 			}
 			i++
 		}
+	}
+
+	// Apply D1 project resolution: explicit --project flag > ENGRAM_PROJECT env >
+	// detectProject(cwd) > ENGRAM_DEFAULT_PROJECT > "personal".
+	// An explicit --project flag bypasses resolution and is used as-is.
+	var projectOverride string
+	if flagProject != "" {
+		projectOverride = flagProject
+	} else {
+		var detected string
+		if cwd, err := os.Getwd(); err == nil {
+			detected = detectProject(cwd)
+		}
+		projectOverride = resolveProjectName(
+			os.Getenv("ENGRAM_PROJECT"),
+			detected,
+			os.Getenv("ENGRAM_DEFAULT_PROJECT"),
+		)
 	}
 
 	s, err := storeNew(cfg)

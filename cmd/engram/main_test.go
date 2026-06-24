@@ -1100,8 +1100,10 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	withArgs(t, "engram", "mcp")
 	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
 
-	if capturedCfg.DefaultProject != "" {
-		t.Fatalf("DefaultProject = %q; want empty without flag/env", capturedCfg.DefaultProject)
+	// D1: when detectProject returns a non-empty name, it becomes DefaultProject
+	// (no flag, no ENGRAM_PROJECT env → falls through to detectProject result).
+	if capturedCfg.DefaultProject != "detected-from-git" {
+		t.Fatalf("DefaultProject = %q; want %q (D1: detectProject result)", capturedCfg.DefaultProject, "detected-from-git")
 	}
 }
 

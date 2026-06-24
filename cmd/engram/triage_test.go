@@ -289,3 +289,43 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 func (r *responseRecorder) WriteHeader(code int) {
 	r.code = code
 }
+
+// TestCmdTriageRunsMigrationAtStartup verifies that cmdTriage calls
+// migrateOrphansFn (D3) before starting the server, even when the store stub
+// returns nil (graceful nil-guard).
+func TestCmdTriageRunsMigrationAtStartup(t *testing.T) {
+	migrationCalled := false
+
+	// Stub migrateOrphansFn to record the call.
+	oldMigrate := migrateOrphansFn
+	t.Cleanup(func() { migrateOrphansFn = oldMigrate })
+	migrateOrphansFn = func(s *store.Store) {
+		migrationCalled = true
+	}
+
+	// Stub storeNew so no real DB is opened.
+	oldStore := storeNew
+	t.Cleanup(func() { storeNew = oldStore })
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		return nil, nil
+	}
+
+	// Stub newTriageServer so no real listener is opened.
+	oldNew := newTriageServer
+	t.Cleanup(func() { newTriageServer = oldNew })
+	newTriageServer = func(s *store.Store, port int) triageStarter {
+		return &stubTriageServer{}
+	}
+
+	// Stub exitFunc so fatal() doesn't terminate the test process.
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) {}
+
+	cfg := testConfig(t)
+	cmdTriage(cfg)
+
+	if !migrationCalled {
+		t.Error("D3: expected migrateOrphansFn to be called at triage startup")
+	}
+}

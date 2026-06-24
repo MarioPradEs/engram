@@ -1078,6 +1078,11 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	cfg := testConfig(t)
 
+	// Isolate ambient env vars so the test is deterministic regardless of the
+	// developer's shell environment (BLOCKER-1 fix: matches TestCmdMCPDetectsProjectFromEnv).
+	t.Setenv("ENGRAM_PROJECT", "")
+	t.Setenv("ENGRAM_DEFAULT_PROJECT", "")
+
 	// Stub detectProject to simulate git detection
 	old := detectProject
 	t.Cleanup(func() { detectProject = old })
@@ -1104,6 +1109,38 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	// (no flag, no ENGRAM_PROJECT env → falls through to detectProject result).
 	if capturedCfg.DefaultProject != "detected-from-git" {
 		t.Fatalf("DefaultProject = %q; want %q (D1: detectProject result)", capturedCfg.DefaultProject, "detected-from-git")
+	}
+}
+
+// TestCmdMCPNormalizesProject verifies MAJOR-5: cmdMCP must normalize the
+// resolved project name (e.g. "My-Proj" → "my-proj") so that all call sites
+// are consistent with resolveServeSyncStatusProject which calls NormalizeProject.
+func TestCmdMCPNormalizesProject(t *testing.T) {
+	cfg := testConfig(t)
+
+	// Un-normalized project name via ENGRAM_PROJECT.
+	t.Setenv("ENGRAM_PROJECT", "My-Proj")
+
+	var capturedCfg mcp.MCPConfig
+	oldNew := newMCPServerWithConfig
+	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
+	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		capturedCfg = mcpCfg
+		return oldNew(s, mcpCfg, allowlist)
+	}
+
+	oldServe := serveMCP
+	t.Cleanup(func() { serveMCP = oldServe })
+	serveMCP = func(srv *mcpserver.MCPServer, opts ...mcpserver.StdioOption) error {
+		return nil
+	}
+
+	withArgs(t, "engram", "mcp")
+	_, _ = captureOutput(t, func() { cmdMCP(cfg) })
+
+	// NormalizeProject("My-Proj") produces "my-proj".
+	if capturedCfg.DefaultProject != "my-proj" {
+		t.Fatalf("DefaultProject = %q; want %q (MAJOR-5: must be normalized)", capturedCfg.DefaultProject, "my-proj")
 	}
 }
 

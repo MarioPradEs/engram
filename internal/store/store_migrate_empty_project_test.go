@@ -457,6 +457,19 @@ func TestMigrateEmptyProjectToPersonal_EmptyPayloadGuard(t *testing.T) {
 		t.Errorf("expected payload to remain '' after guard (must not be corrupted), got %q", payload)
 	}
 
+	// FIX-2 must also ack this row: a 'personal' (private) mutation is never
+	// synced, so it must be acked so it does not block autosync — even when its
+	// payload was empty and skipped the json_set guard above.
+	var acked int
+	if err := s.db.QueryRow(
+		`SELECT acked_at IS NOT NULL FROM sync_mutations WHERE entity_key = 'obs-empty-payload'`,
+	).Scan(&acked); err != nil {
+		t.Fatalf("query migrated row acked_at: %v", err)
+	}
+	if acked != 1 {
+		t.Error("expected empty-payload 'personal' mutation to be acked after migration, got pending")
+	}
+
 	// The migration marker must be set (tx committed — no rollback occurred).
 	var markerCount int
 	if err := s.db.QueryRow(

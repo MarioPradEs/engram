@@ -127,7 +127,7 @@ func TestMigrateEmptyProjectToPersonal(t *testing.T) {
 		t.Errorf("expected 5 observations with project='personal', got %d", personalObs)
 	}
 
-	// (b) sync_mutations.project column updated.
+	// (b) sync_mutations.project column updated — count all personal rows (acked or not).
 	var smOrphan int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM sync_mutations WHERE project = '' AND acked_at IS NULL`,
@@ -140,7 +140,7 @@ func TestMigrateEmptyProjectToPersonal(t *testing.T) {
 
 	var smPersonal int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'personal' AND acked_at IS NULL`,
+		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'personal'`,
 	).Scan(&smPersonal); err != nil {
 		t.Fatalf("count personal sync_mutations: %v", err)
 	}
@@ -148,9 +148,20 @@ func TestMigrateEmptyProjectToPersonal(t *testing.T) {
 		t.Error("expected sync_mutations.project = 'personal' after migration")
 	}
 
-	// (c) D4 dual-write: payload.$.project must also be 'personal'.
+	// (b2) Migrated personal mutations must be acked (FIX 2: private data must not block autosync).
+	var smPersonalPending int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'personal' AND acked_at IS NULL`,
+	).Scan(&smPersonalPending); err != nil {
+		t.Fatalf("count pending personal sync_mutations: %v", err)
+	}
+	if smPersonalPending != 0 {
+		t.Errorf("expected migrated personal sync_mutations to be acked, got %d still pending", smPersonalPending)
+	}
+
+	// (c) D4 dual-write: payload.$.project must also be 'personal' (rows with valid payload).
 	rows, err := s.db.Query(
-		`SELECT json_extract(payload, '$.project') FROM sync_mutations WHERE project = 'personal' AND acked_at IS NULL`,
+		`SELECT json_extract(payload, '$.project') FROM sync_mutations WHERE project = 'personal' AND payload != ''`,
 	)
 	if err != nil {
 		t.Fatalf("query payload project: %v", err)
@@ -382,5 +393,122 @@ func TestEnrollProjectRejectsPersonal(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("EnrollProject('personal') must not insert into sync_enrolled_projects; got count=%d", count)
+	}
+}
+
+// TestMigrateEmptyProjectToPersonal_EmptyPayloadGuard verifies FIX-1:
+// a pending sync_mutation with payload='' (empty/invalid JSON) must NOT cause
+// json_set to return NULL, which would violate the NOT NULL constraint on
+// payload and roll back the entire transaction — including the migration_flags
+// marker — causing a permanent re-run loop.
+// The CASE guard in the UPDATE must leave the payload column unchanged when
+// the existing value is empty or invalid JSON, while still updating the project column.
+func TestMigrateEmptyProjectToPersonal_EmptyPayloadGuard(t *testing.T) {
+	s := newTestStore(t)
+
+	// Ensure sync_state exists (required by FK constraint).
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at)
+		 VALUES (?, 'idle', datetime('now'))`, DefaultSyncTargetKey,
+	); err != nil {
+		t.Fatalf("seed sync_state: %v", err)
+	}
+
+	// Seed a pending sync_mutation with payload='' (empty — invalid JSON).
+	// Simulates a legacy row where the payload was never populated.
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		 VALUES (?, 'observation', 'obs-empty-payload', 'upsert', '', 'local', '')`,
+		DefaultSyncTargetKey,
+	); err != nil {
+		t.Fatalf("seed empty payload mutation: %v", err)
+	}
+
+	// Before the fix: json_set('', '$.project', 'personal') returns NULL,
+	// which violates payload TEXT NOT NULL → tx rollback → error returned.
+	// After the fix: CASE guards json_set for empty/invalid payload → no error.
+	result, err := s.MigrateEmptyProjectToPersonal("personal")
+	if err != nil {
+		t.Fatalf("MigrateEmptyProjectToPersonal with empty payload row: expected no error, got: %v", err)
+	}
+	if result.AlreadyDone {
+		t.Error("expected AlreadyDone=false on fresh migration")
+	}
+
+	// The project column must have been updated to 'personal'.
+	var project string
+	if err := s.db.QueryRow(
+		`SELECT project FROM sync_mutations WHERE entity_key = 'obs-empty-payload'`,
+	).Scan(&project); err != nil {
+		t.Fatalf("query migrated row project: %v", err)
+	}
+	if project != "personal" {
+		t.Errorf("expected project='personal' after migration, got %q", project)
+	}
+
+	// The payload must remain '' (the guard must not corrupt it to NULL).
+	var payload string
+	if err := s.db.QueryRow(
+		`SELECT payload FROM sync_mutations WHERE entity_key = 'obs-empty-payload'`,
+	).Scan(&payload); err != nil {
+		t.Fatalf("query migrated row payload: %v", err)
+	}
+	if payload != "" {
+		t.Errorf("expected payload to remain '' after guard (must not be corrupted), got %q", payload)
+	}
+
+	// The migration marker must be set (tx committed — no rollback occurred).
+	var markerCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM migration_flags WHERE key = ?`, migrateEmptyProjectDoneKey,
+	).Scan(&markerCount); err != nil {
+		t.Fatalf("query migration_flags: %v", err)
+	}
+	if markerCount == 0 {
+		t.Error("expected migration_flags marker to be set after successful migration")
+	}
+}
+
+// TestMigrateEmptyProjectToPersonal_PersonalMutationsAcked is the key regression
+// guard for FIX-2: after migration, 'personal' must NOT appear in
+// CountPendingNonEnrolledSyncMutations so that autosync does not flap to
+// blocked_unenrolled. Before the fix, the migration left migrated mutations
+// pending AND backfilled new ones — both caused blocked_unenrolled.
+func TestMigrateEmptyProjectToPersonal_PersonalMutationsAcked(t *testing.T) {
+	s := newTestStore(t)
+	seedEmptyProjectData(t, s)
+
+	if _, err := s.MigrateEmptyProjectToPersonal("personal"); err != nil {
+		t.Fatalf("MigrateEmptyProjectToPersonal: %v", err)
+	}
+
+	// CountPendingNonEnrolledSyncMutations must NOT return any entry for 'personal'.
+	// Before fix: pending personal rows (not acked) + backfill rows → blocked_unenrolled.
+	// After fix: all personal rows acked + no backfill → autosync is clear.
+	counts, err := s.CountPendingNonEnrolledSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("CountPendingNonEnrolledSyncMutations: %v", err)
+	}
+	for _, c := range counts {
+		if c.Project == privateDefaultProject {
+			t.Errorf(
+				"CountPendingNonEnrolledSyncMutations returned %q with count=%d; "+
+					"autosync would block_unenrolled — migrated personal mutations must be acked",
+				c.Project, c.Count,
+			)
+		}
+	}
+
+	// Personal must NOT be enrolled (WARNING-1 regression guard — also covered by
+	// TestMigrateEmptyProjectToPersonal_PersonalStaysUnenrolled but repeated here
+	// to keep the full autosync-safe invariant in one place).
+	var enrolledCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_enrolled_projects WHERE project = ?`, privateDefaultProject,
+	).Scan(&enrolledCount); err != nil {
+		t.Fatalf("query enrolled: %v", err)
+	}
+	if enrolledCount != 0 {
+		t.Errorf("personal must NOT be in sync_enrolled_projects after migration; got count=%d", enrolledCount)
 	}
 }

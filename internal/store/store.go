@@ -5151,10 +5151,18 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 		// Only rewrite PENDING (acked_at IS NULL) mutations — already-synced historical
 		// rows must not be rewritten (MAJOR-3: acked_at filter prevents overwriting
 		// mutations that cloud has already acknowledged).
+		//
+		// FIX-1: guard json_set with a CASE so that rows with empty or invalid
+		// JSON payload (payload='') keep the column value unchanged instead of
+		// causing json_set to return NULL, which would violate the TEXT NOT NULL
+		// constraint and roll back the entire tx — including the migration_flags
+		// marker — creating a permanent re-run loop on every startup.
 		res, err = s.execHook(tx,
 			`UPDATE sync_mutations
 			 SET project = ?,
-			     payload = json_set(payload, '$.project', ?)
+			     payload = CASE WHEN payload != '' AND json_valid(payload)
+			               THEN json_set(payload, '$.project', ?)
+			               ELSE payload END
 			 WHERE project = ''
 			   AND acked_at IS NULL`,
 			target, target,
@@ -5165,10 +5173,28 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 		n, _ = res.RowsAffected()
 		result.MutationsUpdated = n
 
-		// Backfill any missing sync_mutation rows for the target project so
-		// newly enrolled data is fully represented in the journal.
-		if err := s.backfillProjectSyncMutationsTx(tx, target); err != nil {
-			return fmt.Errorf("backfill sync mutations for %q: %w", target, err)
+		// FIX-2: ack all migrated personal mutations so they do not block autosync.
+		// Personal is the private-default bucket — it never syncs to the cloud, so
+		// leaving these rows pending would make CountPendingNonEnrolledSyncMutations
+		// return a 'personal' entry that causes autosync to flap to blocked_unenrolled.
+		// Acking them here is safe: the local observations/sessions are untouched;
+		// only the sync journal rows are marked done.
+		if _, err := s.execHook(tx,
+			`UPDATE sync_mutations SET acked_at = datetime('now')
+			 WHERE project = ? AND acked_at IS NULL`,
+			target,
+		); err != nil {
+			return fmt.Errorf("ack migrated personal sync_mutations: %w", err)
+		}
+
+		// FIX-2: do NOT backfill sync_mutation rows for the private-default project.
+		// Backfilling would create new pending non-enrolled rows for 'personal', which
+		// are immediately goal-defeating (autosync would block again). The function is
+		// kept intact — it is used for named enrolled projects elsewhere.
+		if target != privateDefaultProject {
+			if err := s.backfillProjectSyncMutationsTx(tx, target); err != nil {
+				return fmt.Errorf("backfill sync mutations for %q: %w", target, err)
+			}
 		}
 
 		return nil

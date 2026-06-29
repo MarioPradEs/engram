@@ -58,6 +58,9 @@ func cmdDoctor(cfg store.Config) {
 	}
 	defer s.Close()
 
+	// D3: run orphan migration best-effort so doctor always works on clean data.
+	migrateOrphansFn(s)
+
 	report, err := runDiagnostics(context.Background(), s, strings.TrimSpace(project), strings.TrimSpace(check))
 	if err != nil {
 		report = diagnostic.ErrorReport(project, err)

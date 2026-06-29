@@ -313,3 +313,24 @@ func TestCmdDoctorSyncMutationRequiredFieldsBlockedEnvelope(t *testing.T) {
 		t.Fatalf("unexpected evidence: %v", evidence)
 	}
 }
+
+// TestCmdDoctorRunsMigration verifies that cmdDoctor calls migrateOrphansFn
+// (D3) at startup so orphan rows are cleaned before diagnostics run.
+func TestCmdDoctorRunsMigration(t *testing.T) {
+	migrationCalled := false
+
+	// Stub migrateOrphansFn to record the call.
+	oldMigrate := migrateOrphansFn
+	t.Cleanup(func() { migrateOrphansFn = oldMigrate })
+	migrateOrphansFn = func(s *store.Store) {
+		migrationCalled = true
+	}
+
+	cfg := testConfig(t)
+	withArgs(t, "engram", "doctor")
+	_, _ = captureOutput(t, func() { cmdDoctor(cfg) })
+
+	if !migrationCalled {
+		t.Error("D3: expected migrateOrphansFn to be called by cmdDoctor")
+	}
+}

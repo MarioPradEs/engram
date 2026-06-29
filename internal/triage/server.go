@@ -174,6 +174,12 @@ func (s *Server) SetCwdProject(project string) {
 	s.cwdProject = project
 }
 
+// CwdProject returns the project name set via SetCwdProject.
+// Exposed for testing so callers can assert the resolved/normalized value.
+func (s *Server) CwdProject() string {
+	return s.cwdProject
+}
+
 // buildTrustedOrigins returns the set of Origin header values that the CSRF
 // middleware accepts for a server bound to port p. Both the 127.0.0.1 and
 // localhost forms are included because browsers may send either.

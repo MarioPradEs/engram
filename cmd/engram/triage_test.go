@@ -289,3 +289,73 @@ func (r *responseRecorder) Write(b []byte) (int, error) {
 func (r *responseRecorder) WriteHeader(code int) {
 	r.code = code
 }
+
+// TestNewTriageServer_NormalizesProject verifies MAJOR-5: newTriageServer must
+// normalize the resolved project name via store.NormalizeProject so that an
+// un-normalized ENGRAM_PROJECT (e.g. "My-Proj") becomes "my-proj" — consistent
+// with resolveServeSyncStatusProject which also normalizes.
+func TestNewTriageServer_NormalizesProject(t *testing.T) {
+	t.Setenv("ENGRAM_PROJECT", "My-Proj")
+	t.Setenv("ENGRAM_DEFAULT_PROJECT", "")
+
+	// Stub detectProject so we isolate the env path.
+	oldDetect := detectProject
+	t.Cleanup(func() { detectProject = oldDetect })
+	detectProject = func(string) string { return "" }
+
+	// Use the real factory with nil store (test stub path).
+	srv := newTriageServer(nil, 0)
+
+	// triage.Server exposes CwdProject() for test inspection.
+	type cwdProjectGetter interface {
+		CwdProject() string
+	}
+	cg, ok := srv.(cwdProjectGetter)
+	if !ok {
+		t.Skip("triage.Server does not expose CwdProject(); cannot verify normalization")
+	}
+	got := cg.CwdProject()
+	if got != "my-proj" {
+		t.Errorf("newTriageServer CwdProject = %q; want %q (MAJOR-5: must normalize)", got, "my-proj")
+	}
+}
+
+// TestCmdTriageRunsMigrationAtStartup verifies that cmdTriage calls
+// migrateOrphansFn (D3) before starting the server, even when the store stub
+// returns nil (graceful nil-guard).
+func TestCmdTriageRunsMigrationAtStartup(t *testing.T) {
+	migrationCalled := false
+
+	// Stub migrateOrphansFn to record the call.
+	oldMigrate := migrateOrphansFn
+	t.Cleanup(func() { migrateOrphansFn = oldMigrate })
+	migrateOrphansFn = func(s *store.Store) {
+		migrationCalled = true
+	}
+
+	// Stub storeNew so no real DB is opened.
+	oldStore := storeNew
+	t.Cleanup(func() { storeNew = oldStore })
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		return nil, nil
+	}
+
+	// Stub newTriageServer so no real listener is opened.
+	oldNew := newTriageServer
+	t.Cleanup(func() { newTriageServer = oldNew })
+	newTriageServer = func(s *store.Store, port int) triageStarter {
+		return &stubTriageServer{}
+	}
+
+	// Stub exitFunc so fatal() doesn't terminate the test process.
+	oldExit := exitFunc
+	t.Cleanup(func() { exitFunc = oldExit })
+	exitFunc = func(code int) {}
+
+	cfg := testConfig(t)
+	cmdTriage(cfg)
+
+	if !migrationCalled {
+		t.Error("D3: expected migrateOrphansFn to be called at triage startup")
+	}
+}

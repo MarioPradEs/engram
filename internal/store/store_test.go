@@ -5802,7 +5802,14 @@ func TestCountPendingNonEnrolledSyncMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("count pending non-enrolled: %v", err)
 	}
-	want := []PendingSyncMutationProjectCount{{Project: "alpha", Count: 2}, {Project: "beta", Count: 1}}
+	// WARNING-2 fix: project='' (orphan mutations) must also be included in the
+	// count so the diagnostic is honest about ALL unenrolled pending mutations.
+	// '' sorts before 'alpha' in ASC order.
+	want := []PendingSyncMutationProjectCount{
+		{Project: "", Count: 1},
+		{Project: "alpha", Count: 2},
+		{Project: "beta", Count: 1},
+	}
 	if len(counts) != len(want) {
 		t.Fatalf("expected %d counts, got %#v", len(want), counts)
 	}
@@ -5810,6 +5817,47 @@ func TestCountPendingNonEnrolledSyncMutations(t *testing.T) {
 		if counts[i] != want[i] {
 			t.Fatalf("count[%d]: expected %#v, got %#v", i, want[i], counts[i])
 		}
+	}
+}
+
+// TestCountPendingNonEnrolledSyncMutations_IncludesEmptyProject is a focused
+// WARNING-2 regression guard: an observation with project='' and acked_at IS
+// NULL (unenrolled pending orphan) MUST appear in the count. The diagnostic
+// must be honest and not silently hide these rows.
+func TestCountPendingNonEnrolledSyncMutations_IncludesEmptyProject(t *testing.T) {
+	s := newTestStore(t)
+
+	// Insert a single pending observation with project=''.
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at)
+		 VALUES (?, 'idle', datetime('now'))`, DefaultSyncTargetKey,
+	); err != nil {
+		t.Fatalf("sync_state: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+		 VALUES (?, 'observation', 'empty-proj-key', 'upsert', '{}', 'local', '')`,
+		DefaultSyncTargetKey,
+	); err != nil {
+		t.Fatalf("insert empty-project mutation: %v", err)
+	}
+
+	counts, err := s.CountPendingNonEnrolledSyncMutations(DefaultSyncTargetKey)
+	if err != nil {
+		t.Fatalf("CountPendingNonEnrolledSyncMutations: %v", err)
+	}
+
+	found := false
+	for _, c := range counts {
+		if c.Project == "" {
+			found = true
+			if c.Count < 1 {
+				t.Errorf("empty-project count = %d; want >= 1", c.Count)
+			}
+		}
+	}
+	if !found {
+		t.Error("WARNING-2: CountPendingNonEnrolledSyncMutations did not include project='' row; must count ALL unenrolled including orphans")
 	}
 }
 

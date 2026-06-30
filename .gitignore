@@ -2,6 +2,13 @@
 /engram
 *.exe
 
+# Cross-compiled binaries / release artifacts (build outputs, not for VCS)
+/engram-darwin-*
+/engram-linux-*
+/engram-windows-*
+engram-*.zip
+/dist/
+
 # Database
 *.db
 *.db-wal

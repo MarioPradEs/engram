@@ -1,0 +1,33 @@
+package triage
+
+import "net/url"
+
+// SharePanel renders the share/unshare action panel for the cwd project.
+// It is displayed on the triage landing page only for the cwd project (Option A).
+//
+// projectName is the URL-safe project name.
+// isShared reflects the current enrollment state (true = project is currently shared).
+//
+// When isShared is false the panel shows a "Share with Viva" button that POSTs
+// to POST /project/{name}/share.
+// When isShared is true the panel shows a "Stop Sharing" button that POSTs
+// to POST /project/{name}/unshare.
+templ SharePanel(projectName string, isShared bool) {
+	<div class="share-panel">
+		if isShared {
+			<p class="share-status share-status-active">
+				<span class="badge badge-shared">Shared with Viva</span>
+			</p>
+			<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(projectName) + "/unshare") }>
+				<button type="submit" class="btn-unshare">Stop Sharing</button>
+			</form>
+		} else {
+			<p class="share-status share-status-inactive">
+				<span class="badge badge-private">Not shared</span>
+			</p>
+			<form method="POST" action={ templ.SafeURL("/project/" + url.PathEscape(projectName) + "/share") }>
+				<button type="submit" class="btn-share">Share with Viva</button>
+			</form>
+		}
+	</div>
+}

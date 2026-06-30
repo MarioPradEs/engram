@@ -514,6 +514,82 @@ func (s *Server) handleTagValues(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleShareProject atomically enrolls the cwd project for cloud sync.
+// POST /project/{name}/share
+//
+// Atomicity order (D9): server enroll FIRST so that a network failure does not
+// leave the project partially enrolled locally.
+//
+//  1. Option A gate: name MUST equal s.cwdProject → 400 if mismatch.
+//  2. Call s.serverEnrollFn(project, bearerToken) — server enroll FIRST.
+//     On failure: return 4xx "share failed: <error>", NO local state change.
+//  3. Call s.enrollStore.EnrollProject(project) — client SQLite.
+//     On failure: s.enrollStore.UnenrollProject (no-op, nothing enrolled), return 500.
+//  4. Call WriteProjectDefaultScope(cwdDir, "shared") — write config.json.
+//     On failure: call s.enrollStore.UnenrollProject to roll back step 3, return 500.
+//  5. Return HTTP 200 OK.
+//
+// CSRF: must be wrapped in originCheckMiddleware (see routes()).
+func (s *Server) handleShareProject(w http.ResponseWriter, r *http.Request) {
+	rawName := r.PathValue("name")
+	if rawName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	projectName, err := url.PathUnescape(rawName)
+	if err != nil || projectName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Option A boundary: only the cwd project can be shared from this server instance.
+	if projectName != s.cwdProject {
+		http.Error(w,
+			fmt.Sprintf("project mismatch — share only applies to the current folder's project (%q); got %q",
+				s.cwdProject, projectName),
+			http.StatusBadRequest)
+		return
+	}
+
+	// Step 2: server-side enroll FIRST (D9). A nil fn is a safe-default that fails.
+	if s.serverEnrollFn == nil {
+		http.Error(w, "share not available — server enroll function not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.serverEnrollFn(projectName, s.bearerToken); err != nil {
+		http.Error(w, "share failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Step 3: client-side enrollment in local SQLite.
+	if s.enrollStore == nil {
+		http.Error(w, "share not available — enrollment store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.enrollStore.EnrollProject(projectName); err != nil {
+		log.Printf("[triage] handleShareProject %q: EnrollProject: %v", projectName, err)
+		// Rollback: attempt to remove from local enrollment (no-op if not enrolled).
+		_ = s.enrollStore.UnenrollProject(projectName)
+		http.Error(w, "share failed: local enroll: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Step 4: write default_scope="shared" to config.json.
+	if s.cwdDir != "" {
+		if err := WriteProjectDefaultScope(s.cwdDir, "shared"); err != nil {
+			log.Printf("[triage] handleShareProject %q: WriteProjectDefaultScope: %v", projectName, err)
+			// Rollback: remove from local enrollment (undo step 3).
+			_ = s.enrollStore.UnenrollProject(projectName)
+			http.Error(w, "share failed: write config: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Project %q shared successfully", projectName)
+}
+
 // handleClassify sets the default_scope for the cwd project in config.json.
 // POST /project/{name}/classify
 //

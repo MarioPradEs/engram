@@ -19,6 +19,18 @@ type TriageStore interface {
 	RecentObservations(project, scope string, limit int) ([]store.Observation, error)
 }
 
+// EnrollmentStore is the narrow interface that handleShareProject and
+// handleUnshareProject use to client-enroll or client-unenroll a project.
+// Declared here so triage handlers do not depend directly on *store.Store,
+// keeping them independently testable via fake implementations.
+//
+// *triage.StoreAdapter satisfies this interface (methods added in Phase 5).
+// *store.Store also satisfies it directly (EnrollProject/UnenrollProject exist).
+type EnrollmentStore interface {
+	EnrollProject(project string) error
+	UnenrollProject(project string) error
+}
+
 // MutableTriageStore extends TriageStore with the mutation methods required by
 // WU-5 handlers (toggle, bulk set-scope) and the tag-query methods added in
 // PR#3 (E2b: bulk-by-tag). All methods proxy to store.Store without re-implementing

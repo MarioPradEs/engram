@@ -957,6 +957,18 @@ func TestSetProjectScope_InvalidScope_TableDriven(t *testing.T) {
 	}
 }
 
+// ─── Phase 5.1 RED: EnrollmentStore interface compile-time check ─────────────
+
+// TestEnrollmentStoreInterface is a compile-time assertion that
+// *triage.StoreAdapter satisfies triage.EnrollmentStore.
+// The test body is intentionally empty; the var declaration at package scope
+// fails compilation if the interface or methods are absent.
+func TestEnrollmentStoreInterface(t *testing.T) {
+	// Compile-time assertion — fails if EnrollmentStore is not declared or
+	// StoreAdapter does not implement EnrollProject / UnenrollProject.
+	var _ triage.EnrollmentStore = (*triage.StoreAdapter)(nil)
+}
+
 // min is a small helper (Go 1.21+ has min built-in but kept explicit for clarity).
 func min(a, b int) int {
 	if a < b {

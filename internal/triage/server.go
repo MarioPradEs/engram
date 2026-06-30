@@ -47,6 +47,8 @@ type Server struct {
 	store          *store.Store
 	triageStore    TriageStore        // narrow interface; set by NewWithStore or derived from store
 	mutableStore   MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
+	enrollStore    EnrollmentStore    // Phase 5: client-side enroll/unenroll for share actions
+	serverEnrollFn func(project, bearerToken string) error // Phase 5: server-side enroll closure (D9)
 	port           int
 	trustedOrigins map[string]struct{} // CSRF: allowed Origin values, derived from port at construction
 	mux            *http.ServeMux
@@ -98,6 +100,18 @@ func (a *StoreAdapter) ObservationsByTag(project, facet, value string, limit int
 // facet must be in {"juego","tipo"} — allow-list enforced by the store method.
 func (a *StoreAdapter) DistinctTagValues(project, facet string) ([]string, error) {
 	return a.s.DistinctTagValues(project, facet)
+}
+
+// EnrollProject proxies to store.EnrollProject, satisfying EnrollmentStore.
+// Idempotent — re-enrolling an already-enrolled project is a no-op.
+func (a *StoreAdapter) EnrollProject(project string) error {
+	return a.s.EnrollProject(project)
+}
+
+// UnenrollProject proxies to store.UnenrollProject, satisfying EnrollmentStore.
+// Idempotent — unenrolling a non-enrolled project is a no-op.
+func (a *StoreAdapter) UnenrollProject(project string) error {
+	return a.s.UnenrollProject(project)
 }
 
 // New creates a triage Server backed by a real *store.Store.
@@ -178,6 +192,23 @@ func (s *Server) SetCwdProject(project string) {
 // Exposed for testing so callers can assert the resolved/normalized value.
 func (s *Server) CwdProject() string {
 	return s.cwdProject
+}
+
+// WithEnrollmentStore injects the EnrollmentStore used by handleShareProject and
+// handleUnshareProject to client-enroll or unenroll a project in the local SQLite store.
+// Must be called before Start. In production, pass a *triage.StoreAdapter or
+// *store.Store directly (both satisfy the interface). In tests, pass a fake.
+func (s *Server) WithEnrollmentStore(es EnrollmentStore) {
+	s.enrollStore = es
+}
+
+// WithServerEnrollFn injects the closure used by handleShareProject to call the
+// cloud self-service enroll endpoint. The closure receives the project name and
+// the caller's bearer token (JWT). It should return an error if the server is
+// unreachable or the token is invalid/empty. A nil fn means share will always
+// fail (safe default); cmdTriage wires the real HTTP call here.
+func (s *Server) WithServerEnrollFn(fn func(project, bearerToken string) error) {
+	s.serverEnrollFn = fn
 }
 
 // buildTrustedOrigins returns the set of Origin header values that the CSRF

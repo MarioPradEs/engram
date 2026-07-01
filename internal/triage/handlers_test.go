@@ -1150,6 +1150,99 @@ func TestHandleShareProject_NoJWT(t *testing.T) {
 	}
 }
 
+// ─── Phase 8 RED: handleUnshareProject tests ─────────────────────────────────
+
+// TestHandleUnshareProject_HappyPath verifies that a successful unshare:
+//  1. Calls UnenrollProject on the enrollment store (client-unenroll first).
+//  2. Calls serverUnenrollFn with the project name (server un-enroll second).
+//  3. Writes default_scope="personal" to config.json.
+//  4. Returns HTTP 200.
+func TestHandleUnshareProject_HappyPath(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverUnenrollCalls []string
+	fakeFn := func(project, bearerToken string) error {
+		serverUnenrollCalls = append(serverUnenrollCalls, project)
+		return nil
+	}
+
+	es := &fakeEnrollStore{}
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("myproject")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerUnenrollFn(fakeFn)
+	srv.WithBearerToken("my-jwt-token")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/myproject/unshare", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(es.unenrollCalls) != 1 || es.unenrollCalls[0] != "myproject" {
+		t.Errorf("want UnenrollProject called once with 'myproject', got %v", es.unenrollCalls)
+	}
+	if len(serverUnenrollCalls) != 1 || serverUnenrollCalls[0] != "myproject" {
+		t.Errorf("want serverUnenrollFn called once with 'myproject', got %v", serverUnenrollCalls)
+	}
+	// WriteProjectDefaultScope must have set default_scope="personal" (reverted to private).
+	configPath := cwdDir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "personal" {
+		t.Errorf("want default_scope=personal (reverted to private), got %q", cfg["default_scope"])
+	}
+}
+
+// TestHandleUnshareProject_Idempotent verifies that unsharing a project that is
+// already unenrolled succeeds with HTTP 200 and no error. The enrollment store
+// and server unenroll function are both called (idempotent operations).
+func TestHandleUnshareProject_Idempotent(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverCalls int
+	fakeFn := func(project, bearerToken string) error {
+		serverCalls++
+		return nil // idempotent: no error when already unenrolled
+	}
+
+	es := &fakeEnrollStore{} // UnenrollProject is idempotent (no error when not enrolled)
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("already-private")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerUnenrollFn(fakeFn)
+	srv.WithBearerToken("tok")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/already-private/unshare", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 (idempotent), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(es.unenrollCalls) != 1 {
+		t.Errorf("want UnenrollProject called once (idempotent), got %d", len(es.unenrollCalls))
+	}
+	if serverCalls != 1 {
+		t.Errorf("want serverUnenrollFn called once, got %d", serverCalls)
+	}
+}
+
 // ─── Phase 5.1 RED: EnrollmentStore interface compile-time check ─────────────
 
 // TestEnrollmentStoreInterface is a compile-time assertion that

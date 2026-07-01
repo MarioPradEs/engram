@@ -590,6 +590,85 @@ func (s *Server) handleShareProject(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Project %q shared successfully", projectName)
 }
 
+// handleUnshareProject atomically un-enrolls the cwd project from cloud sync.
+// POST /project/{name}/unshare
+//
+// Atomicity order (reverse of D9 share): client unenroll FIRST so that new
+// observations stop syncing immediately, then server un-enroll, then scope reset.
+// Rollback: if the server un-enroll call fails after a successful client unenroll,
+// the client enrollment is restored (EnrollProject called). This prevents a state
+// where the server still thinks the project is shared but the client has already
+// stopped syncing. Already-synced observations are NOT deleted from the cloud.
+//
+//  1. Option A gate: name MUST equal s.cwdProject → 400 if mismatch.
+//  2. Call s.enrollStore.UnenrollProject(project) — client SQLite unenroll FIRST.
+//     On failure: return 500.
+//  3. Call s.serverUnenrollFn(project, bearerToken) — server-side un-enroll.
+//     On failure: rollback by calling s.enrollStore.EnrollProject, return 4xx.
+//  4. Call WriteProjectDefaultScope(cwdDir, "personal") — revert config.json.
+//     On failure: log only (non-fatal; enrollment changes already committed).
+//  5. Return HTTP 200.
+//
+// CSRF: must be wrapped in originCheckMiddleware (see routes()).
+func (s *Server) handleUnshareProject(w http.ResponseWriter, r *http.Request) {
+	rawName := r.PathValue("name")
+	if rawName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	projectName, err := url.PathUnescape(rawName)
+	if err != nil || projectName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Option A boundary: only the cwd project can be unshared from this instance.
+	if projectName != s.cwdProject {
+		http.Error(w,
+			fmt.Sprintf("project mismatch — unshare only applies to the current folder's project (%q); got %q",
+				s.cwdProject, projectName),
+			http.StatusBadRequest)
+		return
+	}
+
+	// Step 2: client-side unenroll FIRST (stops local sync immediately).
+	if s.enrollStore == nil {
+		http.Error(w, "unshare not available — enrollment store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.enrollStore.UnenrollProject(projectName); err != nil {
+		log.Printf("[triage] handleUnshareProject %q: UnenrollProject: %v", projectName, err)
+		http.Error(w, "unshare failed: local unenroll: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Step 3: server-side un-enroll. A nil fn is a safe-default that fails.
+	if s.serverUnenrollFn == nil {
+		// Rollback client unenroll before returning error.
+		_ = s.enrollStore.EnrollProject(projectName)
+		http.Error(w, "unshare not available — server unenroll function not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.serverUnenrollFn(projectName, s.bearerToken); err != nil {
+		// Rollback: restore client enrollment so both sides stay in sync.
+		_ = s.enrollStore.EnrollProject(projectName)
+		http.Error(w, "unshare failed: server unenroll: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Step 4: revert default_scope to "personal" in config.json (non-fatal).
+	if s.cwdDir != "" {
+		if err := WriteProjectDefaultScope(s.cwdDir, "personal"); err != nil {
+			log.Printf("[triage] handleUnshareProject %q: WriteProjectDefaultScope: %v", projectName, err)
+			// Non-fatal — the enrollments are already reverted; only the default badge is affected.
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Project %q unshared — already-synced data remains in the cloud", projectName)
+}
+
 // handleClassify sets the default_scope for the cwd project in config.json.
 // POST /project/{name}/classify
 //

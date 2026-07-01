@@ -48,8 +48,9 @@ type Server struct {
 	triageStore    TriageStore        // narrow interface; set by NewWithStore or derived from store
 	mutableStore   MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
 	enrollStore    EnrollmentStore    // Phase 5: client-side enroll/unenroll for share actions
-	serverEnrollFn func(project, bearerToken string) error // Phase 5: server-side enroll closure (D9)
-	bearerToken    string // Phase 7: JWT read from credentials.json at startup; passed to serverEnrollFn
+	serverEnrollFn   func(project, bearerToken string) error // Phase 5: server-side enroll closure (D9)
+	serverUnenrollFn func(project, bearerToken string) error // Phase 8: server-side unenroll closure (reverse of D9)
+	bearerToken      string // Phase 7: JWT read from credentials.json at startup; passed to serverEnrollFn/serverUnenrollFn
 	port           int
 	trustedOrigins map[string]struct{} // CSRF: allowed Origin values, derived from port at construction
 	mux            *http.ServeMux
@@ -219,6 +220,15 @@ func (s *Server) WithBearerToken(token string) {
 	s.bearerToken = token
 }
 
+// WithServerUnenrollFn injects the closure used by handleUnshareProject to call
+// the cloud self-service un-enroll endpoint. The closure receives the project
+// name and the caller's bearer token (JWT). It should return an error if the
+// server is unreachable or the token is invalid/empty. A nil fn means unshare
+// will always fail (safe default); cmdTriage wires the real HTTP DELETE call.
+func (s *Server) WithServerUnenrollFn(fn func(project, bearerToken string) error) {
+	s.serverUnenrollFn = fn
+}
+
 // buildTrustedOrigins returns the set of Origin header values that the CSRF
 // middleware accepts for a server bound to port p. Both the 127.0.0.1 and
 // localhost forms are included because browsers may send either.
@@ -339,6 +349,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /project/{name}/classify", s.originCheckMiddleware(s.handleClassify))
 	// Share: atomically server-enroll + client-enroll + write default_scope=shared (D9).
 	s.mux.HandleFunc("POST /project/{name}/share", s.originCheckMiddleware(s.handleShareProject))
+	// Unshare: reverse of share — client-unenroll + server-unenroll + revert default_scope (Phase 8).
+	s.mux.HandleFunc("POST /project/{name}/unshare", s.originCheckMiddleware(s.handleUnshareProject))
 	// PR#3 / E2b: bulk-by-tag scope action (REQ-50, D2, D3, D5, D7; AD1).
 	s.mux.HandleFunc("POST /project/{name}/tag-scope", s.originCheckMiddleware(s.handleTagScope))
 	// PR#3 / E2b: htmx tag-values fragment — populates value <select> on facet change (REQ-52, AD2).

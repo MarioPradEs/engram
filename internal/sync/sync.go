@@ -607,9 +607,10 @@ func (sy *Syncer) importEntriesDependencySafe(entries []ChunkEntry, knownChunks 
 
 			if err := sy.importMutationChunk(entry.ID, chunk); err != nil {
 				// Recovery applies to both local and cloud modes. Cloud chunks
-				// never carry sessions (local-only entity filter), so observation
-				// mutations may reference session IDs that do not yet exist in the
-				// destination. recoverLocalMissingSessionDependencies creates
+				// carry session MUTATIONS (upsert/delete) but strip the directory
+				// field and never carry session OBJECTS with full state. Observation
+				// mutations may still reference session IDs that do not yet exist in
+				// the destination; recoverLocalMissingSessionDependencies creates
 				// synthetic stub sessions to satisfy the FK constraint.
 				if mode == importModeLocal || mode == importModeCloud {
 					recoveredChunk, recovered, recoveryErr := sy.recoverLocalMissingSessionDependencies(chunk, availableSessionIDs)

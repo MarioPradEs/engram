@@ -2,6 +2,7 @@ package triage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -48,6 +49,10 @@ type MutableTriageStore interface {
 	// for the given facet across all observations in the project.
 	// facet must be in {"juego","tipo"}.
 	DistinctTagValues(project, facet string) ([]string, error)
+	// ReassignProject migrates all records from source to canonical (D6).
+	// Unlike MergeProjects, it handles source=="personal" and applies D4 dual-write
+	// (updates sync_mutations.project column AND payload.$.project).
+	ReassignProject(source, canonical string) (*store.MergeResult, error)
 }
 
 const (
@@ -667,6 +672,74 @@ func (s *Server) handleUnshareProject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Project %q unshared — already-synced data remains in the cloud", projectName)
+}
+
+// handleReassign moves all observations (and related records) from a source
+// project to the cwd project via the D6 ReassignProject store method.
+// POST /project/{name}/reassign
+//
+// The request body must be JSON: {"from":"<source-project>"}
+//
+// The URL {name} is the canonical (destination) project — it MUST equal
+// s.cwdProject (Option A boundary). The "from" field is the source project
+// that will be vacated (typically "personal" for moving private observations
+// to a named project before sharing).
+//
+// ReassignProject handles source=="personal" explicitly (unlike MergeProjects)
+// and applies D4 dual-write so cloud sync receives the correct project name.
+//
+// CSRF: must be wrapped in originCheckMiddleware (see routes()).
+func (s *Server) handleReassign(w http.ResponseWriter, r *http.Request) {
+	rawName := r.PathValue("name")
+	if rawName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	projectName, err := url.PathUnescape(rawName)
+	if err != nil || projectName == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Option A boundary: only the cwd project can be the reassign target.
+	if projectName != s.cwdProject {
+		http.Error(w,
+			fmt.Sprintf("project mismatch — reassign only targets the current folder's project (%q); got %q",
+				s.cwdProject, projectName),
+			http.StatusBadRequest)
+		return
+	}
+
+	// Parse request body: {"from":"<source>"}
+	var reqBody struct {
+		From string `json:"from"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "bad request body: expected {\"from\":\"<source-project>\"}", http.StatusBadRequest)
+		return
+	}
+	if reqBody.From == "" {
+		http.Error(w, "bad request: 'from' field must not be empty", http.StatusBadRequest)
+		return
+	}
+
+	ms := s.mutableStore
+	if ms == nil {
+		http.Error(w, "store not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	result, err := ms.ReassignProject(reqBody.From, projectName)
+	if err != nil {
+		log.Printf("[triage] handleReassign %q → %q: %v", reqBody.From, projectName, err)
+		http.Error(w, "reassign failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "Reassigned %d observation(s) from %q to %q",
+		result.ObservationsUpdated, reqBody.From, projectName)
 }
 
 // handleClassify sets the default_scope for the cwd project in config.json.

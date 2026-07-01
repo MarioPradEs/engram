@@ -9597,3 +9597,139 @@ func TestSearchMatchMode_EmptyQueryAnyReturnsError(t *testing.T) {
 		t.Fatal("expected error for empty query with match_mode=any, got nil")
 	}
 }
+
+// ─── Phase 9 (D6): ReassignProject tests ─────────────────────────────────────
+
+// seedPersonalProjectData inserts a session, observations, and pending
+// sync_mutations with project='personal' into the test store using raw SQL.
+// Returns the sync_ids of the pending mutation rows created.
+func seedPersonalProjectData(t *testing.T, s *Store) []string {
+	t.Helper()
+
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO sessions (id, project, directory) VALUES ('ses-personal', 'personal', '/tmp/personal-work')`,
+	); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	syncIDs := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		syncIDs[i] = "obs-personal-" + string(rune('a'+i))
+		payload := map[string]interface{}{
+			"sync_id": syncIDs[i],
+			"project": "personal",
+			"title":   "personal obs " + string(rune('a'+i)),
+		}
+		encoded, _ := json.Marshal(payload)
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO observations (sync_id, session_id, type, title, content, project, scope)
+			 VALUES (?, 'ses-personal', 'note', ?, 'personal content', 'personal', 'personal')`,
+			syncIDs[i], "personal obs "+string(rune('a'+i)),
+		); err != nil {
+			t.Fatalf("seed observation %d: %v", i, err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO sync_state (target_key, lifecycle, updated_at)
+			 VALUES (?, 'idle', datetime('now'))`, DefaultSyncTargetKey,
+		); err != nil {
+			t.Fatalf("seed sync_state: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO sync_mutations (target_key, entity, entity_key, op, payload, source, project)
+			 VALUES (?, 'observation', ?, 'upsert', ?, 'local', 'personal')`,
+			DefaultSyncTargetKey, syncIDs[i], string(encoded),
+		); err != nil {
+			t.Fatalf("seed sync_mutation %d: %v", i, err)
+		}
+	}
+	return syncIDs
+}
+
+// TestReassignProject_FromPersonal verifies D6 requirements (Phase 9):
+//
+//  1. All observations, sessions, user_prompts with project='personal' are
+//     moved to 'target-project'.
+//  2. Pending sync_mutations.project column is updated to 'target-project'.
+//  3. json_extract(payload,'$.project')='target-project' (D4 dual-write).
+//  4. Backfill is enqueued for 'target-project' (new sync mutations exist).
+func TestReassignProject_FromPersonal(t *testing.T) {
+	s := newTestStore(t)
+	seedPersonalProjectData(t, s)
+
+	result, err := s.ReassignProject("personal", "target-project")
+	if err != nil {
+		t.Fatalf("ReassignProject: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil *MergeResult")
+	}
+	if result.Canonical != "target-project" {
+		t.Errorf("canonical = %q, want \"target-project\"", result.Canonical)
+	}
+	if result.ObservationsUpdated < 3 {
+		t.Errorf("ObservationsUpdated = %d, want ≥3", result.ObservationsUpdated)
+	}
+
+	// (1) No observations under 'personal' should remain.
+	var personalCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE project = 'personal' AND deleted_at IS NULL`).Scan(&personalCount); err != nil {
+		t.Fatalf("count personal observations: %v", err)
+	}
+	if personalCount != 0 {
+		t.Errorf("expected 0 observations under 'personal' after reassign, got %d", personalCount)
+	}
+
+	// All observations should now be under 'target-project'.
+	obs, err := s.RecentObservations("target-project", "", 20)
+	if err != nil {
+		t.Fatalf("RecentObservations: %v", err)
+	}
+	if len(obs) < 3 {
+		t.Errorf("expected ≥3 observations under 'target-project' after reassign, got %d", len(obs))
+	}
+
+	// (2) Pending sync_mutations.project must be 'target-project'.
+	var pendingPersonal int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'personal' AND acked_at IS NULL`,
+	).Scan(&pendingPersonal); err != nil {
+		t.Fatalf("count personal pending mutations: %v", err)
+	}
+	if pendingPersonal != 0 {
+		t.Errorf("expected 0 pending mutations under 'personal' after reassign, got %d", pendingPersonal)
+	}
+
+	// (3) D4 dual-write: payload.$.project must also equal 'target-project'.
+	rows, err := s.db.Query(
+		`SELECT json_extract(payload, '$.project') FROM sync_mutations
+		 WHERE project = 'target-project' AND acked_at IS NULL`,
+	)
+	if err != nil {
+		t.Fatalf("query payload projects: %v", err)
+	}
+	defer rows.Close()
+	var payloadProjectMismatches int
+	for rows.Next() {
+		var pp sql.NullString
+		if err := rows.Scan(&pp); err != nil {
+			t.Fatalf("scan payload project: %v", err)
+		}
+		if pp.String != "target-project" {
+			payloadProjectMismatches++
+		}
+	}
+	if payloadProjectMismatches > 0 {
+		t.Errorf("D4: %d pending sync_mutation rows have payload.$.project != 'target-project'", payloadProjectMismatches)
+	}
+
+	// (4) Backfill enqueued: sync_mutations for 'target-project' should exist.
+	var targetMutCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM sync_mutations WHERE project = 'target-project'`,
+	).Scan(&targetMutCount); err != nil {
+		t.Fatalf("count target mutations: %v", err)
+	}
+	if targetMutCount == 0 {
+		t.Error("expected backfill sync_mutations for 'target-project' after reassign, got 0")
+	}
+}

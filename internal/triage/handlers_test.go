@@ -1243,6 +1243,58 @@ func TestHandleUnshareProject_Idempotent(t *testing.T) {
 	}
 }
 
+// ─── Phase 9 RED: handleReassign tests ───────────────────────────────────────
+
+// fakeReassignMutableStore wraps fakeMutableStore and records ReassignProject calls.
+// Used in reassign handler tests to verify the store method is called correctly.
+type fakeReassignMutableStore struct {
+	fakeMutableStore
+	reassignCalls []reassignCall
+	reassignErr   error
+}
+
+type reassignCall struct {
+	Source    string
+	Canonical string
+}
+
+func (f *fakeReassignMutableStore) ReassignProject(source, canonical string) (*store.MergeResult, error) {
+	f.reassignCalls = append(f.reassignCalls, reassignCall{Source: source, Canonical: canonical})
+	if f.reassignErr != nil {
+		return nil, f.reassignErr
+	}
+	return &store.MergeResult{Canonical: canonical, ObservationsUpdated: 3}, nil
+}
+
+// TestHandleReassign_HappyPath verifies that POST /project/{name}/reassign with
+// body {"from":"personal"} calls ReassignProject("personal", name) and returns
+// HTTP 200. The cwd-boundary check allows the cwd project as the canonical target.
+func TestHandleReassign_HappyPath(t *testing.T) {
+	fs := &fakeReassignMutableStore{}
+	srv := triage.NewWithMutableStore(nil, fs, 0, t.TempDir())
+	srv.SetCwdProject("my-target-project")
+	h := srv.Handler()
+
+	body := strings.NewReader(`{"from":"personal"}`)
+	req := httptest.NewRequest(http.MethodPost, "/project/my-target-project/reassign", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(fs.reassignCalls) != 1 {
+		t.Fatalf("want ReassignProject called once, got %d", len(fs.reassignCalls))
+	}
+	if fs.reassignCalls[0].Source != "personal" {
+		t.Errorf("want source='personal', got %q", fs.reassignCalls[0].Source)
+	}
+	if fs.reassignCalls[0].Canonical != "my-target-project" {
+		t.Errorf("want canonical='my-target-project', got %q", fs.reassignCalls[0].Canonical)
+	}
+}
+
 // ─── Phase 5.1 RED: EnrollmentStore interface compile-time check ─────────────
 
 // TestEnrollmentStoreInterface is a compile-time assertion that

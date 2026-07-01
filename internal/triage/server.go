@@ -116,6 +116,13 @@ func (a *StoreAdapter) UnenrollProject(project string) error {
 	return a.s.UnenrollProject(project)
 }
 
+// ReassignProject proxies to store.ReassignProject, satisfying MutableTriageStore.
+// Unlike MergeProjects, it handles source=="personal" (D6) and applies D4
+// dual-write for payload.$.project in pending sync_mutations.
+func (a *StoreAdapter) ReassignProject(source, canonical string) (*store.MergeResult, error) {
+	return a.s.ReassignProject(source, canonical)
+}
+
 // New creates a triage Server backed by a real *store.Store.
 // When port is 0 and no listener is pre-injected, Start will attempt to bind to DefaultPort.
 // s may be nil in unit tests that only exercise the HTTP handler layer.
@@ -351,6 +358,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /project/{name}/share", s.originCheckMiddleware(s.handleShareProject))
 	// Unshare: reverse of share — client-unenroll + server-unenroll + revert default_scope (Phase 8).
 	s.mux.HandleFunc("POST /project/{name}/unshare", s.originCheckMiddleware(s.handleUnshareProject))
+	// Reassign: move observations from source project to cwd project (D6, Phase 9).
+	s.mux.HandleFunc("POST /project/{name}/reassign", s.originCheckMiddleware(s.handleReassign))
 	// PR#3 / E2b: bulk-by-tag scope action (REQ-50, D2, D3, D5, D7; AD1).
 	s.mux.HandleFunc("POST /project/{name}/tag-scope", s.originCheckMiddleware(s.handleTagScope))
 	// PR#3 / E2b: htmx tag-values fragment — populates value <select> on facet change (REQ-52, AD2).

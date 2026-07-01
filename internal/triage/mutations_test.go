@@ -75,6 +75,12 @@ func (f *fakeMutableStore) DistinctTagValues(project, facet string) ([]string, e
 	return f.tagValues, f.tagValErr
 }
 
+// ReassignProject is a no-op stub for tests that do not exercise reassign.
+// Tests that need to verify reassign calls should use fakeReassignMutableStore.
+func (f *fakeMutableStore) ReassignProject(source, canonical string) (*store.MergeResult, error) {
+	return &store.MergeResult{Canonical: canonical}, nil
+}
+
 // ─── Per-item toggle: POST /observations/{id}/scope ──────────────────────────
 
 // TestHandleToggleScope_SetsShared verifies that POSTing scope=shared to

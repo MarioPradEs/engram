@@ -254,6 +254,55 @@ func TestCmdTriageHelpString(t *testing.T) {
 	}
 }
 
+// ─── Phase 10 RED: JWT wiring tests ──────────────────────────────────────────
+
+// TestNewTriageServer_JWTAbsent_WiresServerEnrollFn verifies Phase 10 requirement:
+// newTriageServer MUST wire a non-nil serverEnrollFn that returns "not logged in"
+// when credentials.json is absent (empty bearer token path). The share route must
+// return 4xx with "not logged in" in the body (not 503 "not configured").
+//
+// RED: before Phase 10 the factory does NOT wire serverEnrollFn, so the share
+// route returns 503 "not configured" instead of the 502 "not logged in" body.
+func TestNewTriageServer_JWTAbsent_WiresServerEnrollFn(t *testing.T) {
+	t.Setenv("ENGRAM_TRIAGE_NO_BROWSER", "1")
+
+	// Point credentials dir to an empty temp dir — no credentials.json.
+	emptyCredDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+	credentialsDirFn = func() (string, error) { return emptyCredDir, nil }
+
+	factory := newTriageServer
+	srv := factory(nil, 0)
+
+	type handlerProvider interface {
+		Handler() http.Handler
+	}
+	hp, ok := srv.(handlerProvider)
+	if !ok {
+		t.Skip("factory did not return a handlerProvider")
+	}
+
+	type cwdProjectSetter interface {
+		SetCwdProject(string)
+	}
+	if setter, ok := srv.(cwdProjectSetter); ok {
+		setter.SetCwdProject("test-proj")
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/project/test-proj/share", nil)
+	rec := &responseRecorder{code: 200}
+	hp.Handler().ServeHTTP(rec, req)
+
+	// Phase 10 contract: a wired serverEnrollFn that returns "not logged in"
+	// causes the share route to respond 502 with "not logged in" in the body.
+	// Before Phase 10: the fn is nil → 503 "not configured" (no "not logged in").
+	if !strings.Contains(rec.body.String(), "not logged in") {
+		t.Errorf("Phase 10: want 'not logged in' in share response body when credentials absent; got code=%d body=%q",
+			rec.code, rec.body.String()[:min(200, rec.body.Len())])
+	}
+}
+
 // ─── Stubs ────────────────────────────────────────────────────────────────────
 
 // stubTriageServer is a test double for the triage.Server Start path.

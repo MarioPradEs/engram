@@ -4007,6 +4007,55 @@ func (s *Store) ListPendingSyncMutationsAfterSeq(targetKey string, afterSeq int6
 	return mutations, rows.Err()
 }
 
+// ListPendingSyncMutationsForExportAfterSeq is the cloud chunk export variant of
+// ListPendingSyncMutationsAfterSeq. It differs in exactly one way: it includes
+// session-upsert mutations so they travel in chunk.Mutations to the server.
+//
+// The server's validateChunkSessionReferences reads session-upsert entries from
+// chunk.Mutations to build its knownSessionIDs set when the project is new (empty
+// cloud_project_sessions). Without session mutations, the server returns HTTP 400
+// "observations[N] references missing session_id" on first push.
+//
+// Prompts remain excluded — they are raw user input, local-only by company policy.
+// Session OBJECTS are still stripped from the chunk payload at a higher layer
+// (sync.go line 402, chunk.Sessions = nil) — only the mutation entry travels.
+//
+// ListPendingSyncMutationsAfterSeq and ListPendingSyncMutations are intentionally
+// unchanged; they are correctly used by the mutation-push API and the UI where
+// excluding sessions is the right behavior.
+func (s *Store) ListPendingSyncMutationsForExportAfterSeq(targetKey string, afterSeq int64, limit int) ([]SyncMutation, error) {
+	targetKey = normalizeSyncTargetKey(targetKey)
+	if limit <= 0 {
+		limit = 100
+	}
+	// Cloud chunk export filter: exclude prompts only (local-only by policy).
+	// Sessions ARE included so the server can validate observation session references.
+	rows, err := s.queryItHook(s.db, `
+		SELECT sm.seq, sm.target_key, sm.entity, sm.entity_key, sm.op, sm.payload, sm.source, sm.project, sm.occurred_at, sm.acked_at
+		FROM sync_mutations sm
+		LEFT JOIN sync_enrolled_projects sep ON sm.project = sep.project
+		WHERE sm.target_key = ? AND sm.acked_at IS NULL
+		  AND sm.seq > ?
+		  AND (sm.project = '' OR sep.project IS NOT NULL)
+		  AND sm.entity <> 'prompt'
+		ORDER BY sm.seq ASC
+		LIMIT ?`, targetKey, afterSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	mutations := make([]SyncMutation, 0, limit)
+	for rows.Next() {
+		var mutation SyncMutation
+		if err := rows.Scan(&mutation.Seq, &mutation.TargetKey, &mutation.Entity, &mutation.EntityKey, &mutation.Op, &mutation.Payload, &mutation.Source, &mutation.Project, &mutation.OccurredAt, &mutation.AckedAt); err != nil {
+			return nil, err
+		}
+		mutations = append(mutations, mutation)
+	}
+	return mutations, rows.Err()
+}
+
 func (s *Store) CountPendingNonEnrolledSyncMutations(targetKey string) ([]PendingSyncMutationProjectCount, error) {
 	targetKey = normalizeSyncTargetKey(targetKey)
 	// local-only entity filter (prompts/sessions are never exported to cloud):

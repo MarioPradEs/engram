@@ -51,7 +51,11 @@ var (
 		return s.ExportRelationMutations(project)
 	}
 	storeListMutationsAfterSeq = func(s *store.Store, targetKey string, afterSeq int64, limit int) ([]store.SyncMutation, error) {
-		return s.ListPendingSyncMutationsAfterSeq(targetKey, afterSeq, limit)
+		// Use the dedicated export method: includes session mutations (needed by the
+		// server's validateChunkSessionReferences on first push to a new project)
+		// while still excluding prompts (local-only by policy).
+		// See: ListPendingSyncMutationsForExportAfterSeq in internal/store/store.go.
+		return s.ListPendingSyncMutationsForExportAfterSeq(targetKey, afterSeq, limit)
 	}
 	storeAckMutationSeq = func(s *store.Store, targetKey string, seqs []int64) error {
 		return s.AckSyncMutationSeqs(targetKey, seqs)

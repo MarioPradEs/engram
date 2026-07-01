@@ -110,7 +110,7 @@ func TestListPendingSyncMutationsForExportAfterSeq_IncludesSessionExcludesPrompt
 	}
 }
 
-// TestListPendingSyncMutationsForExportAfterSeq_PaginationAdvanses verifies that
+// TestListPendingSyncMutationsForExportAfterSeq_PaginationAdvances verifies that
 // the new export method handles pagination correctly (same as AfterSeq sibling).
 func TestListPendingSyncMutationsForExportAfterSeq_PaginationAdvances(t *testing.T) {
 	s := newTestStore(t)

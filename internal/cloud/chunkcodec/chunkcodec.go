@@ -357,15 +357,18 @@ func normalizeMutationPayload(entity, op, payload, project string) (normalizedPa
 			return "", "", fmt.Errorf("decode mutation payload: %w", err)
 		}
 		body.ID = strings.TrimSpace(body.ID)
-		body.Directory = strings.TrimSpace(body.Directory)
 		if body.ID == "" {
 			return "", "", fmt.Errorf("session payload id is required")
 		}
-		if op == store.SyncOpUpsert && body.Directory == "" {
-			return "", "", fmt.Errorf("session payload directory is required for upsert")
-		}
+		// Strip directory for cloud transport: local machine paths must not reach
+		// cloud_chunks or travel to other project members via pull. The local store
+		// and preflight (DiagnoseCloudUpgradeLegacyMutations /
+		// sync_mutation_required_fields) enforce directory presence before sync;
+		// the cloud uses only id for session references and must not store directory.
+		// This applies unconditionally (upsert and delete) so both client (first pass)
+		// and server (second pass on the already-stripped payload) behave consistently.
+		body.Directory = ""
 		if op == store.SyncOpDelete {
-			body.Directory = ""
 			body.StartedAt = ""
 			body.EndedAt = nil
 			body.Summary = nil

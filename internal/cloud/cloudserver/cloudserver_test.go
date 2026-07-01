@@ -1049,17 +1049,36 @@ func TestHandlerPushAcceptsMutationReferencesToSessionUpsertInSameChunk(t *testi
 	}
 }
 
+// TestHandlerPushAcceptsSessionUpsertMutationWithoutDirectory verifies that
+// session-upsert mutations with an empty (absent) directory are now ACCEPTED by
+// the server. Directory was previously required but is now stripped client-side
+// in chunkcodec.CanonicalizeForProject to prevent local paths leaking into
+// cloud_chunks. The server re-runs the same canonicalization on receive, so the
+// gate must be absent on both passes for consistency.
+func TestHandlerPushAcceptsSessionUpsertMutationWithoutDirectory(t *testing.T) {
+	st := &fakeStore{sessions: map[string]map[string]struct{}{"proj-a": {"s-dir-removed": struct{}{}}}}
+	srv := New(st, fakeAuth{}, 0)
+	// Payload simulates what the client sends after chunkcodec strips directory:
+	// session mutation payload has id but no directory field.
+	body := bytes.NewBufferString(`{"project":"proj-a","created_by":"tester","data":{"mutations":[{"entity":"session","entity_key":"s-dir-removed","op":"upsert","payload":"{\"id\":\"s-dir-removed\",\"started_at\":\"2026-07-01T10:00:00Z\"}"}]}}`)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sync/push", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session-upsert mutation without directory must be accepted (directory stripped client-side), got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandlerPushRejectsMutationUpsertsMissingRequiredFields(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload string
 		wantErr string
 	}{
-		{
-			name:    "session upsert missing directory",
-			payload: `{"mutations":[{"entity":"session","entity_key":"s-1","op":"upsert","payload":"{\"id\":\"s-1\"}"}]}`,
-			wantErr: "session payload directory is required for upsert",
-		},
+		// Note: "session upsert missing directory" was removed — directory is no
+		// longer required in session mutation payloads at the chunkcodec layer.
+		// It is stripped client-side by CanonicalizeForProject to prevent local
+		// machine paths from reaching cloud_chunks (see chunkcodec.go).
 		{
 			name:    "observation upsert missing title",
 			payload: `{"mutations":[{"entity":"observation","entity_key":"obs-1","op":"upsert","payload":"{\"sync_id\":\"obs-1\",\"session_id\":\"s-1\",\"type\":\"decision\",\"content\":\"c\",\"scope\":\"project\"}"}]}`,

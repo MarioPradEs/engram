@@ -4030,6 +4030,9 @@ func (s *Store) ListPendingSyncMutationsForExportAfterSeq(targetKey string, afte
 	}
 	// Cloud chunk export filter: exclude prompts only (local-only by policy).
 	// Sessions ARE included so the server can validate observation session references.
+	// Session DELETE mutations are also included by this filter; they are currently
+	// inert server-side (no directory, no FK constraint risk) and excluded only if
+	// that changes.
 	rows, err := s.queryItHook(s.db, `
 		SELECT sm.seq, sm.target_key, sm.entity, sm.entity_key, sm.op, sm.payload, sm.source, sm.project, sm.occurred_at, sm.acked_at
 		FROM sync_mutations sm

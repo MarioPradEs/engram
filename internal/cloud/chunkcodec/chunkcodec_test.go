@@ -277,6 +277,89 @@ func TestCanonicalizeForProjectDerivesSessionOwnershipFromPayloadIDWhenEntityKey
 	}
 }
 
+// TestCanonicalizeForProject_SessionUpsert_StripsDirectory asserts that a
+// session-upsert mutation whose payload contains a non-empty directory has that
+// directory STRIPPED from the canonicalized output.
+//
+// RED against current code (directory preserved). GREEN after chunkcodec strips it.
+//
+// Rationale: session-upsert mutations now travel in chunk.Mutations to the cloud
+// (fix for first-push 400). Directory is a local machine path that must not reach
+// cloud_chunks or other project members via pull. The local store and the preflight
+// (DiagnoseCloudUpgradeLegacyMutations / sync_mutation_required_fields) enforce
+// directory presence before sync; the cloud does not use or store it.
+func TestCanonicalizeForProject_SessionUpsert_StripsDirectory(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"entity_key": "sess-strip",
+				"op": "upsert",
+				"project": "wrong",
+				"payload": "{\"id\":\"sess-strip\",\"project\":\"wrong\",\"directory\":\"C:\\\\Users\\\\mprad\\\\EngramCloud\",\"started_at\":\"2026-07-01T10:00:00Z\"}"
+			}
+		]
+	}`)
+
+	normalized, err := CanonicalizeForProject(raw, "proj-strip")
+	if err != nil {
+		t.Fatalf("canonicalize: %v", err)
+	}
+
+	var chunk struct {
+		Mutations []store.SyncMutation `json:"mutations"`
+	}
+	if err := json.Unmarshal(normalized, &chunk); err != nil {
+		t.Fatalf("decode canonicalized chunk: %v", err)
+	}
+	if len(chunk.Mutations) != 1 {
+		t.Fatalf("expected 1 mutation, got %d", len(chunk.Mutations))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(chunk.Mutations[0].Payload), &payload); err != nil {
+		t.Fatalf("decode mutation payload: %v", err)
+	}
+	if _, ok := payload["directory"]; ok {
+		t.Fatalf("session-upsert mutation payload MUST NOT contain directory after canonicalization (cloud leak), got payload=%v", payload)
+	}
+	// Sanity: other fields must survive.
+	if payload["id"] != "sess-strip" {
+		t.Fatalf("expected payload id=sess-strip, got %v", payload["id"])
+	}
+	if payload["started_at"] != "2026-07-01T10:00:00Z" {
+		t.Fatalf("expected started_at preserved, got %v", payload["started_at"])
+	}
+}
+
+// TestCanonicalizeForProject_SessionUpsert_EmptyDirectoryAccepted asserts that a
+// session-upsert mutation with an empty (absent) directory is ACCEPTED by
+// CanonicalizeForProject after the directory-required gate is removed.
+//
+// RED against current code (gate rejects empty directory). GREEN after gate removal.
+//
+// Two-pass consistency: the client strips directory before sending; the server then
+// re-runs CanonicalizeForProject on the already-stripped payload. Without this gate
+// removal the second pass would reject the server's own canonical payload.
+func TestCanonicalizeForProject_SessionUpsert_EmptyDirectoryAccepted(t *testing.T) {
+	raw := []byte(`{
+		"mutations": [
+			{
+				"entity": "session",
+				"entity_key": "sess-no-dir",
+				"op": "upsert",
+				"project": "proj-a",
+				"payload": "{\"id\":\"sess-no-dir\",\"project\":\"proj-a\",\"started_at\":\"2026-07-01T10:00:00Z\"}"
+			}
+		]
+	}`)
+
+	_, err := CanonicalizeForProject(raw, "proj-a")
+	if err != nil {
+		t.Fatalf("session-upsert with empty directory must be accepted (two-pass consistency after gate removal), got: %v", err)
+	}
+}
+
 func TestCanonicalizeForProjectAcceptsSessionDeleteMutation(t *testing.T) {
 	raw := []byte(`{
 		"mutations": [

@@ -397,12 +397,18 @@ func (sy *Syncer) Export(createdBy string, project string) (*SyncResult, error) 
 		if err != nil {
 			return nil, fmt.Errorf("build mutation-backed export: %w", err)
 		}
-		// local-only entity filter (prompts/sessions are never exported to cloud):
-		// strip sessions and prompts from the chunk before it reaches the cloud
-		// transport. filterByPendingMutations uses data.Sessions as a lookup table
-		// (to resolve project membership) but must not carry them into the payload.
-		// Observations reference session_id; the import side recovers missing
-		// session dependencies via recoverLocalMissingSessionDependencies.
+		// Strip session and prompt OBJECTS from the chunk payload before cloud transport.
+		// filterByPendingMutations uses data.Sessions as a lookup table (to resolve
+		// project membership) but must not carry session objects into the payload.
+		//
+		// Session UPSERT MUTATIONS intentionally travel in chunk.Mutations: the server's
+		// validateChunkSessionReferences needs them to satisfy observation session_id
+		// references when knownSessionIDs is empty (first push to a new project).
+		// Directory is stripped from session mutation payloads in chunkcodec so no local
+		// machine path reaches cloud_chunks or other project members via pull.
+		//
+		// Prompts are fully excluded — both prompt OBJECTS and prompt MUTATIONS are
+		// local-only by company policy and never reach the cloud.
 		chunk.Sessions = nil
 		chunk.Prompts = nil
 	} else {

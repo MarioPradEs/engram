@@ -1617,6 +1617,34 @@ func TestIsDashboardAdminComparisonGuard(t *testing.T) {
 	}
 }
 
+// ─── Phase 14.2: self-enroll route smoke tests ───────────────────────────────
+
+// TestSelfEnrollRoutes_Return401WithoutCredentials verifies that both
+// POST /user/enrolled-projects and DELETE /user/enrolled-projects exist in the
+// mux and return 401 when no Authorization header is provided.
+func TestSelfEnrollRoutes_Return401WithoutCredentials(t *testing.T) {
+	// Use fakeAuth that always rejects — simulates a server with auth enforced.
+	srv := New(&fakeStore{}, fakeAuth{err: errors.New("missing credentials")}, 0)
+
+	postRec := httptest.NewRecorder()
+	postReq := httptest.NewRequest(http.MethodPost, "/user/enrolled-projects",
+		strings.NewReader(`{"project":"foo"}`))
+	srv.Handler().ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusUnauthorized {
+		t.Errorf("POST /user/enrolled-projects without auth: expected 401, got %d body=%q",
+			postRec.Code, postRec.Body.String())
+	}
+
+	delRec := httptest.NewRecorder()
+	delReq := httptest.NewRequest(http.MethodDelete, "/user/enrolled-projects",
+		strings.NewReader(`{"project":"foo"}`))
+	srv.Handler().ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusUnauthorized {
+		t.Errorf("DELETE /user/enrolled-projects without auth: expected 401, got %d body=%q",
+			delRec.Code, delRec.Body.String())
+	}
+}
+
 // TestInsecureModeLoginRedirects asserts that GET /dashboard/login with auth==nil
 // returns 303 to /dashboard/ (login is a no-op in insecure mode). Satisfies REQ-110.
 func TestInsecureModeLoginRedirects(t *testing.T) {

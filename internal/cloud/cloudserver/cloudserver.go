@@ -508,6 +508,10 @@ func (s *CloudServer) routes() {
 	s.mux.HandleFunc("POST /sync/push", s.withAuth(s.handlePushChunk))
 	s.mux.HandleFunc("POST /sync/mutations/push", s.withAuth(s.handleMutationPush))
 	s.mux.HandleFunc("GET /sync/mutations/pull", s.withAuth(s.handleMutationPull))
+	// Self-service project enrollment: POST to enroll, DELETE to unenroll.
+	// Auth enforced by withAuth; caller identity derived from Bearer JWT.
+	s.mux.HandleFunc("POST /user/enrolled-projects", s.withAuth(s.handleSelfEnrollProject))
+	s.mux.HandleFunc("DELETE /user/enrolled-projects", s.withAuth(s.handleSelfUnenrollProject))
 	// /classrules/games: returns the canonical games vocabulary for per-session
 	// sync by member CLIs. Bearer JWT auth (same token members use for sync).
 	s.mux.HandleFunc("GET /classrules/games", s.withAuth(s.handleClassrulesGames))

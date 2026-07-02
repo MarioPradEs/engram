@@ -2059,7 +2059,13 @@ func TestCmdServeSyncStatusUsesDetectedProjectScopedState(t *testing.T) {
 	}
 }
 
-func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.T) {
+// TestCmdServeSyncStatusPersonalProjectUnenrolledWhenNoDefaultResolves verifies that
+// when ENGRAM_PROJECT is unset and detectProject returns "", resolveProjectName falls
+// back to "personal" (D1), so /sync/status responds with blocked_unenrolled (not
+// project_required) because "personal" resolves but is not enrolled for cloud sync.
+// The project_required code path (empty project scope reaching the provider) is
+// separately covered by TestStoreSyncStatusProviderRequiresExplicitProjectScope.
+func TestCmdServeSyncStatusPersonalProjectUnenrolledWhenNoDefaultResolves(t *testing.T) {
 	stubExitWithPanic(t)
 	stubRuntimeHooks(t)
 
@@ -2090,10 +2096,10 @@ func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.
 		}
 		body := rec.Body.String()
 		if !strings.Contains(body, `"enabled":false`) {
-			t.Fatalf("expected enabled=false when no project scope resolves, got body=%q", body)
+			t.Fatalf("expected enabled=false when personal project is unenrolled, got body=%q", body)
 		}
-		if !strings.Contains(body, `"reason_code":"project_required"`) {
-			t.Fatalf("expected project_required reason code, got body=%q", body)
+		if !strings.Contains(body, `"reason_code":"blocked_unenrolled"`) {
+			t.Fatalf("expected blocked_unenrolled reason code (personal project not enrolled), got body=%q", body)
 		}
 		return nil
 	}
@@ -2101,6 +2107,32 @@ func TestCmdServeSyncStatusRequiresProjectScopeWhenNoDefaultResolves(t *testing.
 	_, stderr, recovered := captureOutputAndRecover(t, func() { cmdServe(cfg) })
 	if recovered != nil || stderr != "" {
 		t.Fatalf("cmdServe should not fail, panic=%v stderr=%q", recovered, stderr)
+	}
+}
+
+// TestStoreSyncStatusProviderEmitsProjectRequiredForEmptyScope verifies that
+// storeSyncStatusProvider.Status("") with defaultProject="" still emits
+// project_required. This preserves coverage of the requirement that callers
+// must supply an explicit project scope to get a meaningful sync status when
+// no default has been configured.
+func TestStoreSyncStatusProviderEmitsProjectRequiredForEmptyScope(t *testing.T) {
+	cfg := testConfig(t)
+	if err := saveCloudConfig(cfg, &cloudConfig{ServerURL: "https://cloud.example.test"}); err != nil {
+		t.Fatalf("save cloud config: %v", err)
+	}
+	t.Setenv("ENGRAM_CLOUD_TOKEN", "token-abc")
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer s.Close()
+
+	status := storeSyncStatusProvider{store: s, defaultProject: "", cfg: cfg}.Status("")
+	if status.ReasonCode != "project_required" {
+		t.Fatalf("expected project_required when both defaultProject and request project are empty, got %q", status.ReasonCode)
+	}
+	if status.Enabled {
+		t.Fatalf("expected enabled=false for project_required, got enabled=true")
 	}
 }
 

@@ -380,8 +380,8 @@ func TestAdminUsersDeactivate_SoleAdmin_Blocked(t *testing.T) {
 	}
 }
 
-// TestAdminUsersGET_SpreadsheetTableClass asserts the table uses spreadsheet-table CSS class.
-func TestAdminUsersGET_SpreadsheetTableClass(t *testing.T) {
+// TestAdminUsersGET_UserListClass asserts the users page uses the user-list CSS class (card-rows layout).
+func TestAdminUsersGET_UserListClass(t *testing.T) {
 	initial := []users.Principal{
 		{Email: "admin@vivastudios.com", Name: "Admin", Department: "dev", Role: "admin", Status: "active"},
 	}
@@ -394,8 +394,8 @@ func TestAdminUsersGET_SpreadsheetTableClass(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "spreadsheet-table") {
-		t.Error("expected users table to use spreadsheet-table CSS class")
+	if !strings.Contains(rec.Body.String(), "user-list") {
+		t.Error("expected users page to use user-list CSS class (card-rows layout)")
 	}
 }
 

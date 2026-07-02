@@ -5,10 +5,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 	"github.com/Gentleman-Programming/engram/internal/triage"
@@ -251,6 +253,147 @@ func TestCmdTriageHelpString(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "triage") {
 		t.Errorf("printUsage() does not mention 'triage'")
+	}
+}
+
+// ─── Phase 10 RED: JWT wiring tests ──────────────────────────────────────────
+
+// TestNewTriageServer_JWTAbsent_WiresServerEnrollFn verifies Phase 10 requirement:
+// newTriageServer MUST wire a non-nil serverEnrollFn that returns "not logged in"
+// when credentials.json is absent (empty bearer token path). The share route must
+// return 4xx with "not logged in" in the body (not 503 "not configured").
+//
+// RED: before Phase 10 the factory does NOT wire serverEnrollFn, so the share
+// route returns 503 "not configured" instead of the 502 "not logged in" body.
+func TestNewTriageServer_JWTAbsent_WiresServerEnrollFn(t *testing.T) {
+	t.Setenv("ENGRAM_TRIAGE_NO_BROWSER", "1")
+
+	// Point credentials dir to an empty temp dir — no credentials.json.
+	emptyCredDir := t.TempDir()
+	oldCredsDirFn := credentialsDirFn
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+	credentialsDirFn = func() (string, error) { return emptyCredDir, nil }
+
+	factory := newTriageServer
+	srv := factory(nil, 0)
+
+	type handlerProvider interface {
+		Handler() http.Handler
+	}
+	hp, ok := srv.(handlerProvider)
+	if !ok {
+		t.Skip("factory did not return a handlerProvider")
+	}
+
+	type cwdProjectSetter interface {
+		SetCwdProject(string)
+	}
+	if setter, ok := srv.(cwdProjectSetter); ok {
+		setter.SetCwdProject("test-proj")
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, "/project/test-proj/share", nil)
+	rec := &responseRecorder{code: 200}
+	hp.Handler().ServeHTTP(rec, req)
+
+	// Phase 10 contract: a wired serverEnrollFn that returns "not logged in"
+	// causes the share route to respond 502 with "not logged in" in the body.
+	// Before Phase 10: the fn is nil → 503 "not configured" (no "not logged in").
+	if !strings.Contains(rec.body.String(), "not logged in") {
+		t.Errorf("Phase 10: want 'not logged in' in share response body when credentials absent; got code=%d body=%q",
+			rec.code, rec.body.String()[:min(200, rec.body.Len())])
+	}
+}
+
+// TestNewTriageServer_WiresEnrollmentStore verifies the C-1 production wiring:
+// newTriageServer must call srv.WithEnrollmentStore(ms) so that the share and
+// unshare handlers can client-enroll/unenroll the project in local SQLite.
+//
+// Without the fix the factory never calls WithEnrollmentStore, leaving
+// enrollStore == nil. handleShareProject reaches the nil-guard AFTER
+// serverEnrollFn succeeds and returns 503 "enrollment store not configured".
+// After the fix the handler proceeds past that guard and returns 200.
+//
+// RED: before the fix this test FAILS because the body contains
+// "enrollment store not configured". GREEN: after the fix it PASSES.
+func TestNewTriageServer_WiresEnrollmentStore(t *testing.T) {
+	t.Setenv("ENGRAM_TRIAGE_NO_BROWSER", "1")
+
+	// Start a fake cloud enroll endpoint that always returns 200 OK.
+	// This is needed so serverEnrollFn (the Phase 10 HTTP closure) succeeds and
+	// the handler advances past step 2 to reach the enrollStore nil-guard at
+	// step 3 — the exact location of the C-1 bug.
+	fakeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fakeSrv.Close()
+
+	oldCloudURL := cloudBaseURLFn
+	t.Cleanup(func() { cloudBaseURLFn = oldCloudURL })
+	cloudBaseURLFn = func(_ store.Config) string { return fakeSrv.URL }
+
+	// Write a credentials.json with a non-expired token so bearerToken != "".
+	// If bearerToken were empty, serverEnrollFn returns "not logged in" (502)
+	// before reaching the enrollStore check, masking the C-1 bug.
+	credDir := t.TempDir()
+	creds := credentialFile{
+		AccessToken: "test-bearer-token",
+		IssuedAt:    time.Now().UTC().Format(time.RFC3339),
+		// ExpiresAt absent → no expiry validation
+	}
+	credsData, _ := json.Marshal(creds)
+	if err := os.WriteFile(filepath.Join(credDir, "credentials.json"), credsData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldCredsDirFn := credentialsDirFn
+	t.Cleanup(func() { credentialsDirFn = oldCredsDirFn })
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+
+	// Open a real store so the factory constructs a non-nil ms (*StoreAdapter).
+	// With s != nil, ms is set; the bug is that the factory never passes ms to
+	// WithEnrollmentStore, leaving enrollStore nil regardless.
+	cfg := testConfig(t)
+	s, err := storeNew(cfg)
+	if err != nil || s == nil {
+		t.Skip("cannot open store for C-1 enrollment-store wiring test")
+	}
+	defer s.Close()
+
+	// Capture the real factory (not a stub) — same pattern as
+	// TestNewTriageServer_WiresMutableStore and TestNewTriageServer_SetsCwdProject.
+	factory := newTriageServer
+	srv := factory(s, 0)
+
+	// Set cwdProject so the Option A gate in handleShareProject passes.
+	type cwdProjectSetter interface {
+		SetCwdProject(string)
+	}
+	if setter, ok := srv.(cwdProjectSetter); ok {
+		setter.SetCwdProject("test-proj")
+	}
+
+	type handlerProvider interface {
+		Handler() http.Handler
+	}
+	hp, ok := srv.(handlerProvider)
+	if !ok {
+		t.Skip("factory did not return a handlerProvider")
+	}
+
+	// POST /project/test-proj/share with no Origin header so the CSRF
+	// originCheckMiddleware passes (absent Origin = curl / same-origin form).
+	req, _ := http.NewRequest(http.MethodPost, "/project/test-proj/share", nil)
+	rec := &responseRecorder{code: 200}
+	hp.Handler().ServeHTTP(rec, req)
+
+	// C-1 assertion: the nil-enrollStore 503 must never appear.
+	//   Before fix: enrollStore == nil → 503 "enrollment store not configured".
+	//   After fix:  enrollStore is a real StoreAdapter → EnrollProject("test-proj")
+	//               succeeds on the empty temp store → 200 OK.
+	if strings.Contains(rec.body.String(), "enrollment store not configured") {
+		t.Errorf("C-1: share returned 'enrollment store not configured' — "+
+			"WithEnrollmentStore not wired in newTriageServer; code=%d body=%q",
+			rec.code, rec.body.String()[:min(200, rec.body.Len())])
 	}
 }
 

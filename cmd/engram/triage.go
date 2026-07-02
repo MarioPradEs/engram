@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/cli/browser"
@@ -55,6 +60,63 @@ var newTriageServer = func(s *store.Store, port int) triageStarter {
 
 	srv := triage.NewWithMutableStore(s, ms, port, cwdDir)
 	srv.SetCwdProject(cwdProject)
+
+	// Phase 10 (D9): read JWT at startup and wire server-side enroll/unenroll closures.
+	// Absent or expired credentials are non-fatal — the server starts cleanly but
+	// share/unshare actions return "not logged in" until the user runs `engram auth login`.
+	cloudURL := strings.TrimRight(cloudBaseURLFn(store.Config{}), "/")
+	enrollEndpoint := cloudURL + "/user/enrolled-projects"
+
+	// buildEnrollHTTPFn returns a closure that sends method (POST or DELETE) to the
+	// cloud self-service enroll endpoint with the given bearer token and project.
+	buildEnrollHTTPFn := func(method string) func(project, bearerToken string) error {
+		return func(project, bearerToken string) error {
+			if bearerToken == "" {
+				return fmt.Errorf("not logged in — please run engram auth login first")
+			}
+			payload, _ := json.Marshal(map[string]string{"project": project})
+			req, err := http.NewRequest(method, enrollEndpoint, bytes.NewReader(payload))
+			if err != nil {
+				return fmt.Errorf("server enroll (%s): build request: %w", method, err)
+			}
+			req.Header.Set("Authorization", "Bearer "+bearerToken)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("server enroll (%s): request failed: %w", method, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode >= 400 {
+				return fmt.Errorf("server enroll (%s): server returned %d", method, resp.StatusCode)
+			}
+			return nil
+		}
+	}
+
+	// Read JWT from credentials.json (best-effort; non-fatal if absent or expired).
+	var bearerToken string
+	if credDir, credErr := credentialsDirFn(); credErr == nil {
+		if token, tokenErr := readCredentialsToken(credDir); tokenErr == nil {
+			bearerToken = token
+		} else {
+			log.Printf("[triage] warn: credentials not available (%T) — share/unshare actions require `engram auth login`", tokenErr)
+		}
+	} else {
+		log.Printf("[triage] warn: cannot locate credentials dir (%v) — share/unshare actions will fail", credErr)
+	}
+
+	srv.WithBearerToken(bearerToken)
+	srv.WithServerEnrollFn(buildEnrollHTTPFn(http.MethodPost))
+	srv.WithServerUnenrollFn(buildEnrollHTTPFn(http.MethodDelete))
+
+	// C-1: wire the enrollment store so handleShareProject / handleUnshareProject
+	// can client-enroll or unenroll the project in local SQLite.  The concrete
+	// type of ms is *triage.StoreAdapter, which satisfies triage.EnrollmentStore
+	// via its EnrollProject / UnenrollProject proxies.  Guard mirrors the ms
+	// guard above: skip when s == nil (test stub path keeps enrollStore nil).
+	if ms != nil {
+		srv.WithEnrollmentStore(ms.(triage.EnrollmentStore))
+	}
 	return srv
 }
 

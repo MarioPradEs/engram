@@ -5258,6 +5258,104 @@ func (s *Store) MigrateEmptyProjectToPersonal(target string) (*OrphanMigrateResu
 	return result, nil
 }
 
+// ReassignProject migrates all records from the source project name to the
+// canonical project name. Unlike MergeProjects, it explicitly handles
+// source=="personal" (D6: personal is the private-default bucket that must be
+// reassignable to a named shareable project). It also applies D4 dual-write:
+// pending sync_mutations.project column AND json payload field ($.project) are
+// both updated so the cloud receives the correct project on next push.
+//
+// It does NOT skip source=="personal" or empty-like values. It skips only when
+// source normalizes to the same value as canonical (nothing to do).
+func (s *Store) ReassignProject(source, canonical string) (*MergeResult, error) {
+	if source = strings.TrimSpace(source); source == "" {
+		return nil, fmt.Errorf("ReassignProject: source must not be empty")
+	}
+	canonical, _ = NormalizeProject(canonical)
+	if canonical == "" {
+		return nil, fmt.Errorf("ReassignProject: canonical project name must not be empty")
+	}
+	sourceNorm, _ := NormalizeProject(source)
+	if sourceNorm == canonical {
+		// Source and canonical are the same after normalization — nothing to do.
+		return &MergeResult{Canonical: canonical}, nil
+	}
+
+	result := &MergeResult{Canonical: canonical}
+
+	err := s.withTx(func(tx *sql.Tx) error {
+		// Update entity tables: observations, sessions, user_prompts.
+		// We match both the raw source and its normalized form to handle legacy rows.
+		sourceVariants := []string{source}
+		if sourceNorm != source {
+			sourceVariants = append(sourceVariants, sourceNorm)
+		}
+		placeholders := sqlPlaceholders(len(sourceVariants))
+		args := make([]any, 0, len(sourceVariants)+1)
+		args = append(args, canonical)
+		for _, v := range sourceVariants {
+			args = append(args, v)
+		}
+
+		res, err := s.execHook(tx, `UPDATE observations SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("reassign observations %q → %q: %w", source, canonical, err)
+		}
+		n, _ := res.RowsAffected()
+		result.ObservationsUpdated = n
+
+		res, err = s.execHook(tx, `UPDATE sessions SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("reassign sessions %q → %q: %w", source, canonical, err)
+		}
+		n, _ = res.RowsAffected()
+		result.SessionsUpdated = n
+
+		res, err = s.execHook(tx, `UPDATE user_prompts SET project = ? WHERE project IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("reassign prompts %q → %q: %w", source, canonical, err)
+		}
+		n, _ = res.RowsAffected()
+		result.PromptsUpdated = n
+
+		// D4 dual-write: update pending sync_mutations.project column AND
+		// json payload field so cloud sync receives the correct project.
+		// Only rewrite PENDING (acked_at IS NULL) mutations — already-synced rows
+		// must not be rewritten (MAJOR-3: prevents overwriting acked mutations).
+		// FIX-1 guard: keep payload unchanged when it is empty or invalid JSON.
+		mutArgs := make([]any, 0, 2*len(sourceVariants)+2)
+		mutArgs = append(mutArgs, canonical, canonical) // SET project=?, json_set arg
+		mutArgs = append(mutArgs, args[1:]...)          // WHERE IN variants
+		_, err = s.execHook(tx,
+			`UPDATE sync_mutations
+			 SET project = ?,
+			     payload = CASE WHEN payload != '' AND json_valid(payload)
+			               THEN json_set(payload, '$.project', ?)
+			               ELSE payload END
+			 WHERE project IN (`+placeholders+`)
+			   AND acked_at IS NULL`,
+			mutArgs...,
+		)
+		if err != nil {
+			return fmt.Errorf("reassign sync_mutations %q → %q: %w", source, canonical, err)
+		}
+
+		// Enqueue sync mutations for the canonical project so cloud sync picks
+		// up all the moved records.
+		if err := s.backfillProjectSyncMutationsTx(tx, canonical); err != nil {
+			return fmt.Errorf("backfill sync mutations for %q: %w", canonical, err)
+		}
+
+		result.SourcesMerged = []string{source}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // sqlPlaceholders returns a comma-separated list of parameter markers only.
 // Values are still passed separately through query arguments; no user data is
 // interpolated into SQL here.

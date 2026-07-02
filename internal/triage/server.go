@@ -47,6 +47,10 @@ type Server struct {
 	store          *store.Store
 	triageStore    TriageStore        // narrow interface; set by NewWithStore or derived from store
 	mutableStore   MutableTriageStore // non-nil when mutation endpoints are active (WU-5)
+	enrollStore    EnrollmentStore    // Phase 5: client-side enroll/unenroll for share actions
+	serverEnrollFn   func(project, bearerToken string) error // Phase 5: server-side enroll closure (D9)
+	serverUnenrollFn func(project, bearerToken string) error // Phase 8: server-side unenroll closure (reverse of D9)
+	bearerToken      string // Phase 7: JWT read from credentials.json at startup; passed to serverEnrollFn/serverUnenrollFn
 	port           int
 	trustedOrigins map[string]struct{} // CSRF: allowed Origin values, derived from port at construction
 	mux            *http.ServeMux
@@ -98,6 +102,25 @@ func (a *StoreAdapter) ObservationsByTag(project, facet, value string, limit int
 // facet must be in {"juego","tipo"} — allow-list enforced by the store method.
 func (a *StoreAdapter) DistinctTagValues(project, facet string) ([]string, error) {
 	return a.s.DistinctTagValues(project, facet)
+}
+
+// EnrollProject proxies to store.EnrollProject, satisfying EnrollmentStore.
+// Idempotent — re-enrolling an already-enrolled project is a no-op.
+func (a *StoreAdapter) EnrollProject(project string) error {
+	return a.s.EnrollProject(project)
+}
+
+// UnenrollProject proxies to store.UnenrollProject, satisfying EnrollmentStore.
+// Idempotent — unenrolling a non-enrolled project is a no-op.
+func (a *StoreAdapter) UnenrollProject(project string) error {
+	return a.s.UnenrollProject(project)
+}
+
+// ReassignProject proxies to store.ReassignProject, satisfying MutableTriageStore.
+// Unlike MergeProjects, it handles source=="personal" (D6) and applies D4
+// dual-write for payload.$.project in pending sync_mutations.
+func (a *StoreAdapter) ReassignProject(source, canonical string) (*store.MergeResult, error) {
+	return a.s.ReassignProject(source, canonical)
 }
 
 // New creates a triage Server backed by a real *store.Store.
@@ -178,6 +201,39 @@ func (s *Server) SetCwdProject(project string) {
 // Exposed for testing so callers can assert the resolved/normalized value.
 func (s *Server) CwdProject() string {
 	return s.cwdProject
+}
+
+// WithEnrollmentStore injects the EnrollmentStore used by handleShareProject and
+// handleUnshareProject to client-enroll or unenroll a project in the local SQLite store.
+// Must be called before Start. In production, pass a *triage.StoreAdapter or
+// *store.Store directly (both satisfy the interface). In tests, pass a fake.
+func (s *Server) WithEnrollmentStore(es EnrollmentStore) {
+	s.enrollStore = es
+}
+
+// WithServerEnrollFn injects the closure used by handleShareProject to call the
+// cloud self-service enroll endpoint. The closure receives the project name and
+// the caller's bearer token (JWT). It should return an error if the server is
+// unreachable or the token is invalid/empty. A nil fn means share will always
+// fail (safe default); cmdTriage wires the real HTTP call here.
+func (s *Server) WithServerEnrollFn(fn func(project, bearerToken string) error) {
+	s.serverEnrollFn = fn
+}
+
+// WithBearerToken sets the JWT that handleShareProject passes to serverEnrollFn.
+// Call this at startup after reading credentials.json. An empty token is allowed
+// (serverEnrollFn should return "not logged in" when the token is empty).
+func (s *Server) WithBearerToken(token string) {
+	s.bearerToken = token
+}
+
+// WithServerUnenrollFn injects the closure used by handleUnshareProject to call
+// the cloud self-service un-enroll endpoint. The closure receives the project
+// name and the caller's bearer token (JWT). It should return an error if the
+// server is unreachable or the token is invalid/empty. A nil fn means unshare
+// will always fail (safe default); cmdTriage wires the real HTTP DELETE call.
+func (s *Server) WithServerUnenrollFn(fn func(project, bearerToken string) error) {
+	s.serverUnenrollFn = fn
 }
 
 // buildTrustedOrigins returns the set of Origin header values that the CSRF
@@ -298,6 +354,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /project/{name}/set-scope", s.originCheckMiddleware(s.handleSetProjectScope))
 	// Classify: sets the project default_scope in config.json (cwd project only).
 	s.mux.HandleFunc("POST /project/{name}/classify", s.originCheckMiddleware(s.handleClassify))
+	// Share: atomically server-enroll + client-enroll + write default_scope=shared (D9).
+	s.mux.HandleFunc("POST /project/{name}/share", s.originCheckMiddleware(s.handleShareProject))
+	// Unshare: reverse of share — client-unenroll + server-unenroll + revert default_scope (Phase 8).
+	s.mux.HandleFunc("POST /project/{name}/unshare", s.originCheckMiddleware(s.handleUnshareProject))
+	// Reassign: move observations from source project to cwd project (D6, Phase 9).
+	s.mux.HandleFunc("POST /project/{name}/reassign", s.originCheckMiddleware(s.handleReassign))
 	// PR#3 / E2b: bulk-by-tag scope action (REQ-50, D2, D3, D5, D7; AD1).
 	s.mux.HandleFunc("POST /project/{name}/tag-scope", s.originCheckMiddleware(s.handleTagScope))
 	// PR#3 / E2b: htmx tag-values fragment — populates value <select> on facet change (REQ-52, AD2).

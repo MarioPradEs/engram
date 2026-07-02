@@ -957,6 +957,356 @@ func TestSetProjectScope_InvalidScope_TableDriven(t *testing.T) {
 	}
 }
 
+// ─── Phase 7 RED: handleShareProject tests ───────────────────────────────────
+
+// fakeEnrollStore records calls to EnrollProject and UnenrollProject.
+// It is used to test handleShareProject without a real SQLite store.
+type fakeEnrollStore struct {
+	enrollCalls   []string
+	unenrollCalls []string
+	enrollErr     error
+	unenrollErr   error
+}
+
+func (f *fakeEnrollStore) EnrollProject(project string) error {
+	f.enrollCalls = append(f.enrollCalls, project)
+	return f.enrollErr
+}
+
+func (f *fakeEnrollStore) UnenrollProject(project string) error {
+	f.unenrollCalls = append(f.unenrollCalls, project)
+	return f.unenrollErr
+}
+
+// TestHandleShareProject_HappyPath verifies that a successful share:
+//  1. Calls serverEnrollFn with the project name (server FIRST, D9).
+//  2. Calls EnrollProject on the enrollment store.
+//  3. Writes default_scope="shared" to config.json.
+//  4. Returns HTTP 200.
+func TestHandleShareProject_HappyPath(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverEnrollCalls []string
+	fakeFn := func(project, bearerToken string) error {
+		serverEnrollCalls = append(serverEnrollCalls, project)
+		return nil
+	}
+
+	es := &fakeEnrollStore{}
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("myproject")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerEnrollFn(fakeFn)
+	srv.WithBearerToken("my-jwt-token")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/myproject/share", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(serverEnrollCalls) != 1 || serverEnrollCalls[0] != "myproject" {
+		t.Errorf("want serverEnrollFn called once with 'myproject', got %v", serverEnrollCalls)
+	}
+	if len(es.enrollCalls) != 1 || es.enrollCalls[0] != "myproject" {
+		t.Errorf("want EnrollProject called once with 'myproject', got %v", es.enrollCalls)
+	}
+	// WriteProjectDefaultScope must have set default_scope="shared".
+	configPath := cwdDir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "shared" {
+		t.Errorf("want default_scope=shared, got %q", cfg["default_scope"])
+	}
+}
+
+// TestHandleShareProject_ServerEnrollFailure verifies that when serverEnrollFn
+// returns an error, the handler returns 4xx, EnrollProject is NOT called, and
+// default_scope is not written (no local state change per D9).
+func TestHandleShareProject_ServerEnrollFailure(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeFn := func(project, bearerToken string) error {
+		return fmt.Errorf("server enrollment failed: network error")
+	}
+
+	es := &fakeEnrollStore{}
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("myproject")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerEnrollFn(fakeFn)
+	srv.WithBearerToken("my-jwt-token")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/myproject/share", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code < 400 {
+		t.Fatalf("want 4xx on server enroll failure, got %d", rec.Code)
+	}
+	// EnrollProject must NOT be called (server FIRST: local change only after server succeeds).
+	if len(es.enrollCalls) != 0 {
+		t.Errorf("want EnrollProject NOT called on server failure, got %d calls", len(es.enrollCalls))
+	}
+	// config.json must NOT be written.
+	configPath := cwdDir + "/.engram/config.json"
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("want config.json NOT written on server failure")
+	}
+}
+
+// TestHandleShareProject_CwdBoundary verifies Option A: requests for a project
+// other than cwdProject are rejected with HTTP 400 and nothing is called.
+func TestHandleShareProject_CwdBoundary(t *testing.T) {
+	var serverCalls, enrollCalls int
+	fakeFn := func(project, bearerToken string) error {
+		serverCalls++
+		return nil
+	}
+	es := &fakeEnrollStore{}
+
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, t.TempDir())
+	srv.SetCwdProject("android-game-perf-tool-desktop")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerEnrollFn(fakeFn)
+	srv.WithBearerToken("tok")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/other-project/share", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 on project mismatch, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "mismatch") {
+		t.Errorf("want 'mismatch' in body, got: %q", rec.Body.String())
+	}
+	if serverCalls != 0 {
+		t.Errorf("want serverEnrollFn NOT called on mismatch, got %d", serverCalls)
+	}
+	_ = enrollCalls // fakeEnrollStore.enrollCalls covers this
+	if len(es.enrollCalls) != 0 {
+		t.Errorf("want EnrollProject NOT called on mismatch, got %d", len(es.enrollCalls))
+	}
+}
+
+// TestHandleShareProject_NoJWT verifies that when the server's bearer token is
+// empty, serverEnrollFn receives an empty string and (if it returns "not logged in")
+// the handler propagates the error as HTTP 4xx. No local enrollment must occur.
+func TestHandleShareProject_NoJWT(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var capturedToken string
+	fakeFn := func(project, bearerToken string) error {
+		capturedToken = bearerToken
+		if bearerToken == "" {
+			return fmt.Errorf("not logged in — please run engram auth login first")
+		}
+		return nil
+	}
+
+	es := &fakeEnrollStore{}
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("myproject")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerEnrollFn(fakeFn)
+	// WithBearerToken NOT called → s.bearerToken is empty string
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/myproject/share", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code < 400 {
+		t.Fatalf("want 4xx on empty JWT, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if capturedToken != "" {
+		t.Errorf("want empty bearer token passed to serverEnrollFn, got %q", capturedToken)
+	}
+	if !strings.Contains(rec.Body.String(), "not logged in") {
+		t.Errorf("want 'not logged in' in response body, got: %q", rec.Body.String())
+	}
+	if len(es.enrollCalls) != 0 {
+		t.Errorf("want no EnrollProject calls on JWT failure, got %d", len(es.enrollCalls))
+	}
+}
+
+// ─── Phase 8 RED: handleUnshareProject tests ─────────────────────────────────
+
+// TestHandleUnshareProject_HappyPath verifies that a successful unshare:
+//  1. Calls UnenrollProject on the enrollment store (client-unenroll first).
+//  2. Calls serverUnenrollFn with the project name (server un-enroll second).
+//  3. Writes default_scope="personal" to config.json.
+//  4. Returns HTTP 200.
+func TestHandleUnshareProject_HappyPath(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverUnenrollCalls []string
+	fakeFn := func(project, bearerToken string) error {
+		serverUnenrollCalls = append(serverUnenrollCalls, project)
+		return nil
+	}
+
+	es := &fakeEnrollStore{}
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("myproject")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerUnenrollFn(fakeFn)
+	srv.WithBearerToken("my-jwt-token")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/myproject/unshare", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(es.unenrollCalls) != 1 || es.unenrollCalls[0] != "myproject" {
+		t.Errorf("want UnenrollProject called once with 'myproject', got %v", es.unenrollCalls)
+	}
+	if len(serverUnenrollCalls) != 1 || serverUnenrollCalls[0] != "myproject" {
+		t.Errorf("want serverUnenrollFn called once with 'myproject', got %v", serverUnenrollCalls)
+	}
+	// WriteProjectDefaultScope must have set default_scope="personal" (reverted to private).
+	configPath := cwdDir + "/.engram/config.json"
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config.json not written: %v", err)
+	}
+	var cfg map[string]string
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config.json: %v", err)
+	}
+	if cfg["default_scope"] != "personal" {
+		t.Errorf("want default_scope=personal (reverted to private), got %q", cfg["default_scope"])
+	}
+}
+
+// TestHandleUnshareProject_Idempotent verifies that unsharing a project that is
+// already unenrolled succeeds with HTTP 200 and no error. The enrollment store
+// and server unenroll function are both called (idempotent operations).
+func TestHandleUnshareProject_Idempotent(t *testing.T) {
+	cwdDir := t.TempDir()
+	if err := os.MkdirAll(cwdDir+"/.engram", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var serverCalls int
+	fakeFn := func(project, bearerToken string) error {
+		serverCalls++
+		return nil // idempotent: no error when already unenrolled
+	}
+
+	es := &fakeEnrollStore{} // UnenrollProject is idempotent (no error when not enrolled)
+	srv := triage.NewWithMutableStore(nil, &fakeMutableStore{}, 0, cwdDir)
+	srv.SetCwdProject("already-private")
+	srv.WithEnrollmentStore(es)
+	srv.WithServerUnenrollFn(fakeFn)
+	srv.WithBearerToken("tok")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodPost, "/project/already-private/unshare", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200 (idempotent), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(es.unenrollCalls) != 1 {
+		t.Errorf("want UnenrollProject called once (idempotent), got %d", len(es.unenrollCalls))
+	}
+	if serverCalls != 1 {
+		t.Errorf("want serverUnenrollFn called once, got %d", serverCalls)
+	}
+}
+
+// ─── Phase 9 RED: handleReassign tests ───────────────────────────────────────
+
+// fakeReassignMutableStore wraps fakeMutableStore and records ReassignProject calls.
+// Used in reassign handler tests to verify the store method is called correctly.
+type fakeReassignMutableStore struct {
+	fakeMutableStore
+	reassignCalls []reassignCall
+	reassignErr   error
+}
+
+type reassignCall struct {
+	Source    string
+	Canonical string
+}
+
+func (f *fakeReassignMutableStore) ReassignProject(source, canonical string) (*store.MergeResult, error) {
+	f.reassignCalls = append(f.reassignCalls, reassignCall{Source: source, Canonical: canonical})
+	if f.reassignErr != nil {
+		return nil, f.reassignErr
+	}
+	return &store.MergeResult{Canonical: canonical, ObservationsUpdated: 3}, nil
+}
+
+// TestHandleReassign_HappyPath verifies that POST /project/{name}/reassign with
+// body {"from":"personal"} calls ReassignProject("personal", name) and returns
+// HTTP 200. The cwd-boundary check allows the cwd project as the canonical target.
+func TestHandleReassign_HappyPath(t *testing.T) {
+	fs := &fakeReassignMutableStore{}
+	srv := triage.NewWithMutableStore(nil, fs, 0, t.TempDir())
+	srv.SetCwdProject("my-target-project")
+	h := srv.Handler()
+
+	body := strings.NewReader(`{"from":"personal"}`)
+	req := httptest.NewRequest(http.MethodPost, "/project/my-target-project/reassign", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(fs.reassignCalls) != 1 {
+		t.Fatalf("want ReassignProject called once, got %d", len(fs.reassignCalls))
+	}
+	if fs.reassignCalls[0].Source != "personal" {
+		t.Errorf("want source='personal', got %q", fs.reassignCalls[0].Source)
+	}
+	if fs.reassignCalls[0].Canonical != "my-target-project" {
+		t.Errorf("want canonical='my-target-project', got %q", fs.reassignCalls[0].Canonical)
+	}
+}
+
+// ─── Phase 5.1 RED: EnrollmentStore interface compile-time check ─────────────
+
+// TestEnrollmentStoreInterface is a compile-time assertion that
+// *triage.StoreAdapter satisfies triage.EnrollmentStore.
+// The test body is intentionally empty; the var declaration at package scope
+// fails compilation if the interface or methods are absent.
+func TestEnrollmentStoreInterface(t *testing.T) {
+	// Compile-time assertion — fails if EnrollmentStore is not declared or
+	// StoreAdapter does not implement EnrollProject / UnenrollProject.
+	var _ triage.EnrollmentStore = (*triage.StoreAdapter)(nil)
+}
+
 // min is a small helper (Go 1.21+ has min built-in but kept explicit for clarity).
 func min(a, b int) int {
 	if a < b {

@@ -1,10 +1,14 @@
 package triage_test
 
 import (
+	"bytes"
+	"context"
 	"flag"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/internal/triage"
 )
 
 // updateGolden is set by -update flag to regenerate golden files.
@@ -37,4 +41,28 @@ func goldenCheck(t *testing.T, name string, got []byte) {
 	if string(got) != string(want) {
 		t.Errorf("golden mismatch for %s:\ngot:\n%s\nwant:\n%s", name, got, want)
 	}
+}
+
+// ─── Phase 6.2: SharePanel golden snapshots ──────────────────────────────────
+
+// TestSharePanel_NotSharedGolden renders SharePanel with isShared=false and
+// compares to a golden baseline.
+// Generate baseline: go test ./internal/triage/... -run TestSharePanel -update
+func TestSharePanel_NotSharedGolden(t *testing.T) {
+	var buf bytes.Buffer
+	if err := triage.SharePanel("myproject", false).Render(context.Background(), &buf); err != nil {
+		t.Fatalf("render SharePanel(not-shared): %v", err)
+	}
+	goldenCheck(t, "share_panel_not_shared", buf.Bytes())
+}
+
+// TestSharePanel_SharedGolden renders SharePanel with isShared=true and
+// compares to a golden baseline.
+// Generate baseline: go test ./internal/triage/... -run TestSharePanel -update
+func TestSharePanel_SharedGolden(t *testing.T) {
+	var buf bytes.Buffer
+	if err := triage.SharePanel("myproject", true).Render(context.Background(), &buf); err != nil {
+		t.Fatalf("render SharePanel(shared): %v", err)
+	}
+	goldenCheck(t, "share_panel_shared", buf.Bytes())
 }

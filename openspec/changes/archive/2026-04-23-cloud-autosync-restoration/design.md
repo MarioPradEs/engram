@@ -209,6 +209,91 @@ Every batch independently revertable per proposal rollback plan.
 | `docs/AGENT-SETUP.md` | MODIFIED | Autosync toggle |
 | `docs/ARCHITECTURE.md` | MODIFIED | Autosync box + lease note |
 
+## Interfaces / Contracts
+
+```go
+// transport.go — new constructor
+func NewMutationTransport(baseURL, token string) (*MutationTransport, error)
+
+type MutationTransport struct { /* same shape as RemoteTransport sans project */ }
+func (mt *MutationTransport) PushMutations(mutations []MutationEntry) (*PushMutationsResult, error)
+func (mt *MutationTransport) PullMutations(sinceSeq int64, limit int) (*PullMutationsResponse, error)
+
+// autosync/manager.go — ported + extended
+func (m *Manager) StopForUpgrade(project string) error
+func (m *Manager) ResumeAfterUpgrade(project string) error
+
+// cmd/engram/autosync_status.go
+type autosyncStatusAdapter struct {
+    mgr      cloudAutosyncManager
+    fallback server.SyncStatusProvider
+}
+func (a autosyncStatusAdapter) Status(project string) server.SyncStatus
+
+// cmd/engram/main.go
+func tryStartAutosync(s *store.Store, cfg store.Config) (cloudAutosyncManager, context.CancelFunc)
+```
+
+HTTP wire format:
+```json
+// POST /sync/mutations/push
+{"mutations":[{"entity":"observation","entity_key":"...","op":"upsert","payload":{...},"project":"engram"}]}
+// → 200 {"accepted":3,"last_seq":42}
+
+// GET /sync/mutations/pull?since_seq=41&limit=100
+// → 200 {"mutations":[{"seq":42,"entity":"observation","entity_key":"...","op":"upsert","payload":{...},"occurred_at":"..."}],"has_more":false}
+```
+
+## Testing Strategy
+
+| REQ | Test file | Layer |
+|---|---|---|
+| REQ autosync runs when env set | `cmd/engram/main_extra_test.go` | CLI |
+| REQ graceful shutdown | `cmd/engram/main_extra_test.go` | CLI |
+| REQ push round-trip | `cmd/engram/autosync_e2e_test.go` + `cloudserver/mutations_test.go` | Integration |
+| REQ pull round-trip | `cmd/engram/autosync_e2e_test.go` | Integration |
+| REQ enrollment gate (push 403) | `cloudserver/mutations_test.go` | Handler |
+| REQ enrollment gate (pull filter) | `cloudserver/mutations_test.go` | Handler |
+| REQ phase transitions | `autosync/manager_test.go` | Unit |
+| REQ backoff math | `autosync/manager_test.go` | Unit |
+| REQ NotifyDirty debounce | `autosync/manager_test.go` | Unit |
+| REQ StopForUpgrade/Resume | `autosync/manager_test.go` | Unit |
+| REQ transport retry (5xx) | `remote/transport_test.go` | Unit |
+| REQ transport error mapping | `remote/transport_test.go` | Unit |
+| REQ status adapter mapping | `cmd/engram/autosync_status_test.go` | Unit |
+| REQ local writes unblocked on cloud-down | `cmd/engram/autosync_e2e_test.go` | Integration |
+
+Strict TDD: every GREEN step requires a preceding RED in the same batch. No implementation without a failing test.
+
+## Rollout Plan
+
+Batch 1 — server + transport (RED-first per AD-10):
+- RED: push/pull handler tests + transport tests
+- GREEN: `cloudstore.InsertMutationBatch`, `ListMutationsSince`, `handleMutationPush`, `handleMutationPull`, `MutationTransport`
+- REFACTOR: extract shared transport helpers
+
+Batch 2 — manager port:
+- RED: phase transitions, backoff, NotifyDirty, StopForUpgrade tests against the (still-stub) manager
+- GREEN: replace stub with ported 451-line manager + adaptations
+- REFACTOR: verify `autosyncManagerAdapter` still compiles
+
+Batch 3 — status adapter:
+- RED: `autosync_status_test.go` with fake manager + fake fallback
+- GREEN: implement adapter
+- REFACTOR: ensure `storeSyncStatusProvider` untouched
+
+Batch 4 — cmd wiring:
+- RED: invert `TestCmdServeAutosyncLifecycleGating` to expect success; add new assertions
+- GREEN: delete fatal, add `tryStartAutosync`, wire `SetOnWrite` + `SetSyncStatus`
+- REFACTOR: align MCP path
+
+Batch 5 — e2e + docs:
+- RED: `autosync_e2e_test.go` round-trip
+- GREEN: any missing wiring (likely none)
+- REFACTOR + docs update
+
+Deployment note: server endpoints MUST be deployed to `engram.condetuti.com` BEFORE any client sets `ENGRAM_CLOUD_AUTOSYNC=1`. If not, transport returns 404 → manager enters `PhaseBackoff` with `reason_code=server_unsupported` per AD-8 of the proposal.
+
 ## Open Questions
 
 None — all 10 implementation decisions resolved.

@@ -4,7 +4,7 @@
 
 ## Context
 
-Phase 3 (memory-conflict-audit) shipped `engram conflicts scan` using FTS5+BM25 lexical detection. That catches ~80% of conflicts where memories share vocabulary. The remaining ~20% are vocabulary-different but semantically equivalent or contradictory pairs:
+Phase 3 (memory-conflict-audit) shipped `engram conflicts scan` using FTS5+BM25 lexical detection. That catches ~80% of conflicts where memories share vocabulary. The remaining ~20% are vocabulary-different but semantically equivalent or contradictory pairs — e.g.:
 
 - "Use Hexagonal Architecture" vs "Use Ports and Adapters" (compatible — same idea, different names)
 - "Use Postgres" vs "We migrated to MongoDB" (supersedes — newer replaces older)
@@ -47,4 +47,4 @@ FTS5 cannot see these because the tokens do not overlap. Phase 4 adds an LLM-jud
 
 ## Open questions resolved by user
 
-The exploration listed 6 open questions; all 6 are pre-answered in the propose-phase context (see proposal.md). Remaining open questions are minor and listed in proposal.md § Open Questions.
+The exploration listed 6 open questions; all 6 are pre-answered in the propose-phase context (see proposal.md). Remaining open questions are minor and listed in proposal.md §Open Questions.

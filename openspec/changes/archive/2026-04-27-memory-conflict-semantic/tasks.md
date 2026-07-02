@@ -20,7 +20,7 @@
 ## Phase B: ClaudeRunner + OpenCodeRunner + factory (sequential after A)
 
 - [x] B.1 RED — Write `internal/llm/claude_test.go`: table-driven tests via fake `runCLI` — clean JSON envelope, fence-wrapped JSON, malformed inner JSON, unknown relation → `ErrUnknownRelation`. [REQ: ClaudeRunner]
-- [x] B.2 GREEN — Create `internal/llm/claude.go`: `ClaudeRunner` with injectable `runCLI`; invokes `claude -p --output-format json --model haiku --max-turns 1`; strips fences; parses `.result`; captures `Model` + `DurationMS`. [REQ: ClaudeRunner]
+- [x] B.2 GREEN — Create `internal/llm/claude.go`: `ClaudeRunner` with injectable `runCLI`; invokes `claude -p --output-format json --model haiku --max-turns 1`; strips ```fences```; parses `.result`; captures `Model` + `DurationMS`. [REQ: ClaudeRunner]
 - [x] B.3 RED — Write `internal/llm/opencode_test.go`: table-driven tests via fake `runCLI` — valid NDJSON with `type="text"` event, missing text event → error, malformed part.text → error. [REQ: OpenCodeRunner]
 - [x] B.4 GREEN — Create `internal/llm/opencode.go`: `OpenCodeRunner` with injectable `runCLI`; invokes `opencode run --format json --pure`; scans NDJSON; picks `type=="text"` event; extracts `.part.text`; captures `Model` + `DurationMS`. [REQ: OpenCodeRunner]
 - [x] B.5 RED — Write `internal/llm/factory_test.go`: `"claude"` → `*ClaudeRunner`; `"opencode"` → `*OpenCodeRunner`; `""` → error naming `ENGRAM_AGENT_CLI`. [REQ: Runner factory]
@@ -76,8 +76,21 @@
 
 ---
 
-## Summary
+## Parallelism Map
 
-**Total: 30 tasks across 8 phases. All marked COMPLETE.**
+```
+A (serial) → B (serial) → C ‖ D → E (gate) → F ‖ G → H
+```
 
-Parallelism structure: A (serial) → B (serial) → C || D → E (gate) → F || G → H
+| Phase | Files Touched | Parallel With |
+|-------|--------------|---------------|
+| A | internal/llm/ (new: runner.go, prompt.go, cost.go + tests) | none |
+| B | internal/llm/ (new: claude.go, opencode.go, factory.go + tests) | none |
+| C | internal/store/relations.go, runner.go (new), *_test.go | D |
+| D | cmd/engram/conflicts.go, main.go, conflicts_test.go | C |
+| E | integration gate — run tests only | none |
+| F | internal/server/server.go, server_test.go | G |
+| G | internal/mcp/mcp.go, mcp_test.go | F |
+| H | docs/PLUGINS.md, DOCS.md | none |
+
+**Total: 27 tasks across 8 phases.**

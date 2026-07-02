@@ -100,17 +100,23 @@ func (s *CloudServer) handleSelfUnenrollProject(w http.ResponseWriter, r *http.R
 			continue
 		}
 		// Filter out the project (idempotent: no-op if absent).
-		newEnrolled := make([]string, 0, len(p.Enrolled))
+		originalLen := len(p.Enrolled)
+		newEnrolled := make([]string, 0, originalLen)
 		for _, ep := range p.Enrolled {
 			if !strings.EqualFold(ep, project) {
 				newEnrolled = append(newEnrolled, ep)
 			}
 		}
+		// Only write when something actually changed — users.yaml must not be
+		// modified unnecessarily on a no-op unenroll (spec idempotency requirement).
+		changed := len(newEnrolled) != originalLen
 		principals[i].Enrolled = newEnrolled
-		if err := s.writePrincipalsAtomic(principals, usersPath,
-			fmt.Sprintf("feat(users): %s self-unenrolled project %s", email, project)); err != nil {
-			http.Error(w, fmt.Sprintf("write error: %v", err), http.StatusInternalServerError)
-			return
+		if changed {
+			if err := s.writePrincipalsAtomic(principals, usersPath,
+				fmt.Sprintf("feat(users): %s self-unenrolled project %s", email, project)); err != nil {
+				http.Error(w, fmt.Sprintf("write error: %v", err), http.StatusInternalServerError)
+				return
+			}
 		}
 		jsonResponse(w, http.StatusOK, map[string]any{"status": "ok"})
 		return

@@ -269,6 +269,56 @@ func TestSelfUnenrollProject_Idempotent(t *testing.T) {
 	}
 }
 
+// ─── Phase 12.3 — No-op unenroll must not modify users.yaml ──────────────────
+
+// TestSelfUnenrollProject_NoOpDoesNotWrite asserts that unenrolling a project
+// the caller is NOT enrolled in (idempotent / no-op case) does NOT write or
+// modify users.yaml.  Spec requirement: "users.yaml is not modified unnecessarily."
+func TestSelfUnenrollProject_NoOpDoesNotWrite(t *testing.T) {
+	// alice starts with no enrolled projects (selfEnrollBaseYAML).
+	srv, _, usersPath := buildSelfEnrollServer(t, selfEnrollBaseYAML)
+	token := mintEnrollJWT(t, "alice@vivastudios.com")
+
+	// Capture file state before the request.
+	statBefore, err := os.Stat(usersPath)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+	bytesBefore, err := os.ReadFile(usersPath)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+
+	// DELETE a project that alice is NOT enrolled in → must be a pure no-op.
+	req := httptest.NewRequest(http.MethodDelete, "/user/enrolled-projects",
+		selfEnrollJSON(t, map[string]string{"project": "not-enrolled-project"}))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for no-op unenroll, got %d body=%q", rec.Code, rec.Body.String())
+	}
+
+	// Assert users.yaml was NOT modified (neither content nor mtime).
+	statAfter, err := os.Stat(usersPath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	bytesAfter, err := os.ReadFile(usersPath)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if !statBefore.ModTime().Equal(statAfter.ModTime()) {
+		t.Errorf("users.yaml mtime changed: before=%v after=%v — spurious write on no-op unenroll",
+			statBefore.ModTime(), statAfter.ModTime())
+	}
+	if !bytes.Equal(bytesBefore, bytesAfter) {
+		t.Errorf("users.yaml content changed on no-op unenroll:\nbefore: %s\nafter:  %s",
+			bytesBefore, bytesAfter)
+	}
+}
+
 // ─── Phase 13.1 — Concurrent safety ──────────────────────────────────────────
 
 func TestSelfEnroll_Concurrent(t *testing.T) {

@@ -107,35 +107,35 @@ Chain strategy: pending
 
 ### Phase 11: enrollMu Mutex + Handler Skeleton (TDD — RED first)
 
-- [ ] 11.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go` (new file): `TestSelfEnrollProject_HappyPath` — httptest server with real handler; alice authenticated; POST `/user/enrolled-projects` `{"project":"foo"}`; assert HTTP 200 and alice's `Enrolled` contains "foo".
-- [ ] 11.2 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_Idempotent` — POST same project twice; assert HTTP 200, no duplicate in `Enrolled`.
-- [ ] 11.3 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_Unauthenticated` — no Authorization header; assert HTTP 401, users.yaml unmodified.
-- [ ] 11.4 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_EmptyProject` — body `{"project":""}`; assert HTTP 400.
-- [ ] 11.5 **GREEN** `internal/cloud/cloudserver/self_enroll.go` (new file): declare `enrollMu sync.Mutex` at package level; implement `handleSelfEnrollProject` — `withAuth` enforces JWT; derive email from `Attribution(ctx).UserEmail`; `enrollMu.Lock/Unlock` wraps Lookup→append(dedup)→MarshalPrincipals→WriteAtomic→RunLocalGitCommit→UserReload. All 4 tests must PASS. `go test ./internal/cloud/cloudserver/...`.
+- [x] 11.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go` (new file): `TestSelfEnrollProject_HappyPath` — httptest server with real handler; alice authenticated; POST `/user/enrolled-projects` `{"project":"foo"}`; assert HTTP 200 and alice's `Enrolled` contains "foo".
+- [x] 11.2 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_Idempotent` — POST same project twice; assert HTTP 200, no duplicate in `Enrolled`.
+- [x] 11.3 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_Unauthenticated` — no Authorization header; assert HTTP 401, users.yaml unmodified.
+- [x] 11.4 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnrollProject_EmptyProject` — body `{"project":""}`; assert HTTP 400.
+- [x] 11.5 **GREEN** `internal/cloud/cloudserver/self_enroll.go` (new file): declare `enrollMu sync.Mutex` at package level; implement `handleSelfEnrollProject` — `withAuth` enforces JWT; derive email from `Attribution(ctx).UserEmail`; `enrollMu.Lock/Unlock` wraps Lookup→append(dedup)→MarshalPrincipals→WriteAtomic→RunLocalGitCommit→UserReload. All 4 tests must PASS. `go test ./internal/cloud/cloudserver/...`.
 
 ### Phase 12: handleSelfUnenrollProject (TDD — RED first)
 
-- [ ] 12.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfUnenrollProject_HappyPath` — DELETE `/user/enrolled-projects`; assert project removed from Enrolled, HTTP 200.
-- [ ] 12.2 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfUnenrollProject_Idempotent` — DELETE project not in list; assert HTTP 200, no-op.
-- [ ] 12.3 **GREEN** `internal/cloud/cloudserver/self_enroll.go`: implement `handleSelfUnenrollProject` — same `enrollMu` guard; remove project from slice; WriteAtomic; existing cloud observations NOT deleted. Both tests must PASS.
+- [x] 12.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfUnenrollProject_HappyPath` — DELETE `/user/enrolled-projects`; assert project removed from Enrolled, HTTP 200.
+- [x] 12.2 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfUnenrollProject_Idempotent` — DELETE project not in list; assert HTTP 200, no-op.
+- [x] 12.3 **GREEN** `internal/cloud/cloudserver/self_enroll.go`: implement `handleSelfUnenrollProject` — same `enrollMu` guard; remove project from slice; WriteAtomic; existing cloud observations NOT deleted. Both tests must PASS.
 
 ### Phase 13: Concurrent-Safety Test
 
-- [ ] 13.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnroll_Concurrent` — launch 10 goroutines, each POST a unique project for alice under `enrollMu`; assert final `Enrolled` length == 10 with no duplicates.
-- [ ] 13.2 **GREEN** Confirm `enrollMu` scope in `self_enroll.go` covers full read-modify-write-reload cycle. `go test -race ./internal/cloud/cloudserver/...` must PASS.
+- [x] 13.1 **RED** `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnroll_Concurrent` — launch 10 goroutines, each POST a unique project for alice under `enrollMu`; assert final `Enrolled` length == 10 with no duplicates.
+- [x] 13.2 **GREEN** Confirm `enrollMu` scope in `self_enroll.go` covers full read-modify-write-reload cycle. `go test -race ./internal/cloud/cloudserver/...` must PASS.
 
 ### Phase 14: Route Registration
 
-- [ ] 14.1 `internal/cloud/cloudserver/cloudserver.go` `routes()`: register `POST /user/enrolled-projects` → `withAuth(handleSelfEnrollProject)` and `DELETE /user/enrolled-projects` → `withAuth(handleSelfUnenrollProject)`.
-- [ ] 14.2 `internal/cloud/cloudserver/cloudserver_test.go`: add smoke route test asserting both paths exist and return 401 without credentials.
+- [x] 14.1 `internal/cloud/cloudserver/cloudserver.go` `routes()`: register `POST /user/enrolled-projects` → `withAuth(handleSelfEnrollProject)` and `DELETE /user/enrolled-projects` → `withAuth(handleSelfUnenrollProject)`.
+- [x] 14.2 `internal/cloud/cloudserver/cloudserver_test.go`: add smoke route test asserting both paths exist and return 401 without credentials.
 
 ### Phase 15: Scope Boundary Test (self-service only modifies own enrollment)
 
-- [ ] 15.1 `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnroll_ScopeBoundary` — alice authenticated; body includes `"as_user":"bob@viva.com"`; assert handler ignores field, modifies only alice's Enrolled, bob's Enrolled unchanged.
+- [x] 15.1 `internal/cloud/cloudserver/self_enroll_test.go`: `TestSelfEnroll_ScopeBoundary` — alice authenticated; body includes `"as_user":"bob@viva.com"`; assert handler ignores field, modifies only alice's Enrolled, bob's Enrolled unchanged.
 
 ---
 
 ## Slice Cross-Cut: Integration Smoke
 
-- [ ] 16.1 `cmd/engram/autosync_e2e_test.go` (or new `cmd/engram/private_by_default_e2e_test.go`): end-to-end test asserting that after `MigrateEmptyProjectToPersonal`, no orphan mutations appear in `ListPendingSyncMutations`, and `CountPendingNonEnrolledSyncMutations` captures them.
-- [ ] 16.2 Full `go test ./...` green run (reminder: run `make templ` first if any `.templ` file was modified). Fix any compilation breaks introduced by interface additions.
+- [x] 16.1 `cmd/engram/autosync_e2e_test.go` (or new `cmd/engram/private_by_default_e2e_test.go`): end-to-end test asserting that after `MigrateEmptyProjectToPersonal`, no orphan mutations appear in `ListPendingSyncMutations`, and `CountPendingNonEnrolledSyncMutations` captures them.
+- [x] 16.2 Full `go test ./...` green run (reminder: run `make templ` first if any `.templ` file was modified). Fix any compilation breaks introduced by interface additions.

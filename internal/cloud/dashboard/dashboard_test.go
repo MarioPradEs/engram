@@ -977,7 +977,7 @@ func TestDashboardLayoutHTMLStructure(t *testing.T) {
 		{"div", "shell-backdrop"},
 		{"div", "app-shell"},
 		{"header", "shell-header"},
-		{"div", "brand-stack"},
+		{"div", "shell-status"},
 		{"nav", "shell-nav"},
 		{"main", "shell-main"},
 		{"footer", "shell-footer"},
@@ -997,7 +997,7 @@ func TestStatusRibbonAndFooterPresent(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
 	body := rec.Body.String()
 	for _, marker := range []string{
-		"status-ribbon",
+		"shell-status",
 		"status-pill",
 		"CLOUD ACTIVE",
 		"ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY",
@@ -2654,7 +2654,7 @@ func TestDashboardStatsFullPageShowsStatusRibbon(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, marker := range []string{
-		"status-ribbon",
+		"shell-status",
 		"CLOUD ACTIVE",
 		"ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY",
 	} {
@@ -2674,7 +2674,7 @@ func TestDashboardActivityFullPageShowsStatusRibbon(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, marker := range []string{
-		"status-ribbon",
+		"shell-status",
 		"CLOUD ACTIVE",
 		"ENGRAM CLOUD / SHARED MEMORY INDEX / LIVE SYNC READY",
 	} {

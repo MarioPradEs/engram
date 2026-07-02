@@ -154,6 +154,76 @@ Pre-existing failures in store package (`TestMigrate_Idempotent`, `TestNewErrorB
 
 ---
 
+## C-1 Bug Fix — Production WithEnrollmentStore Wiring
+
+**Branch**: `feat/share-by-triage-p1-triage-ui`
+**Status**: DONE — fix applied and verified GREEN
+
+### Bug fixed
+
+`newTriageServer` in `cmd/engram/triage.go` built `ms` (a `*StoreAdapter` wrapped as
+`triage.MutableTriageStore`) but never called `srv.WithEnrollmentStore(ms)`, leaving
+`Server.enrollStore` nil in production. This caused `handleShareProject` and
+`handleUnshareProject` to return 503 "enrollment store not configured" at step 3
+(after `serverEnrollFn` succeeded), making share/unshare non-functional even with a
+valid JWT.
+
+### TDD cycle (Strict TDD — RED → GREEN)
+
+**RED**: Added `TestNewTriageServer_WiresEnrollmentStore` to
+`cmd/engram/triage_test.go`. The test:
+  - Starts a fake httptest server at cloudBaseURLFn so serverEnrollFn succeeds (200)
+  - Writes a non-expired credentials.json so bearerToken != "" (bypasses "not logged in" 502)
+  - Calls the real factory with a non-nil *store.Store
+  - Sends POST /project/test-proj/share (no Origin header → CSRF passes)
+  - Asserts body does NOT contain "enrollment store not configured"
+  - **Before fix**: FAILED — code=503, body="share not available — enrollment store not configured"
+
+**GREEN**: Added in `newTriageServer` (after WithServerUnenrollFn):
+```go
+if ms != nil {
+    srv.WithEnrollmentStore(ms.(triage.EnrollmentStore))
+}
+```
+The guard mirrors the existing `if s != nil { ms = ... }` guard so the nil path
+(test stubs with s==nil) is preserved. Type assertion is safe: the concrete value
+of ms is always `*StoreAdapter` which satisfies `EnrollmentStore` (EnrollProject +
+UnenrollProject proxies, verified by compile-time assertion in handlers_test.go).
+
+### Test results
+
+```
+ok  github.com/Gentleman-Programming/engram/cmd/engram   (TestCmdTriage* + TestNewTriageServer* all PASS — 10/10 including new TestNewTriageServer_WiresEnrollmentStore)
+ok  github.com/Gentleman-Programming/engram/internal/triage  3.062s (88+ tests all PASS)
+```
+
+Pre-existing unrelated failures in cmd/engram (cloud/sync tests: TestCmdCloudStatus*,
+TestResolveCloudRuntimeConfig*, Windows SQLite file-lock) are NOT caused by this fix.
+
+### Files changed
+
+| File | Action |
+|------|--------|
+| `cmd/engram/triage.go` | Modified — added `if ms != nil { srv.WithEnrollmentStore(ms.(triage.EnrollmentStore)) }` |
+| `cmd/engram/triage_test.go` | Modified — added `TestNewTriageServer_WiresEnrollmentStore` (+ imports: net/http/httptest, time) |
+
+### Phase 5.3 tasks update
+
+Phase 5.3 ("wire WithEnrollmentStore in production newTriageServer") is now COMPLETE.
+The production factory wires all four Phase 5 dependencies:
+- `srv.SetCwdProject` ✓ (pre-existing)
+- `srv.WithBearerToken` ✓ (Phase 10)
+- `srv.WithServerEnrollFn` ✓ (Phase 10)
+- `srv.WithServerUnenrollFn` ✓ (Phase 10)
+- `srv.WithEnrollmentStore` ✓ **(C-1 fix — this batch)**
+
+### Deferred follow-ups (out of scope for PR2)
+
+- **W-1**: Persistent "Not logged in" UI banner — no frontend indicator when credentials absent
+- **W-2**: Construction-time enforcement of enrollment store — making `WithEnrollmentStore` mandatory at build time rather than relying on the nil guard in handlers
+
+---
+
 ## What remains — Batch 3+ (Phases 11–16)
 
 **Phase 11-15: Slice 3 — Self-Service Server Endpoint (cloudserver)**

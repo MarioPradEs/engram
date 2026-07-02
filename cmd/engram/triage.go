@@ -108,6 +108,15 @@ var newTriageServer = func(s *store.Store, port int) triageStarter {
 	srv.WithBearerToken(bearerToken)
 	srv.WithServerEnrollFn(buildEnrollHTTPFn(http.MethodPost))
 	srv.WithServerUnenrollFn(buildEnrollHTTPFn(http.MethodDelete))
+
+	// C-1: wire the enrollment store so handleShareProject / handleUnshareProject
+	// can client-enroll or unenroll the project in local SQLite.  The concrete
+	// type of ms is *triage.StoreAdapter, which satisfies triage.EnrollmentStore
+	// via its EnrollProject / UnenrollProject proxies.  Guard mirrors the ms
+	// guard above: skip when s == nil (test stub path keeps enrollStore nil).
+	if ms != nil {
+		srv.WithEnrollmentStore(ms.(triage.EnrollmentStore))
+	}
 	return srv
 }
 

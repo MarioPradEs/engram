@@ -181,6 +181,10 @@ func (cs *CloudStore) WriteChunkWithAttribution(ctx context.Context, project, ch
 	}
 
 	// Idempotency check: if the chunk already exists with the same payload, skip insert.
+	// NOTE: created_by is first-write-wins here — a later authenticated re-push of an
+	// identical payload returns early and does NOT overwrite a created_by stamped by an
+	// earlier unauthenticated write (e.g. an OS username). Such legacy rows need a
+	// one-off backfill; a re-sync will not self-heal them.
 	var existingPayload []byte
 	err = cs.db.QueryRowContext(ctx, `SELECT payload::text FROM cloud_chunks WHERE project_name = $1 AND chunk_id = $2`, project, chunkID).Scan(&existingPayload)
 	if err == nil {
@@ -222,10 +226,19 @@ func (cs *CloudStore) WriteChunkWithAttribution(ctx context.Context, project, ch
 	}()
 
 	counts := summarizeChunk(payload)
+	// Stamp the authenticated user's email as created_by so the dashboard
+	// "Contributor" column reflects who pushed the chunk (server-authoritative,
+	// derived from the verified JWT — not the client-reported OS username).
+	// Fall back to the client-provided value only when no identity is available
+	// (local sync / non-OAuth deploy), mirroring InsertMutationBatch.
+	effectiveCreatedBy := strings.TrimSpace(attr.UserEmail)
+	if effectiveCreatedBy == "" {
+		effectiveCreatedBy = strings.TrimSpace(createdBy)
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO cloud_chunks (project_name, chunk_id, created_by, client_created_at, payload, sessions_count, observations_count, prompts_count)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		project, strings.TrimSpace(chunkID), strings.TrimSpace(createdBy), originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts)
+		project, strings.TrimSpace(chunkID), effectiveCreatedBy, originCreatedAt, payload, counts.sessions, counts.observations, counts.prompts)
 	if err != nil {
 		if isUniqueViolation(err) {
 			conflictErr := cs.resolveChunkConflict(ctx, project, chunkID, payload)

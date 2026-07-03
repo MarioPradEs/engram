@@ -235,6 +235,19 @@ func TestWriteChunkWithAttributionGateBAndStamp(t *testing.T) {
 	if sessCount != 1 {
 		t.Errorf("expected session mutation stored, got %d", sessCount)
 	}
+
+	// ── Assert: cloud_chunks.created_by is the AUTHENTICATED email, NOT the
+	// client-provided OS username. This is the server-authoritative attribution
+	// that lets the dashboard Contributors tab identify who pushed each chunk. ──
+	var chunkCreatedBy string
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT COALESCE(created_by,'') FROM cloud_chunks WHERE project_name = $1 AND chunk_id = $2
+	`, project, chunkID).Scan(&chunkCreatedBy); err != nil {
+		t.Fatalf("query cloud_chunks.created_by: %v", err)
+	}
+	if chunkCreatedBy != attr.UserEmail {
+		t.Errorf("cloud_chunks.created_by: got %q, want authenticated email %q (must NOT be client-provided %q)", chunkCreatedBy, attr.UserEmail, "chunk-tester")
+	}
 }
 
 // TestWriteChunkWithAttributionFallsBackToNonPersonalWhenAttrZero checks that
@@ -276,6 +289,18 @@ func TestWriteChunkWithAttributionFallsBackToNonPersonalWhenAttrZero(t *testing.
 	// With zero auth, no Gate B — entry is stored.
 	if count != 1 {
 		t.Errorf("expected personal obs stored when no auth, got %d", count)
+	}
+
+	// ── Assert: with zero Attribution (local / non-OAuth deploy), created_by
+	// falls back to the client-provided value so local attribution is preserved. ──
+	var noAuthCreatedBy string
+	if err := cs.db.QueryRowContext(ctx, `
+		SELECT COALESCE(created_by,'') FROM cloud_chunks WHERE project_name = $1 AND chunk_id = $2
+	`, project, chunkID).Scan(&noAuthCreatedBy); err != nil {
+		t.Fatalf("query cloud_chunks.created_by (no attr): %v", err)
+	}
+	if noAuthCreatedBy != "anon" {
+		t.Errorf("cloud_chunks.created_by (zero attr): got %q, want client fallback %q", noAuthCreatedBy, "anon")
 	}
 }
 

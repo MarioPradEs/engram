@@ -138,13 +138,13 @@ Artifact store: hybrid
 
 > Parallel with E and G (after B). Depends only on schema columns from B.
 
-- [ ] F.1 **[RED]** Append to `internal/store/store_test.go`: `TestAddObservation_DecayDefaults` table-driven test for `decision` (+6mo), `policy` (+12mo), `preference` (+3mo), `observation` (NULL). Assert `review_after` within ±1 second of expected; assert `expires_at` NULL for all.
+- [x] F.1 **[RED]** Append to `internal/store/store_test.go`: `TestAddObservation_DecayDefaults` table-driven test for `decision` (+6mo), `policy` (+12mo), `preference` (+3mo), `observation` (NULL). Assert `review_after` within ±1 second of expected; assert `expires_at` NULL for all.
   - REQ-006 | Design §10
 
-- [ ] F.2 **[RED]** Append: `TestAddObservation_DecayNotAppliedToExistingRows` — migrate legacy DB, assert existing rows have `review_after=NULL` after migration.
+- [x] F.2 **[RED]** Append: `TestAddObservation_DecayNotAppliedToExistingRows` — migrate legacy DB, assert existing rows have `review_after=NULL` after migration.
   - REQ-006 negative | Design §10
 
-- [ ] F.3 **[GREEN]** Add decay constants in `internal/store/store.go` (`decayDecisionMonths=6`, `decayPolicyMonths=12`, `decayPreferenceMonths=3`). Extend `AddObservation`: after successful insert, compute and `UPDATE observations SET review_after=? WHERE id=?` for new inserts only; `expires_at` left NULL.
+- [x] F.3 **[GREEN]** Add decay constants in `internal/store/store.go` (`decayDecisionMonths=6`, `decayPolicyMonths=12`, `decayPreferenceMonths=3`). Extend `AddObservation`: after successful insert, compute and `UPDATE observations SET review_after=? WHERE id=?` for new inserts only; `expires_at` left NULL.
   - REQ-006 | Design §10
   - Acceptance: F.1 and F.2 pass; `go test ./internal/store/...` green
 
@@ -154,19 +154,19 @@ Artifact store: hybrid
 
 > Parallel with E, F (after D is done).
 
-- [ ] G.1 **[RED]** Create `internal/mcp/mcp_conflict_loop_test.go`. Write `TestConflictLoop_SaveJudgeSearch`: save → candidates returned → `mem_judge` → search shows supersedes annotation.
+- [x] G.1 **[RED]** Create `internal/mcp/mcp_conflict_loop_test.go`. Write `TestConflictLoop_SaveJudgeSearch`: save → candidates returned → `mem_judge` → search shows supersedes annotation.
   - REQ-001+002+003 integration | Design §11.2
 
-- [ ] G.2 **[RED]** Write `TestConflictLoop_MultiActor`: two judge calls for same pair → both rows persist; search shows both annotations.
+- [x] G.2 **[RED]** Write `TestConflictLoop_MultiActor`: two judge calls for same pair → both rows persist; search shows both annotations.
   - REQ-004 integration | Design §11.2
 
-- [ ] G.3 **[RED]** Write `TestConflictLoop_Orphaning`: save two obs, judge, hard-delete source → relation orphaned → search annotation absent.
+- [x] G.3 **[RED]** Write `TestConflictLoop_Orphaning`: save two obs, judge, hard-delete source → relation orphaned → search annotation absent.
   - REQ-010 integration | Design §8
 
-- [ ] G.4 **[RED]** Write sync regression test (append to `internal/sync/sync_test.go` or new file): insert relation row, assert `sync_mutations` count unchanged; assert observation sync payload does NOT contain `review_after`/`embedding*` fields.
+- [x] G.4 **[RED]** Write sync regression test (append to `internal/sync/sync_test.go` or new file): insert relation row, assert `sync_mutations` count unchanged; assert observation sync payload does NOT contain `review_after`/`embedding*` fields.
   - REQ-009 | Design §11.3
 
-- [ ] G.5 **[GREEN]** Make G.1–G.4 pass (wiring issues only — implementation already in place from C+D). No new logic expected.
+- [x] G.5 **[GREEN]** Make G.1–G.4 pass (wiring issues only — implementation already in place from C+D). No new logic expected.
   - Acceptance: `go test ./internal/mcp/... ./internal/sync/...` green
 
 ---
@@ -175,10 +175,10 @@ Artifact store: hybrid
 
 > Parallel. Can run after D.8. No code changes.
 
-- [ ] H.1 **[DOCS]** Update `docs/AGENT-SETUP.md`: document `mem_judge` tool (params, when it fires, example conversational flow). Note Phase 1 deferrals (cloud sync of relations, decay activation, pgvector).
+- [x] H.1 **[DOCS]** Update `docs/AGENT-SETUP.md`: document `mem_judge` tool (params, when it fires, example conversational flow). Note Phase 1 deferrals (cloud sync of relations, decay activation, pgvector).
   - REQ-007 | Design §6.1
 
-- [ ] H.2 **[DOCS]** Update `docs/PLUGINS.md` (or equivalent MCP tools reference): add `mem_judge` entry with param table (`judgment_id`, `relation`, `reason`, `evidence`, `confidence`) and response shape. Document new `mem_save` response fields and `mem_search` annotation format.
+- [x] H.2 **[DOCS]** Update `docs/PLUGINS.md` (or equivalent MCP tools reference): add `mem_judge` entry with param table (`judgment_id`, `relation`, `reason`, `evidence`, `confidence`) and response shape. Document new `mem_save` response fields and `mem_search` annotation format.
   - REQ-007 | Design §4, §5, §6
 
 ---

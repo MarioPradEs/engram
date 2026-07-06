@@ -69,6 +69,7 @@ type CloudServer struct {
 	// /auth endpoint fields (set by WithAuthEndpoint option).
 	authLoader    AuthUserLoader // user directory for /auth principal resolution
 	authJWTSecret string         // ENGRAM_JWT_SECRET for minting JWTs in /auth
+	jwtTTL        time.Duration  // configurable JWT lifetime; 0 means auth.DefaultJWTTTL
 	// userReloadFn is called by admin member-management write handlers to reload
 	// the in-memory user directory after a successful users.yaml write. (D4)
 	userReloadFn func() error
@@ -417,7 +418,7 @@ func (s *CloudServer) routes() {
 				Name:       p.Name,
 				Department: p.Department,
 				Role:       p.Role,
-			}, time.Now().UTC())
+			}, time.Now().UTC(), s.jwtTTL)
 		}
 	}
 	if s.auth == nil {

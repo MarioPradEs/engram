@@ -393,15 +393,20 @@ func (c *loginCommand) Run() error {
 			claims.Iat = now.Unix()
 		}
 		if claims.Exp == 0 {
-			claims.Exp = now.Unix() + 604800 // 7 days
+			// Use resolveJWTTTL so credentials.json ExpiresAt matches the minted JWT
+			// (eliminates the divergence between the two fields).
+			ttl := resolveJWTTTL()
+			claims.Exp = now.Add(ttl).Unix()
 		}
 		// Mint the JWT client-side (placeholder / test path).
+		// Pass claims.Exp-derived TTL so MintJWT overwrites to the SAME exp value.
 		secret := c.secret
 		if secret == "" {
 			secret = strings.Repeat("x", 32) // dev fallback — real servers use ENGRAM_JWT_SECRET
 		}
 		var mintErr error
-		tokenStr, mintErr = auth.MintJWT(secret, claims, now)
+		mintTTL := time.Duration(claims.Exp-now.Unix()) * time.Second
+		tokenStr, mintErr = auth.MintJWT(secret, claims, now, mintTTL)
 		if mintErr != nil {
 			return fmt.Errorf("login: mint jwt: %w", mintErr)
 		}

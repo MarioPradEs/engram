@@ -56,13 +56,13 @@ func TestDashboardSessionCodec_RoundTrip(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	ha := newTestHeaderAuthenticatorWithNow(t, secret, now)
 
-	// Mint a 7-day bearer JWT at "now".
+	// Mint a bearer JWT at "now".
 	bearerJWT, err := MintJWT(secret, JWTClaims{
 		Sub:   "mario@vivastudios.com",
 		Email: "mario@vivastudios.com",
 		Name:  "Mario Pradas",
 		Role:  "admin",
-	}, now)
+	}, now, 0)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestDashboardSessionCodec_TamperedHMAC(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	ha := newTestHeaderAuthenticatorWithNow(t, secret, now)
 
-	bearerJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, now)
+	bearerJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, now, 0)
 	sessionToken, _ := ha.MintDashboardSession(bearerJWT)
 
 	// Tamper: flip the last character of the HMAC signature part.
@@ -124,7 +124,7 @@ func TestDashboardSessionCodec_OuterExpired(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	// Mint the JWT and session token both at "now".
 	haMint := newTestHeaderAuthenticatorWithNow(t, secret, now)
-	bearerJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, now)
+	bearerJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, now, 0)
 
 	sessionToken, err := haMint.MintDashboardSession(bearerJWT)
 	if err != nil {
@@ -148,9 +148,10 @@ func TestDashboardSessionCodec_InnerJWTExpired(t *testing.T) {
 
 	secret := "thisis32bytesecretforthehmacsig!"
 
-	// Mint the JWT 8 days in the past so it is expired by the caller's standards.
+	// Mint the JWT at a fixed past time with a 7d TTL so it is expired when
+	// VerifyJWT is called 8 days later.
 	pastNow := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	expiredJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, pastNow)
+	expiredJWT, _ := MintJWT(secret, JWTClaims{Sub: "u", Email: "mario@vivastudios.com"}, pastNow, 7*24*time.Hour)
 
 	// Wrap it in a session minted at (pastNow + 6h) so outer env is valid.
 	// We parse at (pastNow + 7h) — outer envelope still valid (< 8h).

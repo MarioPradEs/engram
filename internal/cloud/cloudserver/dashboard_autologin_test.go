@@ -318,15 +318,15 @@ func TestExpiredJWT_ProtectedRoute_RedirectsToLogin(t *testing.T) {
 		t.Fatalf("NewHeaderAuthenticatorWithJWT: %v", err)
 	}
 
-	// Mint an EXPIRED inner JWT: issue time is 8 days in the past so that
-	// exp = issuedAt + 7 days is also in the past relative to time.Now().
+	// Mint an EXPIRED inner JWT: issue time is 8 days in the past with a 7-day TTL
+	// so that exp = issuedAt + 7d = yesterday, which is in the past.
 	expiredIssuedAt := time.Now().UTC().Add(-8 * 24 * time.Hour)
 	expiredJWT, err := cloudauth.MintJWT(jwtSecret, cloudauth.JWTClaims{
 		Sub:   "mario@vivastudios.com",
 		Email: "mario@vivastudios.com",
 		Name:  "Mario Pradas",
 		Role:  "admin",
-	}, expiredIssuedAt)
+	}, expiredIssuedAt, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("MintJWT (expired): %v", err)
 	}
@@ -356,6 +356,52 @@ func TestExpiredJWT_ProtectedRoute_RedirectsToLogin(t *testing.T) {
 	loc := rec.Header().Get("Location")
 	if !strings.Contains(loc, "/dashboard/login") {
 		t.Errorf("W3: redirect location should contain /dashboard/login, got %q", loc)
+	}
+}
+
+// TestAutoLogin_S1_CustomJWTTTL_HonoredInDashboardPath verifies S1:
+// When the server is configured with WithJWTTTL, the dashboard auto-login path
+// (autoLoginFromHeader, cloudserver.go L414) mints a JWT with exp-iat equal to
+// the custom TTL — not the 90-day default. This complements
+// TestAuthEndpointValidUser_redirectsWithTokenAndState (which covers the /auth
+// handleAuth path) by asserting the same TTL seam on the dashboard path.
+func TestAutoLogin_S1_CustomJWTTTL_HonoredInDashboardPath(t *testing.T) {
+	t.Parallel()
+
+	const customTTL = 48 * time.Hour
+	jwtSecret := strings.Repeat("s", 32)
+	loader := buildAuthTestLoader(t, autoLoginTestYAML)
+	ha, err := cloudauth.NewHeaderAuthenticatorWithJWT(loader, "", jwtSecret)
+	if err != nil {
+		t.Fatalf("S1: NewHeaderAuthenticatorWithJWT: %v", err)
+	}
+	srv := New(&fakeStore{}, ha, 0,
+		WithAuthEndpoint(loader, jwtSecret),
+		WithJWTTTL(customTTL),
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/login", nil)
+	req.Header.Set("X-Forwarded-Email", "mario@vivastudios.com")
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("S1: expected 303, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	cookie := extractSessionCookie(t, rec)
+	if cookie == nil {
+		t.Fatal("S1: expected Set-Cookie engram_dashboard_token, got none")
+	}
+
+	// Unwrap the outer session envelope to obtain the inner JWT, then decode it.
+	bearer := parseSessionCookieJWT(t, cookie.Value, jwtSecret, loader)
+	claims := decodeJWTPayload(t, bearer)
+	iat, _ := claims["iat"].(float64)
+	exp, _ := claims["exp"].(float64)
+	wantExpDiff := float64(48 * 3600) // 172800 seconds
+	if exp-iat != wantExpDiff {
+		t.Errorf("S1: expected exp-iat=%v (48h), got %v (default 90d would be %v)",
+			wantExpDiff, exp-iat, float64(90*24*3600))
 	}
 }
 

@@ -82,7 +82,8 @@ func (f *fakeReclassifyHook) Run(cfg store.Config) {
 }
 
 // TestLoginHappyPath verifies that a successful login stores the credentials.json
-// with the correct fields and file permissions 0600, and that exp-iat == 604800.
+// with the correct fields and file permissions 0600, and that a server-set
+// 7-day expiry is preserved verbatim in credentials.json.
 func TestLoginHappyPath(t *testing.T) {
 	cfg := testConfig(t)
 
@@ -96,7 +97,7 @@ func TestLoginHappyPath(t *testing.T) {
 		Name:       "Mario",
 		Department: "dev",
 		Role:       "admin",
-	}, now)
+	}, now, 0)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestLoginHappyPath(t *testing.T) {
 			Department: "dev",
 			Role:       "admin",
 			Iat:        now.Unix(),
-			Exp:        now.Unix() + 604800,
+			Exp:        now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 	browser := &fakeBrowserOpener{}
@@ -141,11 +142,11 @@ func TestLoginHappyPath(t *testing.T) {
 	_ = jwtToken
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  browser,
-		clock:    clock,
-		secret:   secret,
+		browser:   browser,
+		clock:     clock,
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -170,7 +171,7 @@ func TestLoginHappyPath(t *testing.T) {
 		t.Error("access_token must not be empty")
 	}
 
-	// Verify exp-iat == 604800 (7 days).
+	// Verify the server-set 7-day expiry is preserved in credentials.json.
 	issuedAt, err := time.Parse(time.RFC3339, creds.IssuedAt)
 	if err != nil {
 		t.Fatalf("parse issued_at: %v", err)
@@ -217,7 +218,7 @@ func TestLoginPullFailureDoesNotBlockPush(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -241,11 +242,11 @@ func TestLoginPullFailureDoesNotBlockPush(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 
 	stdout, stderr := captureOutput(t, func() {
@@ -279,7 +280,7 @@ func TestLoginPushFailureIsWarningNotError(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -302,11 +303,11 @@ func TestLoginPushFailureIsWarningNotError(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 
 	// Login must NOT return an error even when push fails.
@@ -340,7 +341,7 @@ func TestLoginReclassifyCalledBeforePush(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -364,11 +365,11 @@ func TestLoginReclassifyCalledBeforePush(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -399,7 +400,7 @@ func TestLoginGeneralEnrollment(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -422,11 +423,11 @@ func TestLoginGeneralEnrollment(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -537,7 +538,7 @@ func TestLoginMarksPushGateIncompleteBeforeReclassify(t *testing.T) {
 			Sub:   "gate-test@vivastudios.com",
 			Email: "gate-test@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -585,11 +586,11 @@ func TestLoginMarksPushGateIncompleteBeforeReclassify(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -656,7 +657,7 @@ func TestLoopbackExchangerHappyPath(t *testing.T) {
 			Name:       "Alice",
 			Department: "dev",
 			Role:       "admin",
-		}, now)
+		}, now, 0)
 		if err != nil {
 			http.Error(w, "mint failed", http.StatusInternalServerError)
 			return
@@ -679,8 +680,8 @@ func TestLoopbackExchangerHappyPath(t *testing.T) {
 	if claims.Email != "alice@vivastudios.com" {
 		t.Errorf("email: got %q, want alice@vivastudios.com", claims.Email)
 	}
-	if claims.Exp-claims.Iat != 604800 {
-		t.Errorf("exp-iat: got %d, want 604800", claims.Exp-claims.Iat)
+	if claims.Exp-claims.Iat != int64(90*24*time.Hour/time.Second) {
+		t.Errorf("exp-iat: got %d, want %d (90d default TTL)", claims.Exp-claims.Iat, int64(90*24*time.Hour/time.Second))
 	}
 	if !strings.Contains(browser.openedURL, "/auth") {
 		t.Errorf("expected browser URL to contain /auth, got %q", browser.openedURL)
@@ -703,7 +704,7 @@ func TestLoopbackExchangerStateValidation(t *testing.T) {
 		tok, _ := auth.MintJWT(secret, auth.JWTClaims{
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
-		}, now)
+		}, now, 0)
 		// Send WRONG state — exchanger must reject this.
 		http.Redirect(w, r, redirectURI+"?token="+tok+"&state=WRONG_STATE", http.StatusFound)
 	}))
@@ -737,7 +738,7 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 			Name:       "Mario",
 			Department: "dev",
 			Role:       "admin",
-		}, now)
+		}, now, 0)
 		if err != nil {
 			http.Error(w, "mint error", http.StatusInternalServerError)
 			return
@@ -795,7 +796,7 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 	if creds.AccessToken == "" {
 		t.Error("access_token must not be empty")
 	}
-	// Verify the token is the server-minted one (exp-iat == 604800).
+	// Verify the token is the server-minted one (exp-iat == 90d default TTL).
 	issuedAt, err := time.Parse(time.RFC3339, creds.IssuedAt)
 	if err != nil {
 		t.Fatalf("parse issued_at: %v", err)
@@ -804,8 +805,8 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse expires_at: %v", err)
 	}
-	if expiresAt.Sub(issuedAt) != 7*24*time.Hour {
-		t.Errorf("token lifetime: got %v, want 168h", expiresAt.Sub(issuedAt))
+	if expiresAt.Sub(issuedAt) != 90*24*time.Hour {
+		t.Errorf("token lifetime: got %v, want %v (90d default)", expiresAt.Sub(issuedAt), 90*24*time.Hour)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(credPath)
@@ -885,7 +886,7 @@ func TestPostLoginSyncSendsBearerToken(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -934,7 +935,7 @@ func TestPostLoginSyncSummaryPrinted(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 

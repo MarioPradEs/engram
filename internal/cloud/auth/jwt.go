@@ -10,7 +10,12 @@ import (
 	"time"
 )
 
-const jwtExpSeconds = 604800 // 7 days
+// DefaultJWTTTL is the lifetime of a JWT when ENGRAM_JWT_TTL is not set (90 days).
+const DefaultJWTTTL = 90 * 24 * time.Hour
+
+// MinJWTTTL is the minimum allowed JWT lifetime (24 hours).
+// The floor must exceed the 8-hour dashboard outer session envelope.
+const MinJWTTTL = 24 * time.Hour
 
 // jwtHeader is the fixed JOSE header for all tokens issued by this package.
 // alg=HS256 (HMAC-SHA256), typ=JWT.
@@ -30,14 +35,18 @@ type JWTClaims struct {
 
 // MintJWT mints a signed HS256 JWT with the 7 standard claims.
 // secret must be at least 32 bytes. now is the issuance time (enables
-// deterministic tests). The returned token is header.payload.signature
-// in base64url encoding with no padding (RFC 7519).
-func MintJWT(secret string, claims JWTClaims, now time.Time) (string, error) {
+// deterministic tests). ttl is the token lifetime; if ttl <= 0, DefaultJWTTTL
+// is used. The returned token is header.payload.signature in base64url encoding
+// with no padding (RFC 7519).
+func MintJWT(secret string, claims JWTClaims, now time.Time, ttl time.Duration) (string, error) {
 	if len(secret) < 32 {
 		return "", ErrSecretTooShort
 	}
+	if ttl <= 0 {
+		ttl = DefaultJWTTTL
+	}
 	claims.Iat = now.Unix()
-	claims.Exp = now.Unix() + jwtExpSeconds
+	claims.Exp = now.Add(ttl).Unix()
 
 	payloadBytes, err := json.Marshal(claims)
 	if err != nil {

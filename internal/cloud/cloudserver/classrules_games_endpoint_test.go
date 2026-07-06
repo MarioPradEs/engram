@@ -27,7 +27,7 @@ func mintMemberBearer(t *testing.T, email, jwtSecret string) string {
 		Sub:   email,
 		Email: email,
 		Role:  "member",
-	}, testJWTNow())
+	}, testJWTNow(), 0)
 	if err != nil {
 		t.Fatalf("mintMemberBearer: MintJWT: %v", err)
 	}
@@ -41,7 +41,7 @@ func mintAdminBearer(t *testing.T, email, jwtSecret string) string {
 		Sub:   email,
 		Email: email,
 		Role:  "admin",
-	}, testJWTNow())
+	}, testJWTNow(), 0)
 	if err != nil {
 		t.Fatalf("mintAdminBearer: MintJWT: %v", err)
 	}

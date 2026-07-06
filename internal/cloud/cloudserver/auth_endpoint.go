@@ -91,7 +91,7 @@ func (s *CloudServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Mint 7-day JWT.
+	// 5. Mint configurable-TTL JWT.
 	secret := s.authJWTSecret
 	if len(secret) < 32 {
 		http.Error(w, "internal error: jwt secret too short or not configured", http.StatusInternalServerError)
@@ -103,7 +103,7 @@ func (s *CloudServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 		Name:       p.Name,
 		Department: p.Department,
 		Role:       p.Role,
-	}, time.Now().UTC())
+	}, time.Now().UTC(), s.jwtTTL)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("internal error: mint jwt: %v", err), http.StatusInternalServerError)
 		return

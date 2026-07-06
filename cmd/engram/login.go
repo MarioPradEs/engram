@@ -401,7 +401,7 @@ func (c *loginCommand) Run() error {
 			secret = strings.Repeat("x", 32) // dev fallback — real servers use ENGRAM_JWT_SECRET
 		}
 		var mintErr error
-		tokenStr, mintErr = auth.MintJWT(secret, claims, now)
+		tokenStr, mintErr = auth.MintJWT(secret, claims, now, 0)
 		if mintErr != nil {
 			return fmt.Errorf("login: mint jwt: %w", mintErr)
 		}

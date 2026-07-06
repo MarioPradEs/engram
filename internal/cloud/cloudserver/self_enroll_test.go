@@ -101,7 +101,7 @@ func mintEnrollJWT(t *testing.T, email string) string {
 		Name:       "Test User",
 		Department: "dev",
 		Role:       "admin",
-	}, time.Now().UTC())
+	}, time.Now().UTC(), 0)
 	if err != nil {
 		t.Fatalf("mintEnrollJWT: %v", err)
 	}

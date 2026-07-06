@@ -138,7 +138,7 @@ func TestReadCredentialsToken_PresentAndValid(t *testing.T) {
 		Email: "alice@vivastudios.com",
 		Iat:   now.Unix(),
 		Exp:   now.Add(1 * time.Hour).Unix(),
-	}, now)
+	}, now, 0)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}

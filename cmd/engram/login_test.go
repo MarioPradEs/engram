@@ -96,7 +96,7 @@ func TestLoginHappyPath(t *testing.T) {
 		Name:       "Mario",
 		Department: "dev",
 		Role:       "admin",
-	}, now)
+	}, now, 0)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestLoopbackExchangerHappyPath(t *testing.T) {
 			Name:       "Alice",
 			Department: "dev",
 			Role:       "admin",
-		}, now)
+		}, now, 0)
 		if err != nil {
 			http.Error(w, "mint failed", http.StatusInternalServerError)
 			return
@@ -703,7 +703,7 @@ func TestLoopbackExchangerStateValidation(t *testing.T) {
 		tok, _ := auth.MintJWT(secret, auth.JWTClaims{
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
-		}, now)
+		}, now, 0)
 		// Send WRONG state — exchanger must reject this.
 		http.Redirect(w, r, redirectURI+"?token="+tok+"&state=WRONG_STATE", http.StatusFound)
 	}))
@@ -737,7 +737,7 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 			Name:       "Mario",
 			Department: "dev",
 			Role:       "admin",
-		}, now)
+		}, now, 0)
 		if err != nil {
 			http.Error(w, "mint error", http.StatusInternalServerError)
 			return

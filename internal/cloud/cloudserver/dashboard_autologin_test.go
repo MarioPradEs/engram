@@ -318,15 +318,15 @@ func TestExpiredJWT_ProtectedRoute_RedirectsToLogin(t *testing.T) {
 		t.Fatalf("NewHeaderAuthenticatorWithJWT: %v", err)
 	}
 
-	// Mint an EXPIRED inner JWT: issue time is 8 days in the past so that
-	// exp = issuedAt + 7 days is also in the past relative to time.Now().
+	// Mint an EXPIRED inner JWT: issue time is 8 days in the past with a 7-day TTL
+	// so that exp = issuedAt + 7d = yesterday, which is in the past.
 	expiredIssuedAt := time.Now().UTC().Add(-8 * 24 * time.Hour)
 	expiredJWT, err := cloudauth.MintJWT(jwtSecret, cloudauth.JWTClaims{
 		Sub:   "mario@vivastudios.com",
 		Email: "mario@vivastudios.com",
 		Name:  "Mario Pradas",
 		Role:  "admin",
-	}, expiredIssuedAt)
+	}, expiredIssuedAt, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("MintJWT (expired): %v", err)
 	}

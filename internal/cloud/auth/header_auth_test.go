@@ -421,7 +421,7 @@ func mintTestJWT(t *testing.T, email, name, dept, role string, offset int64) str
 		// Expired: shift the issuance time into the past so exp is in the past too.
 		now = now.Add(time.Duration(offset) * time.Second)
 	}
-	token, err := MintJWT(bearerTestSecret, claims, now)
+	token, err := MintJWT(bearerTestSecret, claims, now, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("mintTestJWT: %v", err)
 	}

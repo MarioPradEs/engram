@@ -21,7 +21,7 @@ func TestMintVerifyJWT(t *testing.T) {
 		Role:       "member",
 	}
 
-	token, err := MintJWT(secret, claims, now)
+	token, err := MintJWT(secret, claims, now, 90*24*time.Hour)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestMintVerifyJWT(t *testing.T) {
 		t.Fatal("MintJWT: returned empty token")
 	}
 
-	// Verify within the 7-day window.
+	// Verify within the 90-day window.
 	got, err := VerifyJWT(secret, token, now.Add(1*time.Hour))
 	if err != nil {
 		t.Fatalf("VerifyJWT: %v", err)
@@ -51,9 +51,9 @@ func TestMintVerifyJWT(t *testing.T) {
 		t.Errorf("Role: got %q, want %q", got.Role, claims.Role)
 	}
 
-	// iat = now, exp = now + 7 days (604800 seconds).
+	// iat = now, exp = now + 90 days.
 	wantIat := now.Unix()
-	wantExp := now.Unix() + 604800
+	wantExp := now.Unix() + int64((90 * 24 * time.Hour).Seconds())
 	if got.Iat != wantIat {
 		t.Errorf("Iat: got %d, want %d", got.Iat, wantIat)
 	}
@@ -64,7 +64,7 @@ func TestMintVerifyJWT(t *testing.T) {
 
 func TestMintJWT_SecretTooShort(t *testing.T) {
 	t.Parallel()
-	_, err := MintJWT("short", JWTClaims{}, time.Now())
+	_, err := MintJWT("short", JWTClaims{}, time.Now(), 0)
 	if err == nil {
 		t.Fatal("expected error for short secret, got nil")
 	}
@@ -76,13 +76,13 @@ func TestVerifyJWT_Expired(t *testing.T) {
 	secret := "thisisasecretthatis32byteslong!!"
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	token, err := MintJWT(secret, JWTClaims{Sub: "u1", Email: "x@y.com"}, now)
+	token, err := MintJWT(secret, JWTClaims{Sub: "u1", Email: "x@y.com"}, now, 90*24*time.Hour)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}
 
-	// Verify 8 days later — past the 7-day expiry.
-	_, err = VerifyJWT(secret, token, now.Add(8*24*time.Hour))
+	// Verify 91 days later — past the 90-day expiry.
+	_, err = VerifyJWT(secret, token, now.Add(91*24*time.Hour))
 	if err == nil {
 		t.Fatal("expected expired error, got nil")
 	}
@@ -95,7 +95,7 @@ func TestVerifyJWT_WrongSecret(t *testing.T) {
 	other := "differentssecretthatis32byteslong"
 	now := time.Now()
 
-	token, err := MintJWT(secret, JWTClaims{Sub: "u1", Email: "x@y.com"}, now)
+	token, err := MintJWT(secret, JWTClaims{Sub: "u1", Email: "x@y.com"}, now, 0)
 	if err != nil {
 		t.Fatalf("MintJWT: %v", err)
 	}

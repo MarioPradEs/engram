@@ -141,11 +141,11 @@ func TestLoginHappyPath(t *testing.T) {
 	_ = jwtToken
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  browser,
-		clock:    clock,
-		secret:   secret,
+		browser:   browser,
+		clock:     clock,
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -241,11 +241,11 @@ func TestLoginPullFailureDoesNotBlockPush(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 
 	stdout, stderr := captureOutput(t, func() {
@@ -302,11 +302,11 @@ func TestLoginPushFailureIsWarningNotError(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 
 	// Login must NOT return an error even when push fails.
@@ -364,11 +364,11 @@ func TestLoginReclassifyCalledBeforePush(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -422,11 +422,11 @@ func TestLoginGeneralEnrollment(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -585,11 +585,11 @@ func TestLoginMarksPushGateIncompleteBeforeReclassify(t *testing.T) {
 	})
 
 	loginRunner := &loginCommand{
-		cfg:      cfg,
+		cfg:       cfg,
 		exchanger: exchanger,
-		browser:  &fakeBrowserOpener{},
-		clock:    &fakeClock{now: now},
-		secret:   secret,
+		browser:   &fakeBrowserOpener{},
+		clock:     &fakeClock{now: now},
+		secret:    secret,
 	}
 	if err := loginRunner.Run(); err != nil {
 		t.Fatalf("login.Run: %v", err)
@@ -804,8 +804,8 @@ func TestLoopbackExchangerCredentialsWritten_0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse expires_at: %v", err)
 	}
-	if expiresAt.Sub(issuedAt) != 7*24*time.Hour {
-		t.Errorf("token lifetime: got %v, want 168h", expiresAt.Sub(issuedAt))
+	if expiresAt.Sub(issuedAt) != 90*24*time.Hour {
+		t.Errorf("token lifetime: got %v, want %v (90d default)", expiresAt.Sub(issuedAt), 90*24*time.Hour)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(credPath)

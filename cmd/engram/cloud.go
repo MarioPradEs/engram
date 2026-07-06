@@ -109,10 +109,16 @@ type cloudServerRuntime interface {
 type defaultCloudRuntime struct {
 	server   *cloudserver.CloudServer
 	store    *cloudstore.CloudStore
-	onSIGHUP func() // called when SIGHUP is received (e.g. users.Loader.Reload)
+	onSIGHUP func()                          // called when SIGHUP is received (e.g. users.Loader.Reload)
+	onWatch  func(ctx context.Context) error // fsnotify watcher; nil when no users file is configured
+	ctx      context.Context                 // cancelled by Start() on return; drives onWatch lifecycle
+	cancel   context.CancelFunc
 }
 
 func (r *defaultCloudRuntime) Start() error {
+	// Cancel the runtime context when Start returns so the watcher goroutine
+	// (and any other ctx-aware goroutine) terminates cleanly.
+	defer r.cancel()
 	defer r.store.Close()
 	// Wire SIGHUP → onSIGHUP (e.g. users.YAMLLoader.Reload) when registered.
 	if r.onSIGHUP != nil {
@@ -129,22 +135,38 @@ func (r *defaultCloudRuntime) Start() error {
 			close(sighupCh)
 		}()
 	}
+	// Start the fsnotify watcher alongside SIGHUP as a belt-and-suspenders
+	// live-reload path: file edits and atomic renames are detected automatically
+	// without requiring an operator-sent SIGHUP signal.
+	if r.onWatch != nil {
+		go func() {
+			if err := r.onWatch(r.ctx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("[engram-cloud] users.Watch: terminated unexpectedly: %v", err)
+			}
+		}()
+	}
 	return r.server.Start()
 }
 
 var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
+	// Create the runtime context up-front; Start() will cancel it on return so
+	// all ctx-aware goroutines (e.g. the fsnotify watcher) terminate cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+
 	cs, err := cloudstore.New(cfg)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	allowedProjects := normalizeAllowedProjects(cfg.AllowedProjects)
 	if err := backfillAllowedProjectMutationChunks(context.Background(), cs, allowedProjects); err != nil {
+		cancel()
 		_ = cs.Close()
 		return nil, err
 	}
 	cs.SetDashboardAllowedProjects(allowedProjects)
 
-	runtime := &defaultCloudRuntime{store: cs}
+	runtime := &defaultCloudRuntime{store: cs, ctx: ctx, cancel: cancel}
 
 	// When ENGRAM_USERS_FILE is set, use HeaderAuthenticator (X-Forwarded-Email +
 	// YAMLLoader) instead of static bearer-token auth. This is the OAuth-era auth
@@ -154,6 +176,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 	if usersFile != "" {
 		loader, err := users.NewYAMLLoader(usersFile)
 		if err != nil {
+			cancel()
 			_ = cs.Close()
 			return nil, fmt.Errorf("newCloudRuntime: load users file %q: %w", usersFile, err)
 		}
@@ -167,6 +190,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		jwtSecretForAuth := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
 		headerAuth, err := auth.NewHeaderAuthenticatorWithJWT(loader, bypassToken, jwtSecretForAuth)
 		if err != nil {
+			cancel()
 			_ = cs.Close()
 			return nil, fmt.Errorf("newCloudRuntime: configure header authenticator: %w", err)
 		}
@@ -177,6 +201,7 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		if classrulesFile != "" {
 			cl, clErr := classrules.NewClassrulesLoader(classrulesFile)
 			if clErr != nil {
+				cancel()
 				_ = cs.Close()
 				return nil, fmt.Errorf("newCloudRuntime: load classrules file %q: %w", classrulesFile, clErr)
 			}
@@ -202,6 +227,10 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 				}
 			}
 		}
+		// D3: also watch the parent directory via fsnotify so that admin writes
+		// (atomic rename path) are detected automatically without SIGHUP.
+		// loader.Watch and onSIGHUP both call loader.Reload() — idempotent.
+		runtime.onWatch = loader.Watch
 		jwtSecret := strings.TrimSpace(os.Getenv("ENGRAM_JWT_SECRET"))
 		runtime.server = cloudserver.New(
 			cs,

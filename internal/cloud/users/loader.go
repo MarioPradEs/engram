@@ -7,17 +7,28 @@
 //	p, ok := loader.Lookup("alice@vivastudios.com")
 //
 // On SIGHUP the process should call loader.Reload() to pick up changes.
+// Watch(ctx) provides automatic live reload via fsnotify without requiring SIGHUP.
 // If the new file is invalid the previous directory remains active.
 package users
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 )
+
+// watchDebounce is the interval used to collapse bursts of filesystem events
+// (e.g., an atomic rename generates both Create and Rename events on some
+// platforms) into a single Reload call.
+const watchDebounce = 100 * time.Millisecond
 
 // Principal holds the resolved attributes of a single user.
 type Principal struct {
@@ -148,6 +159,77 @@ func (l *YAMLLoader) Reload() error {
 	l.current = dir
 	l.mu.Unlock()
 	return nil
+}
+
+// Watch watches the parent directory of the loader's YAML file for filesystem
+// events and calls Reload whenever the watched file is created, written, or
+// renamed. It blocks until ctx is cancelled.
+//
+// The parent directory is watched (not the file itself) because admin writes
+// use atomic os.Rename which fires events on the directory (Create / IN_MOVED_TO)
+// rather than on the target file directly. Only events where the event path
+// matches the loader's file path are acted on; unrelated sibling events are
+// silently discarded.
+//
+// A 100 ms debounce collapses bursts (e.g., a rename generates both Create and
+// Rename events on some platforms) into a single Reload call.
+//
+// Watch is safe to call concurrently with Lookup and Reload.
+func (l *YAMLLoader) Watch(ctx context.Context) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("users: Watch: create watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	dir := filepath.Dir(l.path)
+	if err := watcher.Add(dir); err != nil {
+		return fmt.Errorf("users: Watch: watch %q: %w", dir, err)
+	}
+
+	target := filepath.Clean(l.path)
+
+	// debounce collapses burst events into one Reload call.
+	// It is only accessed inside the select loop (single goroutine), so no
+	// additional mutex is needed.
+	var debounce *time.Timer
+
+	scheduleReload := func() {
+		if debounce != nil {
+			debounce.Stop()
+		}
+		debounce = time.AfterFunc(watchDebounce, func() {
+			if err := l.Reload(); err != nil {
+				log.Printf("[engram-cloud] Watch: reload %q: %v (retaining last-good state)", l.path, err)
+			}
+		})
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			if debounce != nil {
+				debounce.Stop()
+			}
+			return ctx.Err()
+
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return nil
+			}
+			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) {
+				if filepath.Clean(event.Name) == target {
+					scheduleReload()
+				}
+			}
+
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return nil
+			}
+			log.Printf("[engram-cloud] Watch: fsnotify error: %v", err)
+		}
+	}
 }
 
 // ─── Internal ────────────────────────────────────────────────────────────────

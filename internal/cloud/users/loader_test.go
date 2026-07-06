@@ -353,8 +353,13 @@ func TestWatcherTriggersReload_AtomicRename(t *testing.T) {
 }
 
 // TestWatcherIgnoresUnrelated verifies that writing a sibling file in the same
-// watched directory does not corrupt the loader state, and that the watcher
-// remains alive and functional for subsequent users.yaml changes.
+// watched directory does NOT invoke Reload(), and that the watcher remains alive
+// and functional for subsequent users.yaml changes.
+//
+// The test uses loader.ReloadCount() to prove Reload() was not called after the
+// sibling write — not just that state is unchanged (which would be a no-op and
+// pass even without the filepath filter). A positive control at the end confirms
+// the counter works: a real write to users.yaml must increment the count.
 func TestWatcherIgnoresUnrelated(t *testing.T) {
 	t.Parallel()
 
@@ -372,24 +377,45 @@ func TestWatcherIgnoresUnrelated(t *testing.T) {
 	watchErr := make(chan error, 1)
 	go func() { watchErr <- loader.Watch(ctx) }()
 
-	// Allow the watcher goroutine to initialise.
+	// Allow the watcher goroutine to initialise and start listening.
 	time.Sleep(100 * time.Millisecond)
 
-	// Write a sibling file — must NOT trigger a reload that introduces bob.
+	// Snapshot reload count before the unrelated write.
+	beforeCount := loader.ReloadCount()
+
+	// Write a sibling file — must NOT trigger Reload().
 	sibling := filepath.Join(dir, "other.yaml")
 	if err := os.WriteFile(sibling, []byte("unrelated: content\n"), 0o600); err != nil {
 		t.Fatalf("write sibling file: %v", err)
 	}
 
-	// Bob must not appear during the absence window (users.yaml was not updated).
+	// Wait well past the 100ms debounce (+ CI margin = 500ms total).
+	// pollLookupAbsent also guards against bob appearing in state.
 	if !pollLookupAbsent(loader, "bob@vivastudios.com", 500*time.Millisecond) {
 		t.Error("bob appeared after sibling write — Watch incorrectly fired on unrelated file")
 	}
 
-	// Confirm the watcher is still alive: write users.yaml with bob and verify.
+	// Programmatic guard: Reload() must NOT have been invoked for the sibling
+	// write. This assertion fails if the filepath.Clean(event.Name)==target
+	// filter in Watch() is removed or loosened.
+	if got := loader.ReloadCount(); got != beforeCount {
+		t.Errorf("Reload() invoked %d time(s) after sibling write — filepath filter not working (count before=%d, after=%d)",
+			got-beforeCount, beforeCount, got)
+	}
+
+	// ── Positive control ──────────────────────────────────────────────────────
+	// A real write to users.yaml MUST increment the reload counter, proving the
+	// counter itself is wired correctly (not silently broken).
+	countBeforeReal := loader.ReloadCount()
+
 	writeYAML(t, dir, "users.yaml", watcherYAMLPlusBob)
 	if !pollLookup(loader, "bob@vivastudios.com", 3*time.Second) {
 		t.Error("bob not found after users.yaml update — watcher no longer alive after sibling write")
+	}
+
+	if got := loader.ReloadCount(); got <= countBeforeReal {
+		t.Errorf("Reload() not called after real users.yaml write — reload counter did not increase (before=%d, after=%d)",
+			countBeforeReal, got)
 	}
 
 	_ = watchErr // goroutine exits via ctx cancel (deferred above)

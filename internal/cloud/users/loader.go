@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -85,9 +86,10 @@ var validStatuses = map[string]bool{
 // YAMLLoader is a thread-safe, reload-capable user directory backed by a YAML
 // file. Call Reload() to refresh; on failure the last valid state is retained.
 type YAMLLoader struct {
-	mu      sync.RWMutex
-	path    string
-	current map[string]Principal // keyed by lowercase email
+	mu          sync.RWMutex
+	path        string
+	current     map[string]Principal // keyed by lowercase email
+	reloadCount atomic.Int64         // incremented at the start of every Reload() call
 }
 
 // NewYAMLLoader loads the YAML file at path, validates it, and returns a
@@ -147,10 +149,18 @@ func (l *YAMLLoader) List() []Principal {
 	return out
 }
 
+// ReloadCount returns the total number of times Reload has been called
+// (successfully or not) since the loader was created. Useful in tests to verify
+// that Watch() does not invoke Reload() on unrelated filesystem events.
+func (l *YAMLLoader) ReloadCount() int64 {
+	return l.reloadCount.Load()
+}
+
 // Reload re-reads and validates the YAML file. On success the directory is
 // atomically replaced. On failure the last valid directory is retained and the
 // error is returned.
 func (l *YAMLLoader) Reload() error {
+	l.reloadCount.Add(1)
 	dir, err := loadAndValidate(l.path)
 	if err != nil {
 		return err

@@ -83,6 +83,80 @@ func TestWarnIfSessionExpiringSoon(t *testing.T) {
 	}
 }
 
+// writeExpiryCredentialsWithToken writes a credentials.json with a caller-supplied
+// access_token value. Use to assert that warnIfSessionExpiringSoon does NOT inspect
+// or decode the access_token field.
+func writeExpiryCredentialsWithToken(t *testing.T, dir string, accessToken string, expiresAt time.Time) {
+	t.Helper()
+	creds := struct {
+		AccessToken string `json:"access_token"`
+		IssuedAt    string `json:"issued_at"`
+		ExpiresAt   string `json:"expires_at"`
+		Email       string `json:"email"`
+	}{
+		AccessToken: accessToken,
+		IssuedAt:    time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt:   expiresAt.UTC().Format(time.RFC3339),
+		Email:       "test@vivastudios.com",
+	}
+	b, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		t.Fatalf("writeExpiryCredentialsWithToken marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), b, 0600); err != nil {
+		t.Fatalf("writeExpiryCredentialsWithToken write: %v", err)
+	}
+}
+
+// TestWarnIfSessionExpiringSoon_NoDecodeAccessToken verifies S2:
+// warnIfSessionExpiringSoon reads ExpiresAt only — it MUST NOT attempt to parse
+// or validate the access_token field. A garbage (non-JWT) access_token must not
+// affect the warning decision; the function must produce the same result it would
+// with a valid token.
+func TestWarnIfSessionExpiringSoon_NoDecodeAccessToken(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	threshold := 7 * 24 * time.Hour
+	const garbageToken = "not-a-jwt.garbage"
+
+	cases := []struct {
+		name      string
+		expiresAt time.Time
+		wantWarn  bool
+	}{
+		{
+			name:      "garbage access_token, expires in 3d → warn",
+			expiresAt: now.Add(3 * 24 * time.Hour),
+			wantWarn:  true,
+		},
+		{
+			name:      "garbage access_token, expires in 30d → silent",
+			expiresAt: now.Add(30 * 24 * time.Hour),
+			wantWarn:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			credDir := t.TempDir()
+			writeExpiryCredentialsWithToken(t, credDir, garbageToken, tc.expiresAt)
+
+			var buf strings.Builder
+			warnIfSessionExpiringSoon(&buf, credDir, threshold, now)
+
+			hasWarn := buf.Len() > 0
+			if hasWarn != tc.wantWarn {
+				t.Errorf("S2: warnWritten=%v, wantWarn=%v (output: %q)",
+					hasWarn, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
 // TestCloudSyncFailureMessage401PrintsExpiryMessage verifies that cloudSyncFailureMessage
 // returns the canonical expiry prompt when the error is an HTTP 401.
 // Spec: cli-auth §Token Lifetime and Expiry Handling — expired token triggers login prompt.

@@ -59,11 +59,11 @@ Chain strategy: stacked-to-main
 
 ## Phase 7: Live users.yaml watcher (D3) — PR 2, stacked on PR 1
 
-- [ ] 7.1 **[PREREQ]** `go.mod` — promote `github.com/fsnotify/fsnotify` from `indirect` to direct dep: `go get github.com/fsnotify/fsnotify@v1.7.0` + `go mod tidy`.
-- [ ] 7.2 **[RED]** New `internal/cloud/users/loader_test.go` — `TestWatcherTriggersReload_DirectWrite` (os.WriteFile new content, poll Lookup for updated user); `TestWatcherTriggersReload_AtomicRename` (os.Rename tmp→target, poll Lookup); `TestWatcherIgnoresUnrelated` (write sibling file, assert Reload NOT called). Run → RED (`Watch` method undefined).
-- [ ] 7.3 **[GREEN]** `internal/cloud/users/loader.go` — implement `func (l *YAMLLoader) Watch(ctx context.Context) error`: fsnotify.Watcher on `filepath.Dir(l.path)`; filter `Create|Write|Rename` where `filepath.Clean(event.Name) == filepath.Clean(l.path)`; 100ms debounce timer; call `l.Reload()`; return on `ctx.Done()`. Use polling helper in tests to tolerate debounce delay. → GREEN.
-- [ ] 7.4 **[REFACTOR]** `loader.go` — extract `const watchDebounce = 100*time.Millisecond`. Add `TestHeaderAuth_RevokedUserDeniedAfterReload` to `internal/cloud/auth/header_auth_test.go`: call `loader.Reload()` after marking user `status: removed`, assert HeaderAuthenticator returns 403. → REFACTOR GREEN.
-- [ ] 7.5 `cmd/engram/cloud.go` — add `ctx context.Context` + `cancel context.CancelFunc` fields to `defaultCloudRuntime`; in `Start()` add `go func() { if err := loader.Watch(r.ctx); err != nil && !errors.Is(err, context.Canceled) { log.Printf(...) } }()` after SIGHUP goroutine; call `r.cancel()` via deferred in Start(); wire context from `cmdCloudServe`.
+- [x] 7.1 **[PREREQ]** `go.mod` — promote `github.com/fsnotify/fsnotify` from `indirect` to direct dep: `go get github.com/fsnotify/fsnotify@v1.7.0` + `go mod tidy`.
+- [x] 7.2 **[RED]** New `internal/cloud/users/loader_test.go` — `TestWatcherTriggersReload_DirectWrite` (os.WriteFile new content, poll Lookup for updated user); `TestWatcherTriggersReload_AtomicRename` (os.Rename tmp→target, poll Lookup); `TestWatcherIgnoresUnrelated` (write sibling file, assert Reload NOT called). Run → RED (`Watch` method undefined).
+- [x] 7.3 **[GREEN]** `internal/cloud/users/loader.go` — implement `func (l *YAMLLoader) Watch(ctx context.Context) error`: fsnotify.Watcher on `filepath.Dir(l.path)`; filter `Create|Write|Rename` where `filepath.Clean(event.Name) == filepath.Clean(l.path)`; 100ms debounce timer; call `l.Reload()`; return on `ctx.Done()`. Use polling helper in tests to tolerate debounce delay. → GREEN.
+- [x] 7.4 **[REFACTOR]** `loader.go` — extract `const watchDebounce = 100*time.Millisecond`. Add `TestHeaderAuth_RevokedUserDeniedAfterReload` to `internal/cloud/auth/header_auth_test.go`: call `loader.Reload()` after marking user `status: removed`, assert HeaderAuthenticator returns 403. → REFACTOR GREEN.
+- [x] 7.5 `cmd/engram/cloud.go` — add `ctx context.Context` + `cancel context.CancelFunc` + `onWatch func(ctx context.Context) error` fields to `defaultCloudRuntime`; in `Start()` defer `r.cancel()` and add Watch goroutine after SIGHUP goroutine; wire `runtime.onWatch = loader.Watch` in newCloudRuntime usersFile branch; cancel() in all error exit paths.
 
 ## Phase 8: Final cleanup and verification
 

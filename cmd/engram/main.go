@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -840,6 +841,47 @@ func resolveServeSyncStatusProject() string {
 	return strings.TrimSpace(projectName)
 }
 
+// sessionExpiryWarnThreshold is the look-ahead window for the proactive
+// session-expiry warning. When credentials.json ExpiresAt is within this
+// duration of now, a warning is written to stderr at startup so the user
+// has time to re-authenticate before their session dies mid-session.
+const sessionExpiryWarnThreshold = 7 * 24 * time.Hour
+
+// warnIfSessionExpiringSoon writes a human-readable warning to w when
+// credentials.json in credDir has an ExpiresAt that is > now (not yet expired)
+// but within threshold of now. Already-expired sessions are handled by the
+// reactive errCredentialsExpired path and do NOT trigger this warning.
+// The function never returns an error — any IO/parse failure is silently
+// ignored so startup is never disrupted.
+func warnIfSessionExpiringSoon(w io.Writer, credDir string, threshold time.Duration, now time.Time) {
+	path := filepath.Join(credDir, "credentials.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var creds struct {
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return
+	}
+	if creds.ExpiresAt == "" {
+		return
+	}
+	expiresAt, err := time.Parse(time.RFC3339, creds.ExpiresAt)
+	if err != nil {
+		return
+	}
+	remaining := expiresAt.Sub(now)
+	// Only warn when the session is still valid but expiring soon.
+	// Already-expired sessions (remaining <= 0) are handled by the reactive path.
+	if remaining <= 0 || remaining > threshold {
+		return
+	}
+	fmt.Fprintf(w, "[engram] WARNING: your session expires in %v — run 'engram login' to renew it before it expires.\n",
+		remaining.Truncate(time.Hour))
+}
+
 // tryStartAutosync starts the autosync Manager if ENGRAM_CLOUD_AUTOSYNC=1 and
 // both ENGRAM_CLOUD_TOKEN and ENGRAM_CLOUD_SERVER are present.
 // REQ-210: only exact "1" is accepted. REQ-211: missing token/server → log+skip.
@@ -850,6 +892,12 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// REQ-210: opt-in requires exact "1".
 	if strings.TrimSpace(os.Getenv("ENGRAM_CLOUD_AUTOSYNC")) != "1" {
 		return nil, nil
+	}
+
+	// Proactive session-expiry warning: fires once at serve/mcp start so the
+	// user has time to re-authenticate before their token silently dies (D4).
+	if credDir, credErr := credentialsDirFn(); credErr == nil {
+		warnIfSessionExpiringSoon(os.Stderr, credDir, sessionExpiryWarnThreshold, time.Now())
 	}
 
 	cc, err := resolveCloudRuntimeConfig(cfg)

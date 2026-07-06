@@ -180,7 +180,7 @@ func TestAuthEndpointValidUser_redirectsWithTokenAndState(t *testing.T) {
 	if !strings.Contains(loc, "token=") {
 		t.Fatalf("expected token in redirect location, got %q", loc)
 	}
-	// Extract token and verify exp-iat == 604800 (7 days).
+	// Extract token and verify exp-iat == 90*24*3600 = 7776000 (90-day default TTL).
 	tokenIdx := strings.Index(loc, "token=")
 	tokenPart := loc[tokenIdx+len("token="):]
 	if ampIdx := strings.Index(tokenPart, "&"); ampIdx != -1 {
@@ -189,8 +189,9 @@ func TestAuthEndpointValidUser_redirectsWithTokenAndState(t *testing.T) {
 	claims := decodeJWTPayload(t, tokenPart)
 	iat, _ := claims["iat"].(float64)
 	exp, _ := claims["exp"].(float64)
-	if exp-iat != 604800 {
-		t.Errorf("expected exp-iat=604800, got %v", exp-iat)
+	wantExpDiff := float64(90 * 24 * 3600)
+	if exp-iat != wantExpDiff {
+		t.Errorf("expected exp-iat=%v (90d), got %v", wantExpDiff, exp-iat)
 	}
 	if claims["email"] != "alice@vivastudios.com" {
 		t.Errorf("expected email=alice@vivastudios.com, got %v", claims["email"])

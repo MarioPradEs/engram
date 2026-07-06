@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -26,6 +27,39 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
 )
+
+// resolveJWTTTL reads ENGRAM_JWT_TTL and returns a clamped duration.
+//
+//   - Empty or unset → auth.DefaultJWTTTL (90d), no warning.
+//   - Unparseable    → auth.DefaultJWTTTL + warning on stderr.
+//   - < auth.MinJWTTTL (24h) → auth.MinJWTTTL + warning on stderr.
+//   - Otherwise      → parsed value, no warning.
+//
+// This function never returns a value below auth.MinJWTTTL and never panics.
+// Both the server (handleAuth / autoLoginFromHeader) and the CLI login path
+// call this so there is exactly one parse-and-clamp site.
+func resolveJWTTTL() time.Duration {
+	return resolveJWTTTLWithWriter(os.Stderr, strings.TrimSpace(os.Getenv("ENGRAM_JWT_TTL")))
+}
+
+// resolveJWTTTLWithWriter is the testable core: accepts an explicit writer for
+// warnings and the raw env string so tests do not need to mutate os.Environ.
+func resolveJWTTTLWithWriter(w io.Writer, raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return auth.DefaultJWTTTL
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(w, "[engram] WARN: ENGRAM_JWT_TTL=%q is not a valid duration; using default %v\n", raw, auth.DefaultJWTTTL)
+		return auth.DefaultJWTTTL
+	}
+	if d < auth.MinJWTTTL {
+		fmt.Fprintf(w, "[engram] WARN: ENGRAM_JWT_TTL=%q is below minimum %v; clamping to %v\n", raw, auth.MinJWTTTL, auth.MinJWTTTL)
+		return auth.MinJWTTTL
+	}
+	return d
+}
 
 type cloudManifestReader interface {
 	ReadManifest(ctx context.Context, project string) (*engramsync.Manifest, error)
@@ -73,9 +107,9 @@ type cloudServerRuntime interface {
 }
 
 type defaultCloudRuntime struct {
-	server       *cloudserver.CloudServer
-	store        *cloudstore.CloudStore
-	onSIGHUP     func() // called when SIGHUP is received (e.g. users.Loader.Reload)
+	server   *cloudserver.CloudServer
+	store    *cloudstore.CloudStore
+	onSIGHUP func() // called when SIGHUP is received (e.g. users.Loader.Reload)
 }
 
 func (r *defaultCloudRuntime) Start() error {
@@ -181,6 +215,9 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
 			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
 			cloudserver.WithAuthEndpoint(loader, jwtSecret),
+			// Wire configurable JWT TTL: parse ENGRAM_JWT_TTL once at startup; both
+			// handleAuth and autoLoginFromHeader use s.jwtTTL via MintJWT.
+			cloudserver.WithJWTTTL(resolveJWTTTL()),
 			// D4: wire YAMLLoader.Reload as the user-directory reload callback so
 			// admin member-management writes take effect in-process without restart.
 			cloudserver.WithUserDirectoryReload(loader.Reload),

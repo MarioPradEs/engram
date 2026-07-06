@@ -19,7 +19,7 @@ type AuthUserLoader interface {
 
 // WithAuthEndpoint registers the GET /auth endpoint on the server.
 // The endpoint is NOT behind withAuth — it relies on oauth2-proxy having injected
-// X-Forwarded-Email, and it mints a 7-day engram JWT for the resolved principal.
+// X-Forwarded-Email, and it mints a configurable-TTL engram JWT for the resolved principal.
 //
 // Security:
 //   - redirect_uri MUST be a loopback address (127.0.0.1 or localhost with an
@@ -30,6 +30,16 @@ func WithAuthEndpoint(loader AuthUserLoader, jwtSecret string) Option {
 	return func(s *CloudServer) {
 		s.authLoader = loader
 		s.authJWTSecret = jwtSecret
+	}
+}
+
+// WithJWTTTL sets the JWT lifetime used by handleAuth and autoLoginFromHeader.
+// When d is 0 or negative, auth.DefaultJWTTTL (90d) is used by MintJWT.
+// Callers should pass a value resolved by resolveJWTTTL() so the clamp and
+// warning logic is applied exactly once at server startup.
+func WithJWTTTL(d time.Duration) Option {
+	return func(s *CloudServer) {
+		s.jwtTTL = d
 	}
 }
 
@@ -47,7 +57,7 @@ func (s *CloudServer) registerAuthEndpoint() {
 //  2. Resolve the principal from the directory.
 //  3. Enforce lifecycle: removed → 403; offboarding is ALLOWED (login to drain).
 //  4. Validate redirect_uri is a loopback address (security: open-redirect guard).
-//  5. Mint a 7-day JWT signed with ENGRAM_JWT_SECRET.
+//  5. Mint a configurable-TTL JWT signed with ENGRAM_JWT_SECRET.
 //  6. HTTP 302 → redirect_uri?token=<JWT>&state=<state>
 func (s *CloudServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 1. Require X-Forwarded-Email (must come through oauth2-proxy).

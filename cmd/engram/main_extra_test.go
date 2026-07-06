@@ -156,6 +156,7 @@ func stubRuntimeHooks(t *testing.T) {
 	oldNewCloudAutosyncManager := newCloudAutosyncManager
 	oldCheckForUpdates := checkForUpdates
 	oldCloudDaemonProbe := cloudDaemonProbe
+	oldWarnIfSessionExpiringSoonFn := warnIfSessionExpiringSoonFn
 
 	storeNew = store.New
 	newHTTPServer = func(s *store.Store, _ int) *engramsrv.Server { return engramsrv.New(s, 0) }
@@ -202,6 +203,7 @@ func stubRuntimeHooks(t *testing.T) {
 	cloudDaemonProbe = func(_ context.Context, port int) daemonProbeResult {
 		return daemonProbeResult{Status: daemonProbeRunning, Port: port}
 	}
+	warnIfSessionExpiringSoonFn = func(_ io.Writer, _ string, _ time.Duration, _ time.Time) {}
 
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
@@ -229,6 +231,7 @@ func stubRuntimeHooks(t *testing.T) {
 		newCloudAutosyncManager = oldNewCloudAutosyncManager
 		checkForUpdates = oldCheckForUpdates
 		cloudDaemonProbe = oldCloudDaemonProbe
+		warnIfSessionExpiringSoonFn = oldWarnIfSessionExpiringSoonFn
 	})
 }
 
@@ -4213,12 +4216,15 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	oldNewMCPServerWithConfig := newMCPServerWithConfig
 	oldServeMCP := serveMCP
 	oldNewAutosyncManager := newAutosyncManager
+	oldWarnFn := warnIfSessionExpiringSoonFn
 	storeNew = store.New
+	warnIfSessionExpiringSoonFn = func(_ io.Writer, _ string, _ time.Duration, _ time.Time) {}
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
 		newMCPServerWithConfig = oldNewMCPServerWithConfig
 		serveMCP = oldServeMCP
 		newAutosyncManager = oldNewAutosyncManager
+		warnIfSessionExpiringSoonFn = oldWarnFn
 	})
 
 	var mcpStore *store.Store
@@ -4319,12 +4325,15 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	oldNewMCPServerWithConfig := newMCPServerWithConfig
 	oldServeMCP := serveMCP
 	oldNewAutosyncManager := newAutosyncManager
+	oldWarnFn2 := warnIfSessionExpiringSoonFn
 	storeNew = store.New
+	warnIfSessionExpiringSoonFn = func(_ io.Writer, _ string, _ time.Duration, _ time.Time) {}
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
 		newMCPServerWithConfig = oldNewMCPServerWithConfig
 		serveMCP = oldServeMCP
 		newAutosyncManager = oldNewAutosyncManager
+		warnIfSessionExpiringSoonFn = oldWarnFn2
 	})
 
 	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {

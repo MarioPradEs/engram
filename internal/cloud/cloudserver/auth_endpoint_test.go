@@ -155,7 +155,7 @@ func TestAuthEndpointNonLoopbackRedirectURI_returns400(t *testing.T) {
 }
 
 // TestAuthEndpointValidUser_redirectsWithTokenAndState is the happy path.
-// Active user + loopback redirect_uri → 302, token present, exp-iat==604800, state echoed.
+// Active user + loopback redirect_uri → 302, token present, exp-iat==7776000 (90d default TTL), state echoed.
 func TestAuthEndpointValidUser_redirectsWithTokenAndState(t *testing.T) {
 	t.Parallel()
 	loader := buildAuthTestLoader(t, authEndpointTestYAML)

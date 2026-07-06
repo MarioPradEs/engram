@@ -847,6 +847,11 @@ func resolveServeSyncStatusProject() string {
 // has time to re-authenticate before their session dies mid-session.
 const sessionExpiryWarnThreshold = 7 * 24 * time.Hour
 
+// warnIfSessionExpiringSoonFn is the injectable hook used by tryStartAutosync.
+// Override in tests to suppress startup expiry warnings when running with
+// real credentials in the environment (e.g. ENGRAM_CLOUD_AUTOSYNC=1).
+var warnIfSessionExpiringSoonFn = warnIfSessionExpiringSoon
+
 // warnIfSessionExpiringSoon writes a human-readable warning to w when
 // credentials.json in credDir has an ExpiresAt that is > now (not yet expired)
 // but within threshold of now. Already-expired sessions are handled by the
@@ -897,7 +902,7 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 	// Proactive session-expiry warning: fires once at serve/mcp start so the
 	// user has time to re-authenticate before their token silently dies (D4).
 	if credDir, credErr := credentialsDirFn(); credErr == nil {
-		warnIfSessionExpiringSoon(os.Stderr, credDir, sessionExpiryWarnThreshold, time.Now())
+		warnIfSessionExpiringSoonFn(os.Stderr, credDir, sessionExpiryWarnThreshold, time.Now())
 	}
 
 	cc, err := resolveCloudRuntimeConfig(cfg)

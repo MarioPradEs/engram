@@ -337,7 +337,7 @@ func TestPostLoginSyncRealCounts_SummaryPrintsActualCounts(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -402,7 +402,7 @@ func TestPostLoginSync_BearerEqualsCredentialsToken(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -469,7 +469,7 @@ func TestPostLoginSync_PullFailureWarnsAndPushStillRuns(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 
@@ -533,7 +533,7 @@ func TestPostLoginSync_PushFailureIsWarningNotError(t *testing.T) {
 			Sub:   "alice@vivastudios.com",
 			Email: "alice@vivastudios.com",
 			Iat:   now.Unix(),
-			Exp:   now.Unix() + 604800,
+			Exp:   now.Unix() + int64(7*24*time.Hour/time.Second),
 		},
 	}
 

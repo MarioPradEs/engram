@@ -87,6 +87,68 @@ func TestGetContributorDetailReturnsScopedData(t *testing.T) {
 	}
 }
 
+// TestGetContributorDetailFiltersByContributorInSharedProject seeds ONE project shared by
+// two contributors and asserts GetContributorDetail("alice") returns only alice's own
+// sessions/observations/prompts — not the whole project's. Regression test for the bug where
+// an admin viewing a contributor's detail saw other members' rows (mislabeled) because they
+// shared a project. Filtering must be per-contributor (UserEmail), not per-project.
+func TestGetContributorDetailFiltersByContributorInSharedProject(t *testing.T) {
+	aliceTime := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
+	bobTime := time.Date(2026, 4, 23, 11, 0, 0, 0, time.UTC)
+
+	chunks := []dashboardChunkRow{
+		// Alice contributes to the SHARED project.
+		{
+			chunkID: "chunk-alice-1", project: "proj-shared", createdBy: "alice",
+			createdAt: aliceTime,
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-alice-1","project":"proj-shared","started_at":"2026-04-23T08:00:00Z"}],
+				"observations":[{"sync_id":"obs-alice-1","session_id":"sess-alice-1","project":"proj-shared","type":"decision","title":"Alice obs","created_at":"2026-04-23T08:10:00Z"}],
+				"prompts":[{"sync_id":"prompt-alice-1","session_id":"sess-alice-1","project":"proj-shared","content":"Alice prompt","created_at":"2026-04-23T08:20:00Z"}]
+			}`)),
+		},
+		// Bob contributes to the SAME shared project.
+		{
+			chunkID: "chunk-bob-1", project: "proj-shared", createdBy: "bob",
+			createdAt: bobTime,
+			parsed: parseMustChunk(t, []byte(`{
+				"sessions":[{"id":"sess-bob-1","project":"proj-shared","started_at":"2026-04-23T09:00:00Z"}],
+				"observations":[{"sync_id":"obs-bob-1","session_id":"sess-bob-1","project":"proj-shared","type":"note","title":"Bob obs","created_at":"2026-04-23T09:10:00Z"}],
+				"prompts":[{"sync_id":"prompt-bob-1","session_id":"sess-bob-1","project":"proj-shared","content":"Bob prompt","created_at":"2026-04-23T09:20:00Z"}]
+			}`)),
+		},
+	}
+
+	model, err := buildDashboardReadModel(chunks)
+	if err != nil {
+		t.Fatalf("buildDashboardReadModel: %v", err)
+	}
+	cs := &CloudStore{
+		dashboardReadModelLoad: func() (dashboardReadModel, error) { return model, nil },
+	}
+
+	_, sessions, observations, prompts, err := cs.GetContributorDetail("alice")
+	if err != nil {
+		t.Fatalf("GetContributorDetail: %v", err)
+	}
+
+	// Only alice's rows must appear — bob shares the project but must NOT leak in.
+	if len(observations) != 1 || observations[0].Title != "Alice obs" {
+		t.Errorf("expected exactly alice's 1 observation, got %d: %+v", len(observations), observations)
+	}
+	for _, o := range observations {
+		if o.UserEmail != "alice" {
+			t.Errorf("observation attributed to %q leaked into alice's contributor detail (title=%q)", o.UserEmail, o.Title)
+		}
+	}
+	if len(sessions) != 1 || sessions[0].UserEmail != "alice" {
+		t.Errorf("expected exactly alice's 1 session, got %d: %+v", len(sessions), sessions)
+	}
+	if len(prompts) != 1 || prompts[0].UserEmail != "alice" {
+		t.Errorf("expected exactly alice's 1 prompt, got %d: %+v", len(prompts), prompts)
+	}
+}
+
 // TestListDistinctTypesScansReadModel seeds a read model with observations of types
 // "bugfix", "architecture", "", "bugfix" again and asserts ListDistinctTypes returns
 // ["architecture", "bugfix"] sorted, no empty. Satisfies (m).

@@ -1423,9 +1423,25 @@ func (cs *CloudStore) GetContributorDetail(name string) (DashboardContributorRow
 		if !ok {
 			continue
 		}
-		sessions = append(sessions, detail.Sessions...)
-		observations = append(observations, detail.Observations...)
-		prompts = append(prompts, detail.Prompts...)
+		// Scope to THIS contributor's own rows. A project can be shared by several
+		// contributors, so appending the whole project's rows would leak other members'
+		// sessions/observations/prompts (mislabeled) into this contributor's detail view.
+		// Attribution is per-row via UserEmail (derived from the chunk's created_by).
+		for _, s := range detail.Sessions {
+			if strings.EqualFold(strings.TrimSpace(s.UserEmail), name) {
+				sessions = append(sessions, s)
+			}
+		}
+		for _, o := range detail.Observations {
+			if strings.EqualFold(strings.TrimSpace(o.UserEmail), name) {
+				observations = append(observations, o)
+			}
+		}
+		for _, pr := range detail.Prompts {
+			if strings.EqualFold(strings.TrimSpace(pr.UserEmail), name) {
+				prompts = append(prompts, pr)
+			}
+		}
 	}
 
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].StartedAt > sessions[j].StartedAt })

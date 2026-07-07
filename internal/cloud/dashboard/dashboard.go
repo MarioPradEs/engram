@@ -751,10 +751,11 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	obsType := strings.TrimSpace(r.URL.Query().Get("type"))
-	// S6: Browser always uses own scope — even admins see only their own data in the
-	// Browser tab. The global view is the Contributors tab (admin-only). This decision
-	// was Mario's: "por la web solo podrá ver lo suyo propio; solo la IA accede a todo."
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
+	// Browser tab scope — admins see ALL data; non-admins see only their own.
+	// Mario reversed the original S6 decision on 2026-07-07: admins now have
+	// full visibility in the Browser tab, matching their access in Contributors.
+	// Non-admins are unaffected (IsAdmin: false filters to own email via applyReadScope).
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping (total not known yet).
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardObservationRow, 0)
@@ -801,8 +802,9 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	// S6: Browser always uses own scope — even admins see only their own data.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
+	// Browser tab scope — admins see ALL data; non-admins see only their own.
+	// S6 decision reversed on 2026-07-07 (see handleBrowserObservations comment).
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardSessionRow, 0)
@@ -849,8 +851,9 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 	p := h.principalFromRequest(r)
 	project := strings.TrimSpace(r.URL.Query().Get("project"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	// S6: Browser always uses own scope — even admins see only their own data.
-	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: false}
+	// Browser tab scope — admins see ALL data; non-admins see only their own.
+	// S6 decision reversed on 2026-07-07 (see handleBrowserObservations comment).
+	scope := &cloudstore.ReadScope{Email: p.Email(), IsAdmin: p.IsAdmin()}
 	// R2-1: parse page/pageSize without pre-clamping.
 	reqPage, pageSize := parsePaginationRaw(r)
 	rows := make([]cloudstore.DashboardPromptRow, 0)

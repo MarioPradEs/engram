@@ -7,7 +7,7 @@ package dashboard
 //   3. GET /dashboard/brain serves 200 with iframe when BrainURL is set.
 //   4. GET /dashboard/graph redirects to /dashboard/brain (301/302).
 //   5. dashboardHomePath() returns /dashboard/brain when BrainURL is set.
-//   6. Browser observations endpoint: admin sees ONLY own observations (own scope enforced).
+//   6. Browser tab scope (S6 reversal 2026-07-07): admin now sees ALL data; non-admin sees only own.
 //   7. Contributors: admin → 200 + sees other user's data (global scope).
 //   8. Contributors: non-admin → 403.
 
@@ -184,11 +184,11 @@ func TestPostLoginLandingWithBrainURLIsBrain(t *testing.T) {
 	}
 }
 
-// ─── Browser scope: admin sees only own data ─────────────────────────────────
+// ─── Browser scope: admin sees ALL data (S6 reversal 2026-07-07) ───────────
 
-// scopedObsStore is a store stub that honours ReadScope: returns alice's obs only
-// when the scope email matches alice, and both when IsAdmin (global).
-// Used to verify that the Browser tab forces own scope even for admins.
+// scopedObsStore is a store stub that honours ReadScope: returns only email-matched
+// rows when scope.IsAdmin is false, and returns all rows when scope.IsAdmin is true.
+// After the S6 reversal, admin requests carry IsAdmin: true so all rows appear.
 type scopedObsStore struct {
 	parityStoreStub
 }
@@ -207,10 +207,14 @@ func (s scopedObsStore) ListRecentObservationsPaginated(scope *cloudstore.ReadSc
 	return filtered, len(filtered), nil
 }
 
-// TestBrowserObservationsAdminSeesOnlyOwnData verifies that an admin hitting
-// /dashboard/browser/observations only sees their own observations (own-scoped).
-// The seeded data has alice's and bob's observations; alice (admin) must see only hers.
-func TestBrowserObservationsAdminSeesOnlyOwnData(t *testing.T) {
+// TestBrowserObservationsAdminSeesAllData verifies that an admin requesting
+// /dashboard/browser/observations sees ALL users' observations (S6 reversal 2026-07-07).
+// The seeded data has alice's and bob's observations; alice (admin) must see both.
+//
+// Renamed and inverted from TestBrowserObservationsAdminSeesOnlyOwnData: the original
+// test asserted admin only sees own data. Mario reversed that decision on 2026-07-07,
+// so this test now asserts the new behavior (admin global scope in Browser tab).
+func TestBrowserObservationsAdminSeesAllData(t *testing.T) {
 	store := scopedObsStore{
 		parityStoreStub: parityStoreStub{
 			observations: []cloudstore.DashboardObservationRow{
@@ -221,7 +225,7 @@ func TestBrowserObservationsAdminSeesOnlyOwnData(t *testing.T) {
 			},
 		},
 	}
-	// Alice is admin but Browser must return only her own obs.
+	// Alice is admin; Browser must now return ALL observations (global scope).
 	mux := newMuxWithEmailAndAdmin(store, "alice@example.com", true, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/browser/observations?auth=ok", nil)
@@ -232,10 +236,11 @@ func TestBrowserObservationsAdminSeesOnlyOwnData(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "Alice observation") {
-		t.Errorf("expected Alice's own observation in browser response, got body=%q", body)
+		t.Errorf("admin browser observations: expected alice's own observation, got body=%q", body)
 	}
-	if strings.Contains(body, "Bob observation") {
-		t.Errorf("admin Browser must NOT see Bob's observation (own-scope only), got body=%q", body)
+	// After S6 reversal: admin MUST see other users' observations too.
+	if !strings.Contains(body, "Bob observation") {
+		t.Errorf("admin browser observations: expected bob's observation (admin global scope), got body=%q", body)
 	}
 }
 
@@ -393,10 +398,12 @@ func (s scopedPromptStore) ListRecentPromptsPaginated(scope *cloudstore.ReadScop
 	return filtered, len(filtered), nil
 }
 
-// TestBrowserSessionsAdminSeesOnlyOwnData mirrors TestBrowserObservationsAdminSeesOnlyOwnData
-// for /dashboard/browser/sessions. Seeds 2-user data; asserts alice (admin) only sees her own
-// sessions — the other user's rows must be absent.
-func TestBrowserSessionsAdminSeesOnlyOwnData(t *testing.T) {
+// TestBrowserSessionsAdminSeesAllData mirrors TestBrowserObservationsAdminSeesAllData
+// for /dashboard/browser/sessions. Seeds 2-user data; asserts alice (admin) sees both
+// her own and bob's sessions (global scope — S6 reversal 2026-07-07).
+//
+// Renamed and inverted from TestBrowserSessionsAdminSeesOnlyOwnData.
+func TestBrowserSessionsAdminSeesAllData(t *testing.T) {
 	store := scopedSessionStore{
 		parityStoreStub: parityStoreStub{
 			sessions: []cloudstore.DashboardSessionRow{
@@ -405,7 +412,7 @@ func TestBrowserSessionsAdminSeesOnlyOwnData(t *testing.T) {
 			},
 		},
 	}
-	// Alice is admin but Browser must return only her own sessions (own-scope enforced).
+	// Alice is admin; Browser must now return ALL sessions (global scope).
 	mux := newMuxWithEmailAndAdmin(store, "alice@example.com", true, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/browser/sessions?auth=ok", nil)
@@ -416,17 +423,20 @@ func TestBrowserSessionsAdminSeesOnlyOwnData(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "sess-alice") {
-		t.Errorf("expected alice's own session in browser response, got body=%q", body)
+		t.Errorf("admin browser sessions: expected alice's session, got body=%q", body)
 	}
-	if strings.Contains(body, "sess-bob") {
-		t.Errorf("admin Browser must NOT see bob's session (own-scope only), got body=%q", body)
+	// After S6 reversal: admin MUST see other users' sessions too.
+	if !strings.Contains(body, "sess-bob") {
+		t.Errorf("admin browser sessions: expected bob's session (admin global scope), got body=%q", body)
 	}
 }
 
-// TestBrowserPromptsAdminSeesOnlyOwnData mirrors TestBrowserObservationsAdminSeesOnlyOwnData
-// for /dashboard/browser/prompts. Seeds 2-user data; asserts alice (admin) only sees her own
-// prompts — the other user's rows must be absent.
-func TestBrowserPromptsAdminSeesOnlyOwnData(t *testing.T) {
+// TestBrowserPromptsAdminSeesAllData mirrors TestBrowserObservationsAdminSeesAllData
+// for /dashboard/browser/prompts. Seeds 2-user data; asserts alice (admin) sees both
+// her own and bob's prompts (global scope — S6 reversal 2026-07-07).
+//
+// Renamed and inverted from TestBrowserPromptsAdminSeesOnlyOwnData.
+func TestBrowserPromptsAdminSeesAllData(t *testing.T) {
 	store := scopedPromptStore{
 		parityStoreStub: parityStoreStub{
 			prompts: []cloudstore.DashboardPromptRow{
@@ -435,7 +445,7 @@ func TestBrowserPromptsAdminSeesOnlyOwnData(t *testing.T) {
 			},
 		},
 	}
-	// Alice is admin but Browser must return only her own prompts (own-scope enforced).
+	// Alice is admin; Browser must now return ALL prompts (global scope).
 	mux := newMuxWithEmailAndAdmin(store, "alice@example.com", true, "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/dashboard/browser/prompts?auth=ok", nil)
@@ -446,10 +456,11 @@ func TestBrowserPromptsAdminSeesOnlyOwnData(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "Alice prompt") {
-		t.Errorf("expected alice's own prompt in browser response, got body=%q", body)
+		t.Errorf("admin browser prompts: expected alice's prompt, got body=%q", body)
 	}
-	if strings.Contains(body, "Bob prompt") {
-		t.Errorf("admin Browser must NOT see bob's prompt (own-scope only), got body=%q", body)
+	// After S6 reversal: admin MUST see other users' prompts too.
+	if !strings.Contains(body, "Bob prompt") {
+		t.Errorf("admin browser prompts: expected bob's prompt (admin global scope), got body=%q", body)
 	}
 }
 

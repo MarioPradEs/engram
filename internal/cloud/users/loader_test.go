@@ -1,9 +1,11 @@
 package users_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
@@ -218,6 +220,208 @@ users:
 		t.Error("bob should exist after reload")
 	}
 }
+
+// ─── Watch helpers ───────────────────────────────────────────────────────────
+
+// watcherBaseYAML is a minimal valid users.yaml used as the initial state for
+// watcher tests (alice admin only; no bob).
+const watcherBaseYAML = `users:
+  - email: "alice@vivastudios.com"
+    name: "Alice"
+    department: "dev"
+    role: "admin"
+    status: "active"
+    enrolled:
+      - "eng-notes"
+`
+
+// watcherYAMLPlusBob extends watcherBaseYAML by adding bob as an active member.
+const watcherYAMLPlusBob = `users:
+  - email: "alice@vivastudios.com"
+    name: "Alice"
+    department: "dev"
+    role: "admin"
+    status: "active"
+    enrolled:
+      - "eng-notes"
+  - email: "bob@vivastudios.com"
+    name: "Bob"
+    department: "qa"
+    role: "member"
+    status: "active"
+    enrolled:
+      - "eng-notes"
+`
+
+// pollLookup polls loader.Lookup(email) until the email is found or the
+// timeout elapses. Returns true when found before the deadline.
+func pollLookup(loader *users.YAMLLoader, email string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, ok := loader.Lookup(email); ok {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// pollLookupAbsent polls loader.Lookup(email) and returns true only when the
+// email remains absent for the entire duration (no premature hit).
+func pollLookupAbsent(loader *users.YAMLLoader, email string, duration time.Duration) bool {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		if _, ok := loader.Lookup(email); ok {
+			return false // unexpectedly appeared
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// ─── Watch tests ─────────────────────────────────────────────────────────────
+
+// TestWatcherTriggersReload_DirectWrite verifies that a direct os.WriteFile
+// to the watched users.yaml is detected by Watch and causes Reload, making
+// newly-added users visible via Lookup.
+func TestWatcherTriggersReload_DirectWrite(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeYAML(t, dir, "users.yaml", watcherBaseYAML)
+
+	loader, err := users.NewYAMLLoader(path)
+	if err != nil {
+		t.Fatalf("NewYAMLLoader: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- loader.Watch(ctx) }()
+
+	// Allow the watcher goroutine to initialise and start listening.
+	time.Sleep(100 * time.Millisecond)
+
+	// Direct write — no atomic rename.
+	writeYAML(t, dir, "users.yaml", watcherYAMLPlusBob)
+
+	// Poll for bob; generous timeout covers debounce (100ms) + CI latency.
+	if !pollLookup(loader, "bob@vivastudios.com", 3*time.Second) {
+		t.Error("bob not found after direct write — Watch did not trigger Reload")
+	}
+}
+
+// TestWatcherTriggersReload_AtomicRename verifies that an atomic os.Rename
+// (write tmp then rename over users.yaml, mirroring WriteAtomic / admin
+// dashboard writes) is detected by Watch and causes Reload.
+func TestWatcherTriggersReload_AtomicRename(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeYAML(t, dir, "users.yaml", watcherBaseYAML)
+
+	loader, err := users.NewYAMLLoader(path)
+	if err != nil {
+		t.Fatalf("NewYAMLLoader: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- loader.Watch(ctx) }()
+
+	// Allow the watcher goroutine to initialise and start listening.
+	time.Sleep(100 * time.Millisecond)
+
+	// Atomic rename: write to a temp file in the same directory, then rename
+	// over users.yaml. This mirrors WriteAtomic used by the admin dashboard.
+	tmpPath := filepath.Join(dir, "users.tmp.yaml")
+	if err := os.WriteFile(tmpPath, []byte(watcherYAMLPlusBob), 0o600); err != nil {
+		t.Fatalf("write tmp file: %v", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		t.Fatalf("rename tmp → users.yaml: %v", err)
+	}
+
+	// Poll for bob.
+	if !pollLookup(loader, "bob@vivastudios.com", 3*time.Second) {
+		t.Error("bob not found after atomic rename — Watch did not trigger Reload")
+	}
+}
+
+// TestWatcherIgnoresUnrelated verifies that writing a sibling file in the same
+// watched directory does NOT invoke Reload(), and that the watcher remains alive
+// and functional for subsequent users.yaml changes.
+//
+// The test uses loader.ReloadCount() to prove Reload() was not called after the
+// sibling write — not just that state is unchanged (which would be a no-op and
+// pass even without the filepath filter). A positive control at the end confirms
+// the counter works: a real write to users.yaml must increment the count.
+func TestWatcherIgnoresUnrelated(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := writeYAML(t, dir, "users.yaml", watcherBaseYAML) // alice only; no bob
+
+	loader, err := users.NewYAMLLoader(path)
+	if err != nil {
+		t.Fatalf("NewYAMLLoader: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- loader.Watch(ctx) }()
+
+	// Allow the watcher goroutine to initialise and start listening.
+	time.Sleep(100 * time.Millisecond)
+
+	// Snapshot reload count before the unrelated write.
+	beforeCount := loader.ReloadCount()
+
+	// Write a sibling file — must NOT trigger Reload().
+	sibling := filepath.Join(dir, "other.yaml")
+	if err := os.WriteFile(sibling, []byte("unrelated: content\n"), 0o600); err != nil {
+		t.Fatalf("write sibling file: %v", err)
+	}
+
+	// Wait well past the 100ms debounce (+ CI margin = 500ms total).
+	// pollLookupAbsent also guards against bob appearing in state.
+	if !pollLookupAbsent(loader, "bob@vivastudios.com", 500*time.Millisecond) {
+		t.Error("bob appeared after sibling write — Watch incorrectly fired on unrelated file")
+	}
+
+	// Programmatic guard: Reload() must NOT have been invoked for the sibling
+	// write. This assertion fails if the filepath.Clean(event.Name)==target
+	// filter in Watch() is removed or loosened.
+	if got := loader.ReloadCount(); got != beforeCount {
+		t.Errorf("Reload() invoked %d time(s) after sibling write — filepath filter not working (count before=%d, after=%d)",
+			got-beforeCount, beforeCount, got)
+	}
+
+	// ── Positive control ──────────────────────────────────────────────────────
+	// A real write to users.yaml MUST increment the reload counter, proving the
+	// counter itself is wired correctly (not silently broken).
+	countBeforeReal := loader.ReloadCount()
+
+	writeYAML(t, dir, "users.yaml", watcherYAMLPlusBob)
+	if !pollLookup(loader, "bob@vivastudios.com", 3*time.Second) {
+		t.Error("bob not found after users.yaml update — watcher no longer alive after sibling write")
+	}
+
+	if got := loader.ReloadCount(); got <= countBeforeReal {
+		t.Errorf("Reload() not called after real users.yaml write — reload counter did not increase (before=%d, after=%d)",
+			countBeforeReal, got)
+	}
+
+	_ = watchErr // goroutine exits via ctx cancel (deferred above)
+}
+
+// ─── original tests continue ──────────────────────────────────────────────────
 
 // TestReloadInvalidRetainsLastGood verifies that a failed Reload() keeps the
 // last valid state (last-good retention).

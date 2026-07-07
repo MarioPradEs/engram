@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -637,5 +638,84 @@ func TestBearerJWT_ForgedHeader_NoJWT_IsRejected(t *testing.T) {
 	var ae *AuthError
 	if asAuthError(err, &ae) && ae.Status == http.StatusForbidden {
 		t.Errorf("expected plain 401 error, got AuthError 403 %q — wrong error type", ae.Code)
+	}
+}
+
+// TestHeaderAuth_RevokedUserDeniedAfterReload verifies that after loader.Reload()
+// picks up a users.yaml change that moves a user to status:removed, subsequent
+// requests from that user are denied with account_removed (D3 live-revocation spec).
+func TestHeaderAuth_RevokedUserDeniedAfterReload(t *testing.T) {
+	t.Parallel()
+
+	carolActive := `users:
+  - email: alice@vivastudios.com
+    name: Alice
+    department: dev
+    role: admin
+    status: active
+    enrolled: []
+  - email: carol@vivastudios.com
+    name: Carol
+    department: dev
+    role: member
+    status: active
+    enrolled: []
+`
+	carolRemoved := `users:
+  - email: alice@vivastudios.com
+    name: Alice
+    department: dev
+    role: admin
+    status: active
+    enrolled: []
+  - email: carol@vivastudios.com
+    name: Carol
+    department: dev
+    role: member
+    status: removed
+    enrolled: []
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "users.yaml")
+	if err := os.WriteFile(path, []byte(carolActive), 0o644); err != nil {
+		t.Fatalf("write users.yaml: %v", err)
+	}
+	loader, err := users.NewYAMLLoader(path)
+	if err != nil {
+		t.Fatalf("NewYAMLLoader: %v", err)
+	}
+	ha, err := NewHeaderAuthenticator(loader, "")
+	if err != nil {
+		t.Fatalf("NewHeaderAuthenticator: %v", err)
+	}
+
+	// Before reload: carol is authorized.
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull", nil)
+	req.Header.Set("X-Forwarded-Email", "carol@vivastudios.com")
+	if _, err := ha.Authorize(req); err != nil {
+		t.Fatalf("expected carol to be authorized before reload, got: %v", err)
+	}
+
+	// Update users.yaml: carol → status: removed; trigger Reload.
+	if err := os.WriteFile(path, []byte(carolRemoved), 0o644); err != nil {
+		t.Fatalf("update users.yaml: %v", err)
+	}
+	if err := loader.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// After reload: carol must be denied with account_removed.
+	req2 := httptest.NewRequest(http.MethodGet, "/sync/pull", nil)
+	req2.Header.Set("X-Forwarded-Email", "carol@vivastudios.com")
+	_, err = ha.Authorize(req2)
+	if err == nil {
+		t.Fatal("expected carol to be denied after reload (status: removed), got nil error")
+	}
+	var ae *AuthError
+	if !asAuthError(err, &ae) {
+		t.Fatalf("expected AuthError, got: %v", err)
+	}
+	if ae.Code != "account_removed" {
+		t.Errorf("expected code=account_removed, got %q", ae.Code)
 	}
 }

@@ -738,7 +738,7 @@ func (h *handlers) handleBrowser(w http.ResponseWriter, r *http.Request) {
 			obsTypes = types
 		}
 	}
-	// DR-06: load decided deletion requests for the member notice (non-admin only).
+	// DR-05: load decided deletion requests for the member notice (non-admin only).
 	// Only shown on the full-page render; HTMX partial (handleBrowserObservations) is unchanged.
 	var decisions []cloudstore.StoredDeletionRequest
 	if !p.IsAdmin() && h.cfg.Store != nil {

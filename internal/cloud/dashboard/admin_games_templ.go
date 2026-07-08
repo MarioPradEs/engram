@@ -16,7 +16,7 @@ import templruntime "github.com/a-h/templ/runtime"
 // games is the current list from the in-memory ClassrulesLoader.
 // gameColors maps slug → current hex color (empty string = unset).
 // flashMessage / flashIsError carry flash state surfaced via the redirect query param.
-func AdminGamesCompactPage(games []string, gameColors map[string]string, flashMessage string, flashIsError bool) templ.Component {
+func AdminGamesCompactPage(games []string, gameColors map[string]string, flashMessage string, flashIsError bool, pendingCount int) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -41,7 +41,7 @@ func AdminGamesCompactPage(games []string, gameColors map[string]string, flashMe
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = adminNav("games").Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = adminNav("games", pendingCount).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -188,7 +188,7 @@ func AdminGamesCompactPage(games []string, gameColors map[string]string, flashMe
 // departments is the current list of department names from the ClassrulesLoader.
 // deptColors maps dept name → current hex color (empty string = unset).
 // flashMessage / flashIsError carry flash state surfaced via the redirect query param.
-func AdminDepartmentsPage(departments []string, deptColors map[string]string, flashMessage string, flashIsError bool) templ.Component {
+func AdminDepartmentsPage(departments []string, deptColors map[string]string, flashMessage string, flashIsError bool, pendingCount int) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -213,7 +213,7 @@ func AdminDepartmentsPage(departments []string, deptColors map[string]string, fl
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = adminNav("departments").Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = adminNav("departments", pendingCount).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

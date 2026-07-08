@@ -263,7 +263,7 @@ templ DashboardActivityPartial(stats []cloudstore.DashboardProjectRow, pg Pagina
 // ─── Phase 5: Knowledge Browser ─────────────────────────────────────────────
 
 // BrowserPage renders the knowledge browser with subtabs and filter controls.
-templ BrowserPage(projects []string, types []string, activeProject string, search string, activeType string) {
+templ BrowserPage(projects []string, types []string, activeProject string, search string, activeType string, decisions []cloudstore.StoredDeletionRequest) {
 	<section class="frame-section browser-shell">
 		<div class="section-header">
 			<div>
@@ -271,6 +271,7 @@ templ BrowserPage(projects []string, types []string, activeProject string, searc
 				<h2>Knowledge Browser</h2>
 			</div>
 		</div>
+		@MemberDeletionRequestNotice(decisions)
 		<div class="browser-controls">
 			<select id="browser-project" name="project" hx-get="/dashboard/browser/observations" hx-target="#browser-content" hx-swap="innerHTML" hx-include="#browser-search, #browser-type">
 				<option value="">All Projects</option>
@@ -730,8 +731,10 @@ templ ContributorDetailPage(contributor *cloudstore.DashboardContributorRow, ses
 // ─── Phase 8: Admin Views ───────────────────────────────────────────────────
 
 // adminNav renders the shared admin sub-navigation bar.
-// active should be one of: "overview", "projects", "users", "games", "departments", "health", "audit-log".
-templ adminNav(active string) {
+// active should be one of: "overview", "projects", "users", "games", "departments",
+// "rules", "health", "audit-log", "deletion-requests".
+// pendingCount drives the badge on the Deletion Requests link; 0 suppresses it.
+templ adminNav(active string, pendingCount int) {
 	<div class="admin-nav">
 		if active == "overview" {
 			<a href="/dashboard/admin" class="active">Overview</a>
@@ -773,12 +776,25 @@ templ adminNav(active string) {
 		} else {
 			<a href="/dashboard/admin/audit-log">Audit Log</a>
 		}
+		if active == "deletion-requests" {
+			<a href="/dashboard/admin/deletion-requests" class="active">Deletion Requests
+				if pendingCount > 0 {
+					<span class="pending-badge">{ fmt.Sprint(pendingCount) }</span>
+				}
+			</a>
+		} else {
+			<a href="/dashboard/admin/deletion-requests">Deletion Requests
+				if pendingCount > 0 {
+					<span class="pending-badge">{ fmt.Sprint(pendingCount) }</span>
+				}
+			</a>
+		}
 	</div>
 }
 
 // AdminPage renders the admin dashboard landing with sub-navigation.
 // ADAPTED: SystemHealthInfo -> DashboardSystemHealth; ProjectSyncControl kept.
-templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.ProjectSyncControl) {
+templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.ProjectSyncControl, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -786,7 +802,7 @@ templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.
 				<h2>Admin Overview</h2>
 			</div>
 		</div>
-		@adminNav("overview")
+		@adminNav("overview", pendingCount)
 		if health != nil {
 			<div class="dashboard-grid">
 				<div class="stat-card">
@@ -830,7 +846,7 @@ templ AdminPage(health *cloudstore.DashboardSystemHealth, controls []cloudstore.
 
 // AdminProjectsPage renders organization-level project sync controls.
 // ADAPTED: ProjectSyncControl kept (integrated cloudstore now has it).
-templ AdminProjectsPage(controls []cloudstore.ProjectSyncControl) {
+templ AdminProjectsPage(controls []cloudstore.ProjectSyncControl, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -838,7 +854,7 @@ templ AdminProjectsPage(controls []cloudstore.ProjectSyncControl) {
 				<h2>Project Controls</h2>
 			</div>
 		</div>
-		@adminNav("projects")
+		@adminNav("projects", pendingCount)
 		if len(controls) == 0 {
 			@EmptyState("No Managed Projects", "Projects appear here once cloud receives data or policy entries.")
 		} else {
@@ -941,7 +957,9 @@ templ AdminUsersListPartial(contributors []cloudstore.DashboardContributorRow, p
 // AdminUsersPage renders the admin users list shell.
 // R6-1: converted to hx-get/load pattern (mirrors ProjectsPage) — inline table removed.
 // The outer #admin-users-content div triggers an HTMX load of /dashboard/admin/users/list.
-templ AdminUsersPage() {
+// NOTE: This page appears orphaned (handleAdminUsers routes AdminUsersManagementPage, not
+// AdminUsersPage). Its signature is updated to compile; no handler wires pendingCount to it live.
+templ AdminUsersPage(pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -949,7 +967,7 @@ templ AdminUsersPage() {
 				<h2>Admin Users</h2>
 			</div>
 		</div>
-		@adminNav("users")
+		@adminNav("users", pendingCount)
 		<h3 class="section-block-title">Contributors</h3>
 		<div id="admin-users-content"
 			hx-get="/dashboard/admin/users/list"
@@ -962,7 +980,7 @@ templ AdminUsersPage() {
 
 // AdminHealthPage renders the system health detail view.
 // ADAPTED: SystemHealthInfo -> DashboardSystemHealth.
-templ AdminHealthPage(health *cloudstore.DashboardSystemHealth) {
+templ AdminHealthPage(health *cloudstore.DashboardSystemHealth, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -970,7 +988,7 @@ templ AdminHealthPage(health *cloudstore.DashboardSystemHealth) {
 				<h2>Admin Health</h2>
 			</div>
 		</div>
-		@adminNav("health")
+		@adminNav("health", pendingCount)
 		<h3 class="section-block-title">System Health</h3>
 		if health != nil {
 			<table class="data-table">
@@ -1109,7 +1127,7 @@ templ SessionDetailPage(session *cloudstore.DashboardSessionRow, observations []
 
 // ObservationDetailPage renders the full observation payload with session context.
 // ADAPTED: CloudObservation -> DashboardObservationRow; CloudSession -> DashboardSessionRow.
-templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardObservationRow) {
+templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, session *cloudstore.DashboardSessionRow, related []cloudstore.DashboardObservationRow, canRequestRemoval bool, removalPending bool) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -1171,6 +1189,13 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 					@templ.Raw(renderStructuredContent(observation.Content))
 				</div>
 			</div>
+			if canRequestRemoval {
+				if removalPending {
+					<p class="removal-pending-notice">Removal request pending review.</p>
+				} else {
+					@MemberDeletionRequestButton(observation.SyncID)
+				}
+			}
 			if session != nil {
 				<div class="data-frame linked-session-panel">
 					<p class="section-kicker">LINKED SESSION</p>
@@ -1195,7 +1220,7 @@ templ ObservationDetailPage(observation *cloudstore.DashboardObservationRow, ses
 // The HTMX container triggers loading the list partial on page load. REQ-408.
 // JW2: buildAuditListURL embeds active filter params into the initial hx-get URL
 // so that deep-linking /dashboard/admin/audit-log?contributor=alice preserves filters.
-templ AdminAuditLogPage(displayName string, filter cloudstore.AuditFilter) {
+templ AdminAuditLogPage(displayName string, filter cloudstore.AuditFilter, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -1203,7 +1228,7 @@ templ AdminAuditLogPage(displayName string, filter cloudstore.AuditFilter) {
 				<h2>Audit Log</h2>
 			</div>
 		</div>
-		@adminNav("audit-log")
+		@adminNav("audit-log", pendingCount)
 		<div id="audit-log-content"
 			hx-get={ buildAuditListURL(filter) }
 			hx-trigger="load"

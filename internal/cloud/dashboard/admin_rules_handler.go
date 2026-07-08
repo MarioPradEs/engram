@@ -26,8 +26,9 @@ func (h *handlers) handleAdminRules(w http.ResponseWriter, r *http.Request) {
 	flashMsg := r.URL.Query().Get("flash")
 	flashErr := r.URL.Query().Get("flashErr") == "1"
 
+	pendingCount := h.pendingDeletionCount(r.Context())
 	component := Layout("Admin — Rules", p.DisplayName(), "admin", true,
-		AdminRulesPage(currentRules, flashMsg, flashErr))
+		AdminRulesPage(currentRules, flashMsg, flashErr, pendingCount))
 	if err := component.Render(r.Context(), w); err != nil {
 		log.Printf("[dashboard] handleAdminRules render: %v", err)
 	}

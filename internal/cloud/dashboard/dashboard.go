@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -738,7 +739,16 @@ func (h *handlers) handleBrowser(w http.ResponseWriter, r *http.Request) {
 			obsTypes = types
 		}
 	}
-	component := BrowserPage(projectNames, obsTypes, project, query, obsType)
+	// DR-05: load decided deletion requests for the member notice (non-admin only).
+	// Only shown on the full-page render; HTMX partial (handleBrowserObservations) is unchanged.
+	// Bounded by recentDecisions (recency window + cap) so the notice cannot grow without limit.
+	var decisions []cloudstore.StoredDeletionRequest
+	if !p.IsAdmin() && h.cfg.Store != nil {
+		if all, err := h.cfg.Store.ListDeletionRequestsForRequester(r.Context(), p.Email()); err == nil {
+			decisions = recentDecisions(all, time.Now())
+		}
+	}
+	component := BrowserPage(projectNames, obsTypes, project, query, obsType, decisions)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -795,7 +805,7 @@ func (h *handlers) handleBrowserObservations(w http.ResponseWriter, r *http.Requ
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, obsType)))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, obsType, nil)))
 }
 
 func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request) {
@@ -844,7 +854,7 @@ func (h *handlers) handleBrowserSessions(w http.ResponseWriter, r *http.Request)
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "")))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "", nil)))
 }
 
 func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) {
@@ -893,7 +903,7 @@ func (h *handlers) handleBrowserPrompts(w http.ResponseWriter, r *http.Request) 
 		renderComponent(w, r, partial)
 		return
 	}
-	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "")))
+	renderComponent(w, r, Layout("Browser", p.DisplayName(), "browser", p.IsAdmin(), BrowserPage(nil, nil, project, query, "", nil)))
 }
 
 // handleBrowserSessionDetail handles GET /dashboard/browser/sessions/{sessionID}.
@@ -1039,6 +1049,52 @@ func (h *handlers) handleContributorDetail(w http.ResponseWriter, r *http.Reques
 	renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), component))
 }
 
+// pendingDeletionCount returns the count of pending deletion requests.
+// Returns 0 on nil store, nil-count method, or any error so admin pages
+// degrade gracefully rather than failing entirely over a badge count.
+func (h *handlers) pendingDeletionCount(ctx context.Context) int {
+	if h.cfg.Store == nil {
+		return 0
+	}
+	count, err := h.cfg.Store.PendingDeletionRequestCount(ctx)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
+// memberNoticeWindow and memberNoticeMax bound the member deletion-decision
+// notice so it does not grow without limit as a member accumulates decided
+// requests over time (there is no per-notice dismiss yet).
+const (
+	memberNoticeWindow = 7 * 24 * time.Hour
+	memberNoticeMax    = 5
+)
+
+// recentDecisions returns the member's decided (accepted/rejected) deletion
+// requests worth surfacing in the notice: only those decided within
+// memberNoticeWindow of now, newest first, capped at memberNoticeMax.
+// Pending and undated requests are excluded.
+func recentDecisions(all []cloudstore.StoredDeletionRequest, now time.Time) []cloudstore.StoredDeletionRequest {
+	var decided []cloudstore.StoredDeletionRequest
+	for _, d := range all {
+		if d.Status != "accepted" && d.Status != "rejected" {
+			continue
+		}
+		if d.DecidedAt == nil || now.Sub(*d.DecidedAt) > memberNoticeWindow {
+			continue
+		}
+		decided = append(decided, d)
+	}
+	sort.Slice(decided, func(i, j int) bool {
+		return decided[i].DecidedAt.After(*decided[j].DecidedAt)
+	})
+	if len(decided) > memberNoticeMax {
+		decided = decided[:memberNoticeMax]
+	}
+	return decided
+}
+
 func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	if !p.IsAdmin() {
@@ -1055,7 +1111,8 @@ func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			controls = ctrls
 		}
 	}
-	component := AdminPage(health, controls)
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminPage(health, controls, pendingCount)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -1079,7 +1136,8 @@ func (h *handlers) handleAdminProjectControls(w http.ResponseWriter, r *http.Req
 			controls = ctrls
 		}
 	}
-	component := AdminProjectsPage(controls)
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminProjectsPage(controls, pendingCount)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -1225,7 +1283,8 @@ func (h *handlers) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	flash := r.URL.Query().Get("flash")
 	flashErr := r.URL.Query().Get("error") == "1"
 
-	component := AdminUsersManagementPage(members, departments, flash, flashErr, strings.ToLower(strings.TrimSpace(p.Email())))
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminUsersManagementPage(members, departments, flash, flashErr, strings.ToLower(strings.TrimSpace(p.Email())), pendingCount)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -1288,7 +1347,8 @@ func (h *handlers) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
 			health = &sh
 		}
 	}
-	component := AdminHealthPage(health)
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminHealthPage(health, pendingCount)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return
@@ -1405,7 +1465,24 @@ func (h *handlers) handleObservationDetail(w http.ResponseWriter, r *http.Reques
 		sess = &s
 		related = rel
 	}
-	component := ObservationDetailPage(obs, sess, related)
+	// DR-01: compute owner-guard and pending-state booleans.
+	// canRequestRemoval: non-admin whose email matches the observation's user_email.
+	// removalPending: the owner already has a pending deletion request for this syncID.
+	var canRequestRemoval, removalPending bool
+	if obs != nil && !p.IsAdmin() {
+		canRequestRemoval = strings.EqualFold(strings.TrimSpace(p.Email()), strings.TrimSpace(obs.UserEmail))
+	}
+	if canRequestRemoval && h.cfg.Store != nil {
+		if reqs, err := h.cfg.Store.ListDeletionRequestsForRequester(r.Context(), p.Email()); err == nil {
+			for _, req := range reqs {
+				if req.TargetSyncID == syncID && req.Status == "pending" {
+					removalPending = true
+					break
+				}
+			}
+		}
+	}
+	component := ObservationDetailPage(obs, sess, related, canRequestRemoval, removalPending)
 	renderComponent(w, r, Layout("Observation Detail", p.DisplayName(), "browser", p.IsAdmin(), component))
 }
 
@@ -1522,7 +1599,8 @@ func (h *handlers) handleAdminAuditLog(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, filterErr, http.StatusBadRequest)
 		return
 	}
-	component := AdminAuditLogPage(p.DisplayName(), filter)
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminAuditLogPage(p.DisplayName(), filter, pendingCount)
 	if isHTMXRequest(r) {
 		renderComponent(w, r, component)
 		return

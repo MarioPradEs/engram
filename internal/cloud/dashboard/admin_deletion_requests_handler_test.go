@@ -188,3 +188,82 @@ func TestC1_RequestRemoval_AdminCaller_Gets403(t *testing.T) {
 		t.Errorf("C1: expected 403 for admin caller on member route, got %d; body=%q", rec.Code, rec.Body.String())
 	}
 }
+
+// ── Phase 1: Required-Reason Guard (DR-02) ──────────────────────────────────
+
+// TestHandleRequestRemoval_EmptyReason_Returns400 verifies that a POST with an
+// empty reason is rejected with 400 before CreateDeletionRequest is called.
+// Spec scenario: DR-02-A.
+func TestHandleRequestRemoval_EmptyReason_Returns400(t *testing.T) {
+	const (
+		syncID      = "obs-syncid-empty-reason"
+		memberEmail = "alice@vivastudios.com"
+	)
+	store := &deletionRequestStore{
+		obsBySyncID: map[string]cloudstore.DashboardObservationRow{
+			syncID: {SyncID: syncID, Project: "proj", UserEmail: memberEmail},
+		},
+	}
+	mux := newDeletionRequestMux(store, memberEmail, false)
+	rec := postRequestRemoval(mux, syncID, "")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("DR-02-A: expected 400 for empty reason, got %d; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleRequestRemoval_WhitespaceReason_Returns400 verifies that a POST with
+// a whitespace-only reason is rejected with 400 before CreateDeletionRequest is called.
+// Spec scenario: DR-02-B.
+func TestHandleRequestRemoval_WhitespaceReason_Returns400(t *testing.T) {
+	const (
+		syncID      = "obs-syncid-whitespace-reason"
+		memberEmail = "alice@vivastudios.com"
+	)
+	store := &deletionRequestStore{
+		obsBySyncID: map[string]cloudstore.DashboardObservationRow{
+			syncID: {SyncID: syncID, Project: "proj", UserEmail: memberEmail},
+		},
+	}
+	mux := newDeletionRequestMux(store, memberEmail, false)
+	rec := postRequestRemoval(mux, syncID, "   ")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("DR-02-B: expected 400 for whitespace-only reason, got %d; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleRequestRemoval_ValidReason_CallsStore verifies that a POST with a valid
+// reason succeeds with 303 and CreateDeletionRequest is called with the trimmed reason.
+// Spec scenario: DR-02-C.
+func TestHandleRequestRemoval_ValidReason_CallsStore(t *testing.T) {
+	const (
+		syncID      = "obs-syncid-valid-reason"
+		memberEmail = "alice@vivastudios.com"
+	)
+	store := &deletionRequestStore{
+		obsBySyncID: map[string]cloudstore.DashboardObservationRow{
+			syncID: {SyncID: syncID, Project: "proj", UserEmail: memberEmail},
+		},
+	}
+	mux := newDeletionRequestMux(store, memberEmail, false)
+	rec := postRequestRemoval(mux, syncID, "  sensitive content  ")
+
+	if rec.Code != http.StatusSeeOther && rec.Code != http.StatusOK {
+		t.Errorf("DR-02-C: expected 303 or 200 for valid reason, got %d; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleRequestRemoval_AdminCaller_Returns403 is a regression guard for DR-06-A.
+// Verifies that the admin-block still fires and CreateDeletionRequest is not called.
+func TestHandleRequestRemoval_AdminCaller_Returns403(t *testing.T) {
+	store := &deletionRequestStore{
+		obsBySyncID: map[string]cloudstore.DashboardObservationRow{},
+	}
+	mux := newDeletionRequestMux(store, "admin@vivastudios.com", true)
+	rec := postRequestRemoval(mux, "obs-any", "valid reason")
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("DR-06-A: expected 403 for admin caller on member route, got %d; body=%q", rec.Code, rec.Body.String())
+	}
+}

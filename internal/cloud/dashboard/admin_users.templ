@@ -14,7 +14,7 @@ import "strings"
 // callerEmail is the current principal's email. When a row matches the caller's
 // email (case-insensitive), self-destructive controls (email/role edit,
 // deactivate, delete) are disabled. The server-side guard is authoritative.
-templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, flashMessage string, flashIsError bool, callerEmail string) {
+templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, flashMessage string, flashIsError bool, callerEmail string, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -22,7 +22,7 @@ templ AdminUsersManagementPage(members []ProvisionedUser, departments []string, 
 				<h2>Users</h2>
 			</div>
 		</div>
-		@adminNav("users")
+		@adminNav("users", pendingCount)
 		if flashMessage != "" {
 			if flashIsError {
 				<div class="flash-message flash-error">{ flashMessage }</div>

@@ -22,7 +22,7 @@ import "strings"
 // callerEmail is the current principal's email. When a row matches the caller's
 // email (case-insensitive), self-destructive controls (email/role edit,
 // deactivate, delete) are disabled. The server-side guard is authoritative.
-func AdminUsersManagementPage(members []ProvisionedUser, departments []string, flashMessage string, flashIsError bool, callerEmail string) templ.Component {
+func AdminUsersManagementPage(members []ProvisionedUser, departments []string, flashMessage string, flashIsError bool, callerEmail string, pendingCount int) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -47,7 +47,7 @@ func AdminUsersManagementPage(members []ProvisionedUser, departments []string, f
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = adminNav("users").Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = adminNav("users", pendingCount).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

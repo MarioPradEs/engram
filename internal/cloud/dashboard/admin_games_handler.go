@@ -51,8 +51,9 @@ func (h *handlers) handleAdminGames(w http.ResponseWriter, r *http.Request) {
 	flashMsg := r.URL.Query().Get("flash")
 	flashErr := r.URL.Query().Get("flashErr") == "1"
 
+	pendingCount := h.pendingDeletionCount(r.Context())
 	component := Layout("Admin — Games", p.DisplayName(), "admin", true,
-		AdminGamesCompactPage(games, gameColors, flashMsg, flashErr))
+		AdminGamesCompactPage(games, gameColors, flashMsg, flashErr, pendingCount))
 	if err := component.Render(r.Context(), w); err != nil {
 		log.Printf("[dashboard] handleAdminGames render: %v", err)
 	}
@@ -84,7 +85,7 @@ func (h *handlers) handleAdminGamesPost(w http.ResponseWriter, r *http.Request) 
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		component := Layout("Admin — Games", p.DisplayName(), "admin", true,
-			AdminGamesCompactPage(h.currentGames(), gameColors, err.Error(), true))
+			AdminGamesCompactPage(h.currentGames(), gameColors, err.Error(), true, h.pendingDeletionCount(r.Context())))
 		if renderErr := component.Render(r.Context(), w); renderErr != nil {
 			log.Printf("[dashboard] handleAdminGamesPost render error: %v", renderErr)
 		}
@@ -109,7 +110,7 @@ func (h *handlers) handleAdminGamesPost(w http.ResponseWriter, r *http.Request) 
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 		component := Layout("Admin — Games", p.DisplayName(), "admin", true,
-			AdminGamesCompactPage(h.currentGames(), gameColors, "Write failed: "+err.Error(), true))
+			AdminGamesCompactPage(h.currentGames(), gameColors, "Write failed: "+err.Error(), true, h.pendingDeletionCount(r.Context())))
 		if renderErr := component.Render(r.Context(), w); renderErr != nil {
 			log.Printf("[dashboard] handleAdminGamesPost render error: %v", renderErr)
 		}
@@ -433,8 +434,9 @@ func (h *handlers) handleAdminDepartments(w http.ResponseWriter, r *http.Request
 	flashMsg := r.URL.Query().Get("flash")
 	flashErr := r.URL.Query().Get("flashErr") == "1"
 
+	pendingCount := h.pendingDeletionCount(r.Context())
 	component := Layout("Admin — Departments", p.DisplayName(), "admin", true,
-		AdminDepartmentsPage(depts, deptColors, flashMsg, flashErr))
+		AdminDepartmentsPage(depts, deptColors, flashMsg, flashErr, pendingCount))
 	if err := component.Render(r.Context(), w); err != nil {
 		log.Printf("[dashboard] handleAdminDepartments render: %v", err)
 	}

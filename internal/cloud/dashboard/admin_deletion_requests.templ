@@ -17,6 +17,7 @@ templ AdminDeletionRequestsPage(requests []cloudstore.StoredDeletionRequest, pen
 				<span class="pending-badge">{ fmt.Sprintf("%d pending", pendingCount) }</span>
 			}
 		</h2>
+		@adminNav("deletion-requests", pendingCount)
 		<p class="guiding-note">
 			By default, nothing is deleted. Memory evolves through corrections (observation revisions).
 			Hard deletion is the rare exception reserved for sensitive or erroneous content.
@@ -47,7 +48,7 @@ templ AdminDeletionRequestsPage(requests []cloudstore.StoredDeletionRequest, pen
 							<td>{ req.RequestedAt.Format("2006-01-02 15:04") }</td>
 							<td>
 								if req.Status == "pending" {
-									<form method="POST" action="/dashboard/admin/deletion-requests/accept" style="display:inline">
+									<form method="POST" action="/dashboard/admin/deletion-requests/accept" style="display:inline" onsubmit="return confirm('Hard delete is IRREVERSIBLE. This permanently removes the observation. Continue?')">
 										<input type="hidden" name="id" value={ fmt.Sprintf("%d", req.ID) }/>
 										<button type="submit" class="action-btn danger-btn">Accept (hard-delete)</button>
 									</form>
@@ -70,11 +71,12 @@ templ AdminDeletionRequestsPage(requests []cloudstore.StoredDeletionRequest, pen
 // MemberDeletionRequestButton renders the "Request Removal" button for an observation.
 // Only shown when the observation's user_email matches the viewing member's email.
 // Spec: deletion-requests.spec.md §member-submit.
+// DR-02: reason textarea carries `required` for client-side enforcement; server enforces 400.
 templ MemberDeletionRequestButton(syncID string) {
 	<form method="POST" action={ templ.SafeURL("/dashboard/browser/observations/" + syncID + "/request-removal") }>
 		<label>
-			Reason (optional)
-			<input type="text" name="reason" placeholder="Why should this observation be removed?"/>
+			Reason (required)
+			<textarea name="reason" required placeholder="Why should this observation be removed?"></textarea>
 		</label>
 		<button type="submit" class="action-btn danger-btn">Request Removal</button>
 	</form>

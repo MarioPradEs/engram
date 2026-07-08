@@ -15,7 +15,7 @@ import templruntime "github.com/a-h/templ/runtime"
 // the MCP server instructions so every connected AI agent receives it.
 //
 // flashMessage / flashIsError carry flash state surfaced via the redirect query param.
-func AdminRulesPage(rules string, flashMessage string, flashIsError bool) templ.Component {
+func AdminRulesPage(rules string, flashMessage string, flashIsError bool, pendingCount int) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -40,7 +40,7 @@ func AdminRulesPage(rules string, flashMessage string, flashIsError bool) templ.
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = adminNav("rules").Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = adminNav("rules", pendingCount).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

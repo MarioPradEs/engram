@@ -8,7 +8,7 @@ package dashboard
 // games is the current list from the in-memory ClassrulesLoader.
 // gameColors maps slug → current hex color (empty string = unset).
 // flashMessage / flashIsError carry flash state surfaced via the redirect query param.
-templ AdminGamesCompactPage(games []string, gameColors map[string]string, flashMessage string, flashIsError bool) {
+templ AdminGamesCompactPage(games []string, gameColors map[string]string, flashMessage string, flashIsError bool, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -16,7 +16,7 @@ templ AdminGamesCompactPage(games []string, gameColors map[string]string, flashM
 				<h2>Games</h2>
 			</div>
 		</div>
-		@adminNav("games")
+		@adminNav("games", pendingCount)
 		if flashMessage != "" {
 			if flashIsError {
 				<div class="flash-message flash-error">{ flashMessage }</div>
@@ -118,7 +118,7 @@ templ AdminGamesCompactPage(games []string, gameColors map[string]string, flashM
 // departments is the current list of department names from the ClassrulesLoader.
 // deptColors maps dept name → current hex color (empty string = unset).
 // flashMessage / flashIsError carry flash state surfaced via the redirect query param.
-templ AdminDepartmentsPage(departments []string, deptColors map[string]string, flashMessage string, flashIsError bool) {
+templ AdminDepartmentsPage(departments []string, deptColors map[string]string, flashMessage string, flashIsError bool, pendingCount int) {
 	<section class="frame-section">
 		<div class="section-header">
 			<div>
@@ -126,7 +126,7 @@ templ AdminDepartmentsPage(departments []string, deptColors map[string]string, f
 				<h2>Departments</h2>
 			</div>
 		</div>
-		@adminNav("departments")
+		@adminNav("departments", pendingCount)
 		if flashMessage != "" {
 			if flashIsError {
 				<div class="flash-message flash-error">{ flashMessage }</div>

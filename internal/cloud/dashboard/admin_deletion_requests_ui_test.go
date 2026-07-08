@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 )
@@ -325,10 +326,11 @@ func TestAdminDeletionRequestsPage_RejectFormNoConfirm(t *testing.T) {
 // TestBrowserPage_WithDecisions_ShowsNotice asserts that decided deletion requests
 // render the deletion-notice div. Spec scenario DR-05-A.
 func TestBrowserPage_WithDecisions_ShowsNotice(t *testing.T) {
+	decidedAt := time.Now().Add(-1 * time.Hour)
 	store := &pendingCountStore{
 		parityStoreStub: parityStoreStub{},
 		requesterRequests: []cloudstore.StoredDeletionRequest{
-			{TargetSyncID: "obs-decided", Status: "accepted", RequesterEmail: "alice@vivastudios.com"},
+			{TargetSyncID: "obs-decided", Status: "accepted", RequesterEmail: "alice@vivastudios.com", DecidedAt: &decidedAt},
 		},
 	}
 	mux := buildObsDetailMux("alice@vivastudios.com", "alice@vivastudios.com", false, store)
@@ -359,6 +361,47 @@ func TestBrowserPage_NoDecisions_HidesNotice(t *testing.T) {
 	body := rec.Body.String()
 	if strings.Contains(body, "deletion-notice") {
 		t.Errorf("DR-05-B: expected NO deletion-notice when member has no decided requests, body=%q", body)
+	}
+}
+
+// TestRecentDecisions verifies the member-notice bounding helper: only decided
+// (accepted/rejected) requests with a DecidedAt within the recency window are
+// returned, newest first, capped at memberNoticeMax. Pending and undated
+// requests are excluded. Bounds unbounded growth of the member notice.
+func TestRecentDecisions(t *testing.T) {
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) *time.Time { tt := now.Add(d); return &tt }
+
+	all := []cloudstore.StoredDeletionRequest{
+		{TargetSyncID: "pending", Status: "pending"},                                    // excluded: not decided
+		{TargetSyncID: "no-date", Status: "accepted"},                                   // excluded: nil DecidedAt
+		{TargetSyncID: "stale", Status: "rejected", DecidedAt: at(-8 * 24 * time.Hour)}, // excluded: older than window
+		{TargetSyncID: "d1", Status: "accepted", DecidedAt: at(-1 * time.Hour)},
+		{TargetSyncID: "d2", Status: "rejected", DecidedAt: at(-2 * time.Hour)},
+		{TargetSyncID: "d3", Status: "accepted", DecidedAt: at(-3 * time.Hour)},
+		{TargetSyncID: "d4", Status: "accepted", DecidedAt: at(-4 * time.Hour)},
+		{TargetSyncID: "d5", Status: "accepted", DecidedAt: at(-5 * time.Hour)},
+		{TargetSyncID: "d6", Status: "accepted", DecidedAt: at(-6 * time.Hour)}, // dropped by the cap (oldest)
+	}
+
+	got := recentDecisions(all, now)
+
+	if len(got) != memberNoticeMax {
+		t.Fatalf("expected %d decisions (capped), got %d", memberNoticeMax, len(got))
+	}
+	if got[0].TargetSyncID != "d1" {
+		t.Errorf("expected newest (d1) first, got %q", got[0].TargetSyncID)
+	}
+	for _, d := range got {
+		switch d.TargetSyncID {
+		case "pending", "no-date", "stale", "d6":
+			t.Errorf("excluded request %q leaked into result", d.TargetSyncID)
+		}
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].DecidedAt.Before(*got[i].DecidedAt) {
+			t.Errorf("results not sorted newest-first at index %d", i)
+		}
 	}
 }
 

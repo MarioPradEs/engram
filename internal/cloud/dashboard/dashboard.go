@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -740,14 +741,11 @@ func (h *handlers) handleBrowser(w http.ResponseWriter, r *http.Request) {
 	}
 	// DR-05: load decided deletion requests for the member notice (non-admin only).
 	// Only shown on the full-page render; HTMX partial (handleBrowserObservations) is unchanged.
+	// Bounded by recentDecisions (recency window + cap) so the notice cannot grow without limit.
 	var decisions []cloudstore.StoredDeletionRequest
 	if !p.IsAdmin() && h.cfg.Store != nil {
 		if all, err := h.cfg.Store.ListDeletionRequestsForRequester(r.Context(), p.Email()); err == nil {
-			for _, d := range all {
-				if d.Status == "accepted" || d.Status == "rejected" {
-					decisions = append(decisions, d)
-				}
-			}
+			decisions = recentDecisions(all, time.Now())
 		}
 	}
 	component := BrowserPage(projectNames, obsTypes, project, query, obsType, decisions)
@@ -1063,6 +1061,38 @@ func (h *handlers) pendingDeletionCount(ctx context.Context) int {
 		return 0
 	}
 	return count
+}
+
+// memberNoticeWindow and memberNoticeMax bound the member deletion-decision
+// notice so it does not grow without limit as a member accumulates decided
+// requests over time (there is no per-notice dismiss yet).
+const (
+	memberNoticeWindow = 7 * 24 * time.Hour
+	memberNoticeMax    = 5
+)
+
+// recentDecisions returns the member's decided (accepted/rejected) deletion
+// requests worth surfacing in the notice: only those decided within
+// memberNoticeWindow of now, newest first, capped at memberNoticeMax.
+// Pending and undated requests are excluded.
+func recentDecisions(all []cloudstore.StoredDeletionRequest, now time.Time) []cloudstore.StoredDeletionRequest {
+	var decided []cloudstore.StoredDeletionRequest
+	for _, d := range all {
+		if d.Status != "accepted" && d.Status != "rejected" {
+			continue
+		}
+		if d.DecidedAt == nil || now.Sub(*d.DecidedAt) > memberNoticeWindow {
+			continue
+		}
+		decided = append(decided, d)
+	}
+	sort.Slice(decided, func(i, j int) bool {
+		return decided[i].DecidedAt.After(*decided[j].DecidedAt)
+	})
+	if len(decided) > memberNoticeMax {
+		decided = decided[:memberNoticeMax]
+	}
+	return decided
 }
 
 func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {

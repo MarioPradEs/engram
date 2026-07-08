@@ -68,6 +68,14 @@ func (h *handlers) handleRequestRemoval(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// DR-02: reason is required — reject blank/whitespace-only submissions before
+	// the ownership check or any store call. The client-side `required` textarea is
+	// UX only; this is the authoritative server-side enforcement gate.
+	if reason == "" {
+		http.Error(w, "reason is required", http.StatusBadRequest)
+		return
+	}
+
 	// Ownership check: load the observation by syncID alone using an admin scope to
 	// retrieve it across all projects, then verify the caller's email matches.
 	//

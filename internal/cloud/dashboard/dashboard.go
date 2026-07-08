@@ -1039,6 +1039,20 @@ func (h *handlers) handleContributorDetail(w http.ResponseWriter, r *http.Reques
 	renderComponent(w, r, Layout("Contributor Detail", p.DisplayName(), "contributors", p.IsAdmin(), component))
 }
 
+// pendingDeletionCount returns the count of pending deletion requests.
+// Returns 0 on nil store, nil-count method, or any error so admin pages
+// degrade gracefully rather than failing entirely over a badge count.
+func (h *handlers) pendingDeletionCount(ctx context.Context) int {
+	if h.cfg.Store == nil {
+		return 0
+	}
+	count, err := h.cfg.Store.PendingDeletionRequestCount(ctx)
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (h *handlers) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
 	if !p.IsAdmin() {

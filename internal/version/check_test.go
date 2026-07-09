@@ -287,6 +287,108 @@ func TestUpdateInstructions(t *testing.T) {
 	}
 }
 
+// TestLatestCached verifies the TTL-cache wrapper around the GitHub latest-release fetch.
+// The cache is package-level state; each sub-test must reset it via resetLatestCache().
+func TestLatestCached(t *testing.T) {
+	t.Run("returns version string on first successful fetch", func(t *testing.T) {
+		resetLatestCache(t)
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v1.20.0"}`))
+		}))
+
+		got, err := LatestCached()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "1.20.0" {
+			t.Fatalf("version = %q, want %q", got, "1.20.0")
+		}
+	})
+
+	t.Run("cache hit avoids second HTTP fetch", func(t *testing.T) {
+		resetLatestCache(t)
+		calls := 0
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v1.20.0"}`))
+		}))
+
+		_, _ = LatestCached()
+		_, _ = LatestCached()
+
+		if calls != 1 {
+			t.Fatalf("expected 1 HTTP call, got %d", calls)
+		}
+	})
+
+	t.Run("expired cache triggers refetch", func(t *testing.T) {
+		resetLatestCache(t)
+		withLatestCacheTTL(t, 10*time.Millisecond)
+		calls := 0
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tag_name":"v1.20.0"}`))
+		}))
+
+		_, _ = LatestCached()
+		time.Sleep(20 * time.Millisecond) // let TTL expire
+		_, _ = LatestCached()
+
+		if calls < 2 {
+			t.Fatalf("expected at least 2 HTTP calls after TTL expiry, got %d", calls)
+		}
+	})
+
+	t.Run("fetch error returns last-good cached value", func(t *testing.T) {
+		resetLatestCache(t)
+		withLatestCacheTTL(t, 10*time.Millisecond)
+		callN := 0
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			callN++
+			if callN == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"tag_name":"v1.20.0"}`))
+				return
+			}
+			// second call: return error status
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		}))
+
+		got1, err1 := LatestCached()
+		if err1 != nil || got1 != "1.20.0" {
+			t.Fatalf("first call: got=%q err=%v", got1, err1)
+		}
+
+		time.Sleep(20 * time.Millisecond) // expire
+		got2, err2 := LatestCached()
+		// On error, should return last-good value (non-empty) and a non-nil error
+		if err2 == nil {
+			t.Fatalf("expected error on second (failing) fetch, got nil")
+		}
+		if got2 != "1.20.0" {
+			t.Fatalf("expected stale value %q on fetch failure, got %q", "1.20.0", got2)
+		}
+	})
+
+	t.Run("cold start fetch error returns empty string and error", func(t *testing.T) {
+		resetLatestCache(t)
+		withCheckServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		}))
+
+		got, err := LatestCached()
+		if err == nil {
+			t.Fatal("expected error on cold fetch failure, got nil")
+		}
+		if got != "" {
+			t.Fatalf("expected empty string on cold fetch failure, got %q", got)
+		}
+	})
+}
+
 func withCheckServer(t *testing.T, handler http.Handler) {
 	t.Helper()
 
@@ -297,6 +399,30 @@ func withCheckServer(t *testing.T, handler http.Handler) {
 		githubLatestReleaseURL = oldURL
 		srv.Close()
 	})
+}
+
+// resetLatestCache zeroes the package-level LatestCached cache so each test
+// starts with a cold state. Registered as a t.Cleanup so it runs on failure too.
+func resetLatestCache(t *testing.T) {
+	t.Helper()
+	latestCache.mu.Lock()
+	latestCache.value = ""
+	latestCache.fetchedAt = time.Time{}
+	latestCache.mu.Unlock()
+	t.Cleanup(func() {
+		latestCache.mu.Lock()
+		latestCache.value = ""
+		latestCache.fetchedAt = time.Time{}
+		latestCache.mu.Unlock()
+	})
+}
+
+// withLatestCacheTTL overrides latestCacheTTL for the duration of the test.
+func withLatestCacheTTL(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := latestCacheTTL
+	latestCacheTTL = d
+	t.Cleanup(func() { latestCacheTTL = old })
 }
 
 func withCheckTimeout(t *testing.T, timeout time.Duration) {

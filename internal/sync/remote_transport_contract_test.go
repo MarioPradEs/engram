@@ -25,7 +25,7 @@ func TestRemoteTransportImplementsTransportContract(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := remote.NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := remote.NewRemoteTransport(srv.URL, "token", "proj-a", "")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}

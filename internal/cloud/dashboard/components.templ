@@ -134,9 +134,54 @@ templ HtmxPaginationBar(pg Pagination, endpoint string, target string, includes 
 
 // ─── Phase 4: Dashboard Overview ────────────────────────────────────────────
 
-// DashboardHome renders the main dashboard landing content with project stats.
+// VersionUpdateState represents the relationship between the user's installed
+// client version and the latest published version. Satisfies: REQ-VID-01.
+type VersionUpdateState int
+
+const (
+	// VersionUpdateUnknown means the comparison could not be made (missing
+	// user version or latest-version fetch failed). No /dl CTA is shown.
+	VersionUpdateUnknown VersionUpdateState = iota
+	// VersionUpdateUpToDate means the user's version equals or exceeds the latest.
+	VersionUpdateUpToDate
+	// VersionUpdateAvailable means the latest published version is newer than
+	// the user's version. A /dl CTA is rendered.
+	VersionUpdateAvailable
+)
+
+// VersionIndicator carries all data needed to render the dashboard version panel.
+// Satisfies: REQ-VID-01, REQ-VID-02, REQ-VID-04.
+type VersionIndicator struct {
+	// CloudVersion is the server binary version (ldflags main.version). May be
+	// empty if not wired via WithServerVersion (renders as "unknown").
+	CloudVersion string
+	// YourVersion is the authenticated user's last-seen client version, read
+	// from the cloud_client_versions store. "" means the header was never sent
+	// (pre-header client or first connect) and renders as "unknown".
+	YourVersion string
+	// LatestVersion is the latest published version from the GitHub cache.
+	// "" means the cache is cold or fetch failed; renders as "unknown".
+	LatestVersion string
+	// State is the derived update state for the authenticated user.
+	State VersionUpdateState
+	// UpdateURL is the download URL surfaced in the /dl CTA. Always "/dl".
+	UpdateURL string
+}
+
+// versionDisplay returns a human-readable string for a version: "unknown" when empty.
+func versionDisplay(v string) string {
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+
+// DashboardHome renders the main dashboard landing content with project stats
+// and a version indicator panel.
 // ADAPTED: username comes from Principal.DisplayName() at the call site.
-templ DashboardHome(username string) {
+// isAdmin controls whether the admin fleet table is rendered.
+// indicator carries cloud/user version and update state. Satisfies: REQ-VID-01.
+templ DashboardHome(username string, indicator VersionIndicator, isAdmin bool, fleetRows []cloudstore.DashboardContributorRow) {
 	<section class="hero-panel">
 		<div class="hero-copy">
 			<p class="section-kicker">OPERATOR { username }</p>
@@ -145,6 +190,52 @@ templ DashboardHome(username string) {
 		</div>
 		<div class="data-frame" id="dashboard-stats" hx-get="/dashboard/stats" hx-trigger="load" hx-swap="innerHTML">
 			<p class="htmx-indicator terminal-note">Loading stats...</p>
+		</div>
+	</section>
+	<section class="version-indicator-panel">
+		<div class="version-indicator">
+			<p class="section-kicker">VERSION</p>
+			<dl class="version-grid">
+				<dt>Cloud</dt>
+				<dd>{ versionDisplay(indicator.CloudVersion) }</dd>
+				<dt>Your client</dt>
+				<dd>{ versionDisplay(indicator.YourVersion) }</dd>
+			</dl>
+			if indicator.State == VersionUpdateAvailable {
+				<a href={ templ.SafeURL(indicator.UpdateURL) } class="badge badge-warning version-update-cta">Update available — download</a>
+			}
+		</div>
+	</section>
+	if isAdmin && len(fleetRows) > 0 {
+		@FleetVersionTable(fleetRows)
+	}
+}
+
+// FleetVersionTable renders the admin fleet view of all contributors' last-seen
+// client versions. Only rendered for admin users. Satisfies: REQ-VID-05.
+templ FleetVersionTable(rows []cloudstore.DashboardContributorRow) {
+	<section class="fleet-version-panel">
+		<p class="section-kicker">FLEET</p>
+		<h3>Client Versions</h3>
+		<div class="table-scroll">
+			<table class="fleet-version-table">
+				<thead>
+					<tr>
+						<th>Contributor</th>
+						<th>Last Seen Version</th>
+						<th>Last Activity</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, row := range rows {
+						<tr>
+							<td>{ row.CreatedBy }</td>
+							<td>{ versionDisplay(row.LastClientVersion) }</td>
+							<td>{ row.LastChunkAt }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
 		</div>
 	</section>
 }

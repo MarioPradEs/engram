@@ -241,6 +241,9 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+			// Thread the build-time version (ldflags main.version) into the server so
+			// the dashboard version indicator can display cloud version. (REQ-VID-04, ADR-4)
+			cloudserver.WithServerVersion(version),
 			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
 			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
 			cloudserver.WithAuthEndpoint(loader, jwtSecret),
@@ -457,6 +460,12 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+		// Wire the build-time version so the dashboard version indicator renders
+		// the cloud's own version. Per-contributor client-version RECORDING is NOT
+		// available on this legacy path because auth.Service does not implement the
+		// Attribution interface (withAuth requires it to resolve the caller's email).
+		// Only the OAuth2/header path (above) supports per-contributor recording.
+		cloudserver.WithServerVersion(version),
 	)
 	return runtime, nil
 }
@@ -478,7 +487,7 @@ func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.Cl
 }
 
 var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
-	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project, version)
 	if err != nil {
 		return nil, err
 	}

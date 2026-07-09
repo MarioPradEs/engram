@@ -18,6 +18,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/internal/version"
 	"github.com/a-h/templ"
 )
 
@@ -58,6 +59,14 @@ type MountConfig struct {
 	// Returns (jwt, nil) → mint succeeded; handleLoginPage wraps it via CreateSessionCookie.
 	// nil means auto-login is disabled (token-paste only).
 	AutoLoginFromHeader func(r *http.Request) (string, error)
+	// ServerVersion is the cloud server binary version string (ldflags main.version).
+	// Used by handleDashboardHome to populate the version indicator.
+	// Empty string means "unknown" / not wired. Satisfies: REQ-VID-04.
+	ServerVersion string
+	// LatestVersion is a callback that returns the latest published version string
+	// from the TTL-cached GitHub fetcher. Returns "" when the cache is cold or the
+	// fetch has never succeeded. Used by handleDashboardHome. Satisfies: REQ-VID-03.
+	LatestVersion func() (string, error)
 	// BrainURL is the base URL of the Engram Brain service rendered in the Graph tab iframe.
 	// When empty, the Graph tab shows a "Graph coming soon" placeholder. Set from ENGRAM_BRAIN_URL env. (D3)
 	BrainURL string
@@ -580,11 +589,87 @@ func humanizeAge(d time.Duration) string {
 
 func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
+
+	// Fetch contributors once. Admins use the slice for the fleet view AND the
+	// version indicator lookup; non-admins only need it for the version lookup.
+	// Either way a single ListContributors call satisfies both needs.
+	// Satisfies: FIX #4 — avoid O(N) double scan per dashboard-home render.
+	var contribs []cloudstore.DashboardContributorRow
+	if h.cfg.Store != nil {
+		if rows, err := h.cfg.Store.ListContributors(""); err == nil {
+			contribs = rows
+		}
+	}
+
+	var fleetRows []cloudstore.DashboardContributorRow
+	if p.IsAdmin() {
+		fleetRows = contribs
+	}
+
+	indicator := h.resolveVersionIndicatorFromContribs(r, p, contribs)
+
 	if isHTMXRequest(r) {
-		renderComponent(w, r, DashboardHome(p.DisplayName()))
+		renderComponent(w, r, DashboardHome(p.DisplayName(), indicator, p.IsAdmin(), fleetRows))
 		return
 	}
-	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName())))
+	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName(), indicator, p.IsAdmin(), fleetRows)))
+}
+
+// resolveVersionIndicator computes the VersionIndicator for the authenticated user.
+// It fetches contributors internally; prefer resolveVersionIndicatorFromContribs
+// when the caller already has the contributor slice to avoid a redundant query.
+// Satisfies: REQ-VID-08, REQ-VID-04, REQ-VID-06, REQ-VID-09.
+func (h *handlers) resolveVersionIndicator(r *http.Request, p Principal) VersionIndicator {
+	var contribs []cloudstore.DashboardContributorRow
+	if h.cfg.Store != nil {
+		if rows, err := h.cfg.Store.ListContributors(""); err == nil {
+			contribs = rows
+		}
+	}
+	return h.resolveVersionIndicatorFromContribs(r, p, contribs)
+}
+
+// resolveVersionIndicatorFromContribs computes the VersionIndicator using a
+// pre-fetched contributor slice so the caller can reuse it (e.g. for fleet view).
+// Satisfies: FIX #4 — single ListContributors call per dashboard-home render.
+func (h *handlers) resolveVersionIndicatorFromContribs(_ *http.Request, p Principal, contribs []cloudstore.DashboardContributorRow) VersionIndicator {
+	cloudVer := h.cfg.ServerVersion
+
+	// Fetch latest published version from TTL cache (non-blocking: returns "" on error).
+	latestVer := ""
+	if h.cfg.LatestVersion != nil {
+		// Best-effort: ignore error — "" triggers VersionUpdateUnknown gracefully.
+		latestVer, _ = h.cfg.LatestVersion()
+	}
+
+	// Look up the authenticated user's last-seen client version by email.
+	userVer := ""
+	if p.Email() != "" {
+		for _, c := range contribs {
+			if strings.EqualFold(c.CreatedBy, p.Email()) {
+				userVer = c.LastClientVersion
+				break
+			}
+		}
+	}
+
+	// Compute update state. Unknown when either comparison side is missing.
+	state := VersionUpdateUnknown
+	if userVer != "" && latestVer != "" {
+		if version.IsNewer(latestVer, userVer) {
+			state = VersionUpdateAvailable
+		} else {
+			state = VersionUpdateUpToDate
+		}
+	}
+
+	return VersionIndicator{
+		CloudVersion:  cloudVer,
+		YourVersion:   userVer,
+		LatestVersion: latestVer,
+		State:         state,
+		UpdateURL:     "/dl",
+	}
 }
 
 // handleBrain serves the Brain tab (S6, formerly handleGraph/D3).

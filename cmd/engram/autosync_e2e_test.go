@@ -90,7 +90,7 @@ func TestAutosyncPushPullRoundTrip(t *testing.T) {
 	defer srv.Close()
 
 	// Create a real MutationTransport pointing at the test server.
-	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
+	mt, err := remote.NewMutationTransport(srv.URL, "test-token", "")
 	if err != nil {
 		t.Fatalf("NewMutationTransport: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestLocalWriteDuringTransport500(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
+	mt, err := remote.NewMutationTransport(srv.URL, "test-token", "")
 	if err != nil {
 		t.Fatalf("NewMutationTransport: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestGoroutineIsolationConcurrentWrites(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt, err := remote.NewMutationTransport(srv.URL, "test-token")
+	mt, err := remote.NewMutationTransport(srv.URL, "test-token", "")
 	if err != nil {
 		t.Fatalf("NewMutationTransport: %v", err)
 	}

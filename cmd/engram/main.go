@@ -928,7 +928,7 @@ func tryStartAutosync(ctx context.Context, s *store.Store, cfg store.Config) (au
 		return nil, nil
 	}
 
-	remoteMT, err := remote.NewMutationTransport(serverURL, token)
+	remoteMT, err := remote.NewMutationTransport(serverURL, token, version)
 	if err != nil {
 		log.Printf("[autosync] ERROR: invalid server URL %q: %v; autosync disabled", serverURL, err)
 		return nil, nil
@@ -1669,7 +1669,7 @@ func cmdSync(cfg store.Config) {
 		if err != nil {
 			fatal(err)
 		}
-		transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+		transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project, version)
 		if err != nil {
 			if !doStatus {
 				markCloudSyncFailure(s, cloudTargetKey, err)

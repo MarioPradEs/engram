@@ -54,42 +54,16 @@ func CheckLatest(current string) CheckResult {
 		return checkFailed("Could not check for updates: development builds do not map to a release version.")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubLatestReleaseURL, nil)
-	if err != nil {
-		return checkFailed("Could not check for updates: could not create the GitHub request.")
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	if token := githubToken(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := httpClient.Do(req)
+	latest, err := fetchLatestFromGitHub()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return checkFailed("Could not check for updates: GitHub took too long to respond.")
 		}
-		return checkFailed(fmt.Sprintf("Could not check for updates: %v.", err))
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return checkFailed(nonOKStatusMessage(resp.Status))
+		// Propagate status-specific messages that were already formatted.
+		return checkFailed(err.Error())
 	}
 
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return checkFailed("Could not check for updates: could not read the GitHub response.")
-	}
-
-	latest := normalizeVersion(release.TagName)
 	running := normalizeVersion(current)
-
-	if latest == "" {
-		return checkFailed("Could not check for updates: GitHub did not return a release version.")
-	}
 
 	if latest == running {
 		return CheckResult{Status: StatusUpToDate}
@@ -106,6 +80,49 @@ func CheckLatest(current string) CheckResult {
 			running, latest, updateInstructions(),
 		),
 	}
+}
+
+// fetchLatestFromGitHub performs a bounded HTTP GET to the GitHub releases API
+// and returns the normalised tag name (e.g. "1.20.0"). Returns an error on any
+// network, HTTP, or decode failure. Reuses package-level vars (githubLatestReleaseURL,
+// checkTimeout, httpClient) so tests can override them via withCheckServer.
+// This is the shared low-level helper for both CheckLatest and LatestCached (via cache.go).
+func fetchLatestFromGitHub() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubLatestReleaseURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("Could not check for updates: could not create the GitHub request.")
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if token := githubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", context.DeadlineExceeded
+		}
+		return "", fmt.Errorf("HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s", nonOKStatusMessage(resp.Status))
+	}
+
+	var release githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("Could not check for updates: could not read the GitHub response.")
+	}
+
+	v := normalizeVersion(release.TagName)
+	if v == "" {
+		return "", fmt.Errorf("Could not check for updates: GitHub did not return a release version.")
+	}
+	return v, nil
 }
 
 // normalizeVersion strips a leading "v" prefix.

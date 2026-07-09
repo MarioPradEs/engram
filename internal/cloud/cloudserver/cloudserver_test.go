@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	cloudauth "github.com/Gentleman-Programming/engram/internal/cloud/auth"
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
@@ -1642,6 +1643,125 @@ func TestSelfEnrollRoutes_Return401WithoutCredentials(t *testing.T) {
 	if delRec.Code != http.StatusUnauthorized {
 		t.Errorf("DELETE /user/enrolled-projects without auth: expected 401, got %d body=%q",
 			delRec.Code, delRec.Body.String())
+	}
+}
+
+// ─── T-14/T-15: withAuth version capture ────────────────────────────────────
+
+// fakeVersionRecordingStore wraps fakeStore and implements ClientVersionRecorder
+// so tests can assert that RecordClientVersion was called with the expected args.
+type fakeVersionRecordingStore struct {
+	*fakeStore
+	recordedContributor string
+	recordedVersion     string
+	recordErr           error
+	callCount           int
+	recorded            chan struct{} // closed on first RecordClientVersion call
+}
+
+func newFakeVersionRecordingStore() *fakeVersionRecordingStore {
+	return &fakeVersionRecordingStore{
+		fakeStore: &fakeStore{},
+		recorded:  make(chan struct{}),
+	}
+}
+
+func (s *fakeVersionRecordingStore) RecordClientVersion(_ context.Context, contributor, version string) error {
+	s.callCount++
+	s.recordedContributor = contributor
+	s.recordedVersion = version
+	select {
+	case <-s.recorded:
+	default:
+		close(s.recorded)
+	}
+	return s.recordErr
+}
+
+// fakeAuthWithAttribution implements Authenticator + the Attribution structural interface
+// so withAuth can resolve the contributor email from ctx.
+type fakeAuthWithAttribution struct {
+	email string
+}
+
+func (a fakeAuthWithAttribution) Authorize(r *http.Request) (*http.Request, error) {
+	return r, nil
+}
+
+func (a fakeAuthWithAttribution) Attribution(_ context.Context) cloudstore.Attribution {
+	return cloudstore.Attribution{UserEmail: a.email, UserName: "Test User"}
+}
+
+// TestWithAuthRecordsClientVersion asserts that withAuth reads X-Engram-Client-Version
+// from the request and calls RecordClientVersion on the store.
+// Satisfies: REQ-CVR-05, REQ-CVR-06, Scenario A-4.
+func TestWithAuthRecordsClientVersion(t *testing.T) {
+	st := newFakeVersionRecordingStore()
+	auth := fakeAuthWithAttribution{email: "alice@example.com"}
+	srv := New(st, auth, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("X-Engram-Client-Version", "1.17.0-viva.9")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	// Wait for the fire-and-forget goroutine to call RecordClientVersion (up to 1s).
+	select {
+	case <-st.recorded:
+		// recorded — proceed to assertions
+	case <-time.After(time.Second):
+		t.Fatal("RecordClientVersion was not called within 1s timeout")
+	}
+
+	if st.callCount == 0 {
+		t.Error("RecordClientVersion was not called")
+	}
+	if st.recordedContributor != "alice@example.com" {
+		t.Errorf("recordedContributor = %q, want %q", st.recordedContributor, "alice@example.com")
+	}
+	if st.recordedVersion != "1.17.0-viva.9" {
+		t.Errorf("recordedVersion = %q, want %q", st.recordedVersion, "1.17.0-viva.9")
+	}
+}
+
+// TestWithAuthNoVersionHeaderDoesNotRecord asserts that when the request does not
+// carry X-Engram-Client-Version, RecordClientVersion is NOT called.
+// Satisfies: REQ-CVR-08, Scenario A-5.
+func TestWithAuthNoVersionHeaderDoesNotRecord(t *testing.T) {
+	st := newFakeVersionRecordingStore()
+	auth := fakeAuthWithAttribution{email: "bob@example.com"}
+	srv := New(st, auth, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	// No X-Engram-Client-Version header.
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if st.callCount != 0 {
+		t.Errorf("RecordClientVersion should not be called when header is absent, callCount=%d", st.callCount)
+	}
+}
+
+// TestWithAuthVersionRecordFailureDoesNotBreakSync asserts that a RecordClientVersion
+// error does not alter the sync response (best-effort, fire-and-forget).
+// Satisfies: REQ-CVR-06, Scenario A-6.
+func TestWithAuthVersionRecordFailureDoesNotBreakSync(t *testing.T) {
+	st := newFakeVersionRecordingStore()
+	st.recordErr = errors.New("db timeout")
+	auth := fakeAuthWithAttribution{email: "carol@example.com"}
+	srv := New(st, auth, 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull?project=proj-a", nil)
+	req.Header.Set("X-Engram-Client-Version", "1.17.0-viva.9")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	// The response should be the normal sync response (200 OK), not a 5xx.
+	if rec.Code == http.StatusInternalServerError {
+		t.Errorf("version persistence failure should not cause 5xx, got %d", rec.Code)
 	}
 }
 

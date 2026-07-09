@@ -58,6 +58,14 @@ type MountConfig struct {
 	// Returns (jwt, nil) → mint succeeded; handleLoginPage wraps it via CreateSessionCookie.
 	// nil means auto-login is disabled (token-paste only).
 	AutoLoginFromHeader func(r *http.Request) (string, error)
+	// ServerVersion is the cloud server binary version string (ldflags main.version).
+	// Used by handleDashboardHome to populate the version indicator.
+	// Empty string means "unknown" / not wired. Satisfies: REQ-VID-04.
+	ServerVersion string
+	// LatestVersion is a callback that returns the latest published version string
+	// from the TTL-cached GitHub fetcher. Returns "" when the cache is cold or the
+	// fetch has never succeeded. Used by handleDashboardHome. Satisfies: REQ-VID-03.
+	LatestVersion func() (string, error)
 	// BrainURL is the base URL of the Engram Brain service rendered in the Graph tab iframe.
 	// When empty, the Graph tab shows a "Graph coming soon" placeholder. Set from ENGRAM_BRAIN_URL env. (D3)
 	BrainURL string

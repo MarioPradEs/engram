@@ -241,6 +241,9 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 			cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 			cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+			// Thread the build-time version (ldflags main.version) into the server so
+			// the dashboard version indicator can display cloud version. (REQ-VID-04, ADR-4)
+			cloudserver.WithServerVersion(version),
 			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
 			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
 			cloudserver.WithAuthEndpoint(loader, jwtSecret),

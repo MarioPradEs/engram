@@ -20,6 +20,7 @@ import (
 	engramproject "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/Gentleman-Programming/engram/internal/version"
 )
 
 type Option func(*CloudServer)
@@ -62,6 +63,7 @@ type CloudServer struct {
 	dashboardAdmin   string
 	port             int
 	host             string
+	serverVersion    string // set by WithServerVersion; passed to the dashboard for display
 	maxPushBodyBytes int64
 	mux              *http.ServeMux
 	syncStatus       dashboard.SyncStatusProvider
@@ -136,6 +138,15 @@ func WithSyncStatusProvider(provider dashboard.SyncStatusProvider) Option {
 func WithHost(host string) Option {
 	return func(s *CloudServer) {
 		s.host = strings.TrimSpace(host)
+	}
+}
+
+// WithServerVersion sets the server binary version displayed in the dashboard
+// version indicator. Pass the same ldflags-injected main.version value used by
+// the client. Satisfies: REQ-VID-04, ADR-4.
+func WithServerVersion(v string) Option {
+	return func(s *CloudServer) {
+		s.serverVersion = strings.TrimSpace(v)
 	}
 }
 
@@ -462,6 +473,12 @@ func (s *CloudServer) routes() {
 			}
 			return ""
 		},
+		// ServerVersion: cloud binary version for the dashboard indicator.
+		// Set via WithServerVersion (wired from main.version in cloud.go). (REQ-VID-04)
+		ServerVersion: s.serverVersion,
+		// LatestVersion: TTL-cached GitHub latest-version fetcher.
+		// Set lazily so a cold start does not block dashboard load. (REQ-VID-03)
+		LatestVersion: version.LatestCached,
 		// BrainURL: set from ENGRAM_BRAIN_URL env var. When non-empty, the Graph tab renders
 		// an iframe pointing to the Brain service. When empty, a placeholder is shown. (D3)
 		BrainURL: os.Getenv("ENGRAM_BRAIN_URL"),
@@ -527,6 +544,14 @@ func (s *CloudServer) routes() {
 	}
 }
 
+// ClientVersionRecorder is a structural interface implemented by stores that can
+// persist the last-seen X-Engram-Client-Version per contributor. It is checked
+// via structural assertion in withAuth so the ChunkStore interface stays stable.
+// Satisfies: ADR-3 (optional store capability, not a hard interface extension).
+type ClientVersionRecorder interface {
+	RecordClientVersion(ctx context.Context, contributor, version string) error
+}
+
 func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.auth != nil {
@@ -536,6 +561,24 @@ func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 			r = enriched
+		}
+		// Best-effort: record the client version after auth succeeds.
+		// Fire-and-forget so version telemetry never blocks or fails a sync request.
+		// Satisfies: REQ-CVR-05, REQ-CVR-06, ADR-2, ADR-3.
+		if clientVer := strings.TrimSpace(r.Header.Get("X-Engram-Client-Version")); clientVer != "" {
+			if cvr, ok := s.store.(ClientVersionRecorder); ok {
+				var contributorEmail string
+				if ap, ok := s.auth.(interface {
+					Attribution(ctx context.Context) cloudstore.Attribution
+				}); ok {
+					contributorEmail = ap.Attribution(r.Context()).UserEmail
+				}
+				if contributorEmail != "" {
+					go func() {
+						_ = cvr.RecordClientVersion(r.Context(), contributorEmail, clientVer)
+					}()
+				}
+			}
 		}
 		next(w, r)
 	}

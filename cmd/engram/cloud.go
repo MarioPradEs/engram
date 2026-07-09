@@ -460,6 +460,12 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 		cloudserver.WithDashboardAdminToken(cfg.AdminToken),
 		cloudserver.WithMaxPushBodyBytes(cfg.MaxPushBodyBytes),
 		cloudserver.WithSyncStatusProvider(cloudDashboardStatusProvider{store: cs, projects: allowedProjects}),
+		// Wire the build-time version so the dashboard version indicator renders
+		// the cloud's own version. Per-contributor client-version RECORDING is NOT
+		// available on this legacy path because auth.Service does not implement the
+		// Attribution interface (withAuth requires it to resolve the caller's email).
+		// Only the OAuth2/header path (above) supports per-contributor recording.
+		cloudserver.WithServerVersion(version),
 	)
 	return runtime, nil
 }

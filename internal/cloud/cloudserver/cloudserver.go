@@ -564,6 +564,10 @@ func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		// Best-effort: record the client version after auth succeeds.
 		// Fire-and-forget so version telemetry never blocks or fails a sync request.
+		// NOTE: per-contributor recording requires the auth to implement Attribution.
+		// The legacy static-token path (auth.Service without OAuth) does not implement
+		// Attribution, so contributorEmail will be empty and recording is skipped there.
+		// Only the OAuth2/header auth path supports per-contributor version recording.
 		// Satisfies: REQ-CVR-05, REQ-CVR-06, ADR-2, ADR-3.
 		if clientVer := strings.TrimSpace(r.Header.Get("X-Engram-Client-Version")); clientVer != "" {
 			if cvr, ok := s.store.(ClientVersionRecorder); ok {
@@ -574,8 +578,13 @@ func (s *CloudServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
 					contributorEmail = ap.Attribution(r.Context()).UserEmail
 				}
 				if contributorEmail != "" {
+					// Use WithoutCancel so the goroutine's DB write survives the
+					// handler return. net/http cancels r.Context() when ServeHTTP
+					// returns; the detached context keeps the write alive.
+					// Satisfies: ADR-2 (fire-and-forget must complete the write).
+					detached := context.WithoutCancel(r.Context())
 					go func() {
-						_ = cvr.RecordClientVersion(r.Context(), contributorEmail, clientVer)
+						_ = cvr.RecordClientVersion(detached, contributorEmail, clientVer)
 					}()
 				}
 			}

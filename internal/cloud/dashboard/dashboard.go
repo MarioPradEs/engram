@@ -589,13 +589,25 @@ func humanizeAge(d time.Duration) string {
 
 func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
-	indicator := h.resolveVersionIndicator(r, p)
-	var fleetRows []cloudstore.DashboardContributorRow
-	if p.IsAdmin() && h.cfg.Store != nil {
+
+	// Fetch contributors once. Admins use the slice for the fleet view AND the
+	// version indicator lookup; non-admins only need it for the version lookup.
+	// Either way a single ListContributors call satisfies both needs.
+	// Satisfies: FIX #4 — avoid O(N) double scan per dashboard-home render.
+	var contribs []cloudstore.DashboardContributorRow
+	if h.cfg.Store != nil {
 		if rows, err := h.cfg.Store.ListContributors(""); err == nil {
-			fleetRows = rows
+			contribs = rows
 		}
 	}
+
+	var fleetRows []cloudstore.DashboardContributorRow
+	if p.IsAdmin() {
+		fleetRows = contribs
+	}
+
+	indicator := h.resolveVersionIndicatorFromContribs(r, p, contribs)
+
 	if isHTMXRequest(r) {
 		renderComponent(w, r, DashboardHome(p.DisplayName(), indicator, p.IsAdmin(), fleetRows))
 		return
@@ -604,10 +616,23 @@ func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveVersionIndicator computes the VersionIndicator for the authenticated user.
-// It reads the latest-version from the TTL cache (best-effort; never blocks on GitHub),
-// looks up the caller's LastClientVersion from the contributor store, and computes
-// the update state. Satisfies: REQ-VID-08, REQ-VID-04, REQ-VID-06, REQ-VID-09.
-func (h *handlers) resolveVersionIndicator(_ *http.Request, p Principal) VersionIndicator {
+// It fetches contributors internally; prefer resolveVersionIndicatorFromContribs
+// when the caller already has the contributor slice to avoid a redundant query.
+// Satisfies: REQ-VID-08, REQ-VID-04, REQ-VID-06, REQ-VID-09.
+func (h *handlers) resolveVersionIndicator(r *http.Request, p Principal) VersionIndicator {
+	var contribs []cloudstore.DashboardContributorRow
+	if h.cfg.Store != nil {
+		if rows, err := h.cfg.Store.ListContributors(""); err == nil {
+			contribs = rows
+		}
+	}
+	return h.resolveVersionIndicatorFromContribs(r, p, contribs)
+}
+
+// resolveVersionIndicatorFromContribs computes the VersionIndicator using a
+// pre-fetched contributor slice so the caller can reuse it (e.g. for fleet view).
+// Satisfies: FIX #4 — single ListContributors call per dashboard-home render.
+func (h *handlers) resolveVersionIndicatorFromContribs(_ *http.Request, p Principal, contribs []cloudstore.DashboardContributorRow) VersionIndicator {
 	cloudVer := h.cfg.ServerVersion
 
 	// Fetch latest published version from TTL cache (non-blocking: returns "" on error).
@@ -619,13 +644,11 @@ func (h *handlers) resolveVersionIndicator(_ *http.Request, p Principal) Version
 
 	// Look up the authenticated user's last-seen client version by email.
 	userVer := ""
-	if h.cfg.Store != nil && p.Email() != "" {
-		if contribs, err := h.cfg.Store.ListContributors(""); err == nil {
-			for _, c := range contribs {
-				if strings.EqualFold(c.CreatedBy, p.Email()) {
-					userVer = c.LastClientVersion
-					break
-				}
+	if p.Email() != "" {
+		for _, c := range contribs {
+			if strings.EqualFold(c.CreatedBy, p.Email()) {
+				userVer = c.LastClientVersion
+				break
 			}
 		}
 	}

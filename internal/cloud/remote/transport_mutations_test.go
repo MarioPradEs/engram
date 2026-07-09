@@ -12,9 +12,10 @@ import (
 )
 
 // mustNewMutationTransport is a test helper that panics on error.
-func mustNewMutationTransport(t *testing.T, baseURL, token string) *MutationTransport {
+// Pass version="" when the test does not care about version header behavior.
+func mustNewMutationTransport(t *testing.T, baseURL, token, version string) *MutationTransport {
 	t.Helper()
-	mt, err := NewMutationTransport(baseURL, token)
+	mt, err := NewMutationTransport(baseURL, token, version)
 	if err != nil {
 		t.Fatalf("NewMutationTransport(%q): %v", baseURL, err)
 	}
@@ -38,7 +39,7 @@ func TestMutationTransportPushAccepted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "token123", "")
 	entries := []MutationEntry{
 		{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert", Payload: json.RawMessage(`{}`)},
 		{Project: "proj-a", Entity: "obs", EntityKey: "k2", Op: "upsert", Payload: json.RawMessage(`{}`)},
@@ -60,7 +61,7 @@ func TestMutationTransportPushUnauth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "bad-token", "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -97,7 +98,7 @@ func TestMutationTransportPullSinceSeq(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "token123", "")
 	resp, err := mt.PullMutations(5, 100)
 	if err != nil {
 		t.Fatalf("PullMutations: %v", err)
@@ -120,7 +121,7 @@ func TestMutationTransportPullUnauth(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "bad-token", "")
 	_, err := mt.PullMutations(0, 100)
 	if err == nil {
 		t.Fatal("expected error")
@@ -141,7 +142,7 @@ func TestMutationTransportPush404ServerUnsupported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "token123", "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -162,7 +163,7 @@ func TestMutationTransportPull404ServerUnsupported(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "token123")
+	mt := mustNewMutationTransport(t, srv.URL, "token123", "")
 	_, err := mt.PullMutations(0, 100)
 	if err == nil {
 		t.Fatal("expected error")
@@ -183,7 +184,7 @@ func TestMutationTransportPush401VsNotFound(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mt := mustNewMutationTransport(t, srv.URL, "bad-token")
+	mt := mustNewMutationTransport(t, srv.URL, "bad-token", "")
 	_, err := mt.PushMutations([]MutationEntry{{Project: "proj-a", Entity: "obs", EntityKey: "k1", Op: "upsert"}})
 	if err == nil {
 		t.Fatal("expected error")
@@ -197,6 +198,75 @@ func TestMutationTransportPush401VsNotFound(t *testing.T) {
 	}
 	if !statusErr.IsAuthFailure() {
 		t.Fatalf("expected IsAuthFailure for 401, got status=%d code=%q", statusErr.StatusCode, statusErr.ErrorCode)
+	}
+}
+
+// ─── T-09: X-Engram-Client-Version header on MutationTransport ───────────────
+
+// TestMutationTransportStampsClientVersionHeader asserts that a transport built
+// with a non-empty, non-dev version stamps X-Engram-Client-Version on all mutation requests.
+// Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
+func TestMutationTransportStampsClientVersionHeader(t *testing.T) {
+	const wantVersion = "1.17.0-viva.9"
+	var (
+		pushHeader string
+		pullHeader string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/sync/mutations/push":
+			pushHeader = r.Header.Get("X-Engram-Client-Version")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"accepted_seqs":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/sync/mutations/pull":
+			pullHeader = r.Header.Get("X-Engram-Client-Version")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"mutations":[],"has_more":false,"latest_seq":0}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	mt := mustNewMutationTransport(t, srv.URL, "token", wantVersion)
+
+	if _, err := mt.PushMutations(nil); err != nil {
+		t.Fatalf("PushMutations: %v", err)
+	}
+	if pushHeader != wantVersion {
+		t.Errorf("PushMutations: X-Engram-Client-Version = %q, want %q", pushHeader, wantVersion)
+	}
+
+	if _, err := mt.PullMutations(0, 10); err != nil {
+		t.Fatalf("PullMutations: %v", err)
+	}
+	if pullHeader != wantVersion {
+		t.Errorf("PullMutations: X-Engram-Client-Version = %q, want %q", pullHeader, wantVersion)
+	}
+}
+
+// TestMutationTransportOmitsHeaderWhenVersionEmpty asserts that version == "" → no header.
+// Satisfies: REQ-CVR-03.
+func TestMutationTransportOmitsHeaderWhenVersionEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("X-Engram-Client-Version"); h != "" {
+			t.Errorf("unexpected X-Engram-Client-Version: %q", h)
+		}
+		switch {
+		case r.URL.Path == "/sync/mutations/push":
+			_, _ = w.Write([]byte(`{"accepted_seqs":[]}`))
+		case r.URL.Path == "/sync/mutations/pull":
+			_, _ = w.Write([]byte(`{"mutations":[],"has_more":false,"latest_seq":0}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	mt := mustNewMutationTransport(t, srv.URL, "token", "")
+	if _, err := mt.PushMutations(nil); err != nil {
+		t.Fatalf("PushMutations: %v", err)
 	}
 }
 
@@ -217,7 +287,7 @@ func TestNewMutationTransportRejectsInvalidURL(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mt, err := NewMutationTransport(tc.url, "token")
+			mt, err := NewMutationTransport(tc.url, "token", "")
 			if err == nil {
 				t.Fatalf("expected error for URL %q, got nil (transport=%v)", tc.url, mt)
 			}
@@ -234,7 +304,7 @@ func TestNewMutationTransportAcceptsValidURL(t *testing.T) {
 		"http://127.0.0.1:9000/",
 	}
 	for _, u := range cases {
-		mt, err := NewMutationTransport(u, "token")
+		mt, err := NewMutationTransport(u, "token", "")
 		if err != nil {
 			t.Fatalf("expected nil error for URL %q, got %v", u, err)
 		}
@@ -261,7 +331,7 @@ func TestTransport404LogsServerUnsupportedWarning(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig) // restore to original (never nil — prevents process-wide log corruption)
 
-	mt, err := NewMutationTransport(srv.URL, "token123")
+	mt, err := NewMutationTransport(srv.URL, "token123", "")
 	if err != nil {
 		t.Fatalf("NewMutationTransport: %v", err)
 	}

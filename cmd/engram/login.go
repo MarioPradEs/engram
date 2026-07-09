@@ -236,7 +236,7 @@ func doPostLoginPull(cloudURL, token string) (int, error) {
 	if cloudURL == "" || token == "" {
 		return 0, nil
 	}
-	mt, err := remote.NewMutationTransport(cloudURL, token)
+	mt, err := remote.NewMutationTransport(cloudURL, token, version)
 	if err != nil {
 		return 0, fmt.Errorf("post-login pull: create transport: %w", err)
 	}
@@ -258,7 +258,7 @@ func doPostLoginPush(cloudURL, token string, entries []remote.MutationEntry) (in
 	if cloudURL == "" || token == "" {
 		return 0, nil
 	}
-	mt, err := remote.NewMutationTransport(cloudURL, token)
+	mt, err := remote.NewMutationTransport(cloudURL, token, version)
 	if err != nil {
 		return 0, fmt.Errorf("post-login push: create transport: %w", err)
 	}

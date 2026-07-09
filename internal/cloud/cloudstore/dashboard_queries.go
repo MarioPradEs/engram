@@ -76,10 +76,11 @@ type DashboardProjectRow struct {
 }
 
 type DashboardContributorRow struct {
-	CreatedBy   string
-	Chunks      int
-	Projects    int
-	LastChunkAt string
+	CreatedBy         string
+	Chunks            int
+	Projects          int
+	LastChunkAt       string
+	LastClientVersion string // "" means not yet recorded (render as "unknown")
 }
 
 type DashboardSessionRow struct {
@@ -1009,7 +1010,12 @@ func (cs *CloudStore) buildDashboardReadModel() (dashboardReadModel, error) {
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
-	model, err := buildDashboardReadModelFromRows(chunks, mutations)
+	versionRows, versionErr := cs.loadClientVersionRows()
+	if versionErr != nil {
+		// Non-fatal: proceed without version stamping so the dashboard still loads.
+		versionRows = nil
+	}
+	model, err := buildDashboardReadModelFromRowsWithVersions(chunks, mutations, versionRows)
 	if err != nil {
 		return dashboardReadModel{}, err
 	}
@@ -1221,6 +1227,12 @@ type dashboardMutationRow struct {
 	userEmail  string // NEW (D2) — cloud_mutations.user_email; per-observation authoritative attribution
 }
 
+// clientVersionRow holds a row from cloud_client_versions for read-model stamping.
+type clientVersionRow struct {
+	contributor       string
+	lastClientVersion string
+}
+
 func (cs *CloudStore) loadChunkRows(project string) ([]dashboardChunkRow, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
@@ -1335,6 +1347,81 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 		return nil, fmt.Errorf("cloudstore: dashboard iterate mutations: %w", err)
 	}
 	return result, nil
+}
+
+// loadClientVersionRows returns all rows from cloud_client_versions for read-model stamping.
+// Returns an empty slice (no error) when the table exists but is empty, or when
+// the table does not yet exist (pre-migration instance). Callers must handle
+// an empty result as "no versions recorded".
+func (cs *CloudStore) loadClientVersionRows() ([]clientVersionRow, error) {
+	if cs == nil || cs.db == nil {
+		return nil, fmt.Errorf("cloudstore: not initialized")
+	}
+	rows, err := cs.db.QueryContext(context.Background(), `
+		SELECT contributor, last_client_version
+		FROM cloud_client_versions`)
+	if err != nil {
+		// Table may not exist on an old schema (before migration runs).
+		// Treat as empty rather than a fatal error so dashboard still loads.
+		return []clientVersionRow{}, nil
+	}
+	defer rows.Close()
+
+	var result []clientVersionRow
+	for rows.Next() {
+		var r clientVersionRow
+		if err := rows.Scan(&r.contributor, &r.lastClientVersion); err != nil {
+			return nil, fmt.Errorf("cloudstore: scan client version row: %w", err)
+		}
+		r.contributor = strings.TrimSpace(r.contributor)
+		r.lastClientVersion = strings.TrimSpace(r.lastClientVersion)
+		result = append(result, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cloudstore: iterate client version rows: %w", err)
+	}
+	return result, nil
+}
+
+// buildDashboardReadModelFromRowsWithVersions is like buildDashboardReadModelFromRows
+// but additionally stamps LastClientVersion onto contributor rows from versionRows.
+// Satisfies: REQ-CVR-07, REQ-CVR-08.
+func buildDashboardReadModelFromRowsWithVersions(chunks []dashboardChunkRow, mutationRows []dashboardMutationRow, versionRows []clientVersionRow) (dashboardReadModel, error) {
+	model, err := buildDashboardReadModelFromRows(chunks, mutationRows)
+	if err != nil {
+		return dashboardReadModel{}, err
+	}
+
+	if len(versionRows) == 0 {
+		return model, nil
+	}
+
+	// Build a lookup map: contributor → last_client_version.
+	versionByContributor := make(map[string]string, len(versionRows))
+	for _, r := range versionRows {
+		if r.contributor != "" {
+			versionByContributor[r.contributor] = r.lastClientVersion
+		}
+	}
+
+	// Stamp top-level contributor rows.
+	for i, row := range model.contributors {
+		if v, ok := versionByContributor[row.CreatedBy]; ok {
+			model.contributors[i].LastClientVersion = v
+		}
+	}
+
+	// Stamp per-project contributor rows inside projectDetails.
+	for project, detail := range model.projectDetails {
+		for i, row := range detail.Contributors {
+			if v, ok := versionByContributor[row.CreatedBy]; ok {
+				detail.Contributors[i].LastClientVersion = v
+			}
+		}
+		model.projectDetails[project] = detail
+	}
+
+	return model, nil
 }
 
 // ─── SystemHealth ─────────────────────────────────────────────────────────────

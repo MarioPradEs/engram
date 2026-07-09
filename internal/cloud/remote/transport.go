@@ -21,6 +21,7 @@ type RemoteTransport struct {
 	baseURL    string
 	token      string
 	project    string
+	version    string
 	httpClient *http.Client
 }
 
@@ -77,7 +78,7 @@ func newHTTPStatusError(operation string, statusCode int, body []byte) error {
 	}
 }
 
-func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error) {
+func NewRemoteTransport(baseURL, token, project, version string) (*RemoteTransport, error) {
 	normalized, err := validateBaseURL(baseURL)
 	if err != nil {
 		return nil, err
@@ -91,6 +92,7 @@ func NewRemoteTransport(baseURL, token, project string) (*RemoteTransport, error
 		baseURL: normalized,
 		token:   strings.TrimSpace(token),
 		project: project,
+		version: strings.TrimSpace(version),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -146,6 +148,17 @@ func (rt *RemoteTransport) setAuthorization(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+rt.token)
 }
 
+// setClientVersion stamps X-Engram-Client-Version on the request when the
+// transport was constructed with a non-empty, non-"dev" version string.
+// This allows the server to track the last-seen client version per contributor.
+// Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
+func (rt *RemoteTransport) setClientVersion(req *http.Request) {
+	if rt.version == "" || rt.version == "dev" {
+		return
+	}
+	req.Header.Set("X-Engram-Client-Version", rt.version)
+}
+
 func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
 	reqURL, err := rt.endpointURL(url.Values{"project": []string{rt.project}}, "sync", "pull")
 	if err != nil {
@@ -156,6 +169,7 @@ func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
 		return nil, fmt.Errorf("cloud: build manifest request: %w", err)
 	}
 	rt.setAuthorization(req)
+	rt.setClientVersion(req)
 
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -209,6 +223,7 @@ func (rt *RemoteTransport) WriteChunk(chunkID string, data []byte, entry engrams
 	}
 	req.Header.Set("Content-Type", "application/json")
 	rt.setAuthorization(req)
+	rt.setClientVersion(req)
 
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
@@ -232,6 +247,7 @@ func (rt *RemoteTransport) ReadChunk(chunkID string) ([]byte, error) {
 		return nil, fmt.Errorf("cloud: build pull request: %w", err)
 	}
 	rt.setAuthorization(req)
+	rt.setClientVersion(req)
 	resp, err := rt.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("cloud: pull chunk %s: %w", chunkID, err)
@@ -297,12 +313,15 @@ func (rt *RemoteTransport) PullMutations(_ int64, _ int) (*PullMutationsResponse
 type MutationTransport struct {
 	baseURL    string
 	token      string
+	version    string
 	httpClient *http.Client
 }
 
 // NewMutationTransport creates a MutationTransport. baseURL must be a valid http/https URL.
 // BW6: Reuses validateBaseURL to reject empty/malformed URLs.
-func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
+// version is the client build version string; if empty or "dev", the
+// X-Engram-Client-Version header is not sent.
+func NewMutationTransport(baseURL, token, version string) (*MutationTransport, error) {
 	normalized, err := validateBaseURL(baseURL)
 	if err != nil {
 		return nil, err
@@ -310,6 +329,7 @@ func NewMutationTransport(baseURL, token string) (*MutationTransport, error) {
 	return &MutationTransport{
 		baseURL: normalized,
 		token:   strings.TrimSpace(token),
+		version: strings.TrimSpace(version),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -320,6 +340,15 @@ func (mt *MutationTransport) setAuthorization(req *http.Request) {
 	if mt.token != "" {
 		req.Header.Set("Authorization", "Bearer "+mt.token)
 	}
+}
+
+// setClientVersion stamps X-Engram-Client-Version on mutation requests.
+// Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
+func (mt *MutationTransport) setClientVersion(req *http.Request) {
+	if mt.version == "" || mt.version == "dev" {
+		return
+	}
+	req.Header.Set("X-Engram-Client-Version", mt.version)
 }
 
 // PushMutations POSTs a batch of mutations to the cloud server.
@@ -337,6 +366,7 @@ func (mt *MutationTransport) PushMutations(entries []MutationEntry) ([]int64, er
 	}
 	req.Header.Set("Content-Type", "application/json")
 	mt.setAuthorization(req)
+	mt.setClientVersion(req)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {
@@ -368,6 +398,7 @@ func (mt *MutationTransport) PullMutations(sinceSeq int64, limit int) (*PullMuta
 		return nil, fmt.Errorf("cloud: build mutation pull request: %w", err)
 	}
 	mt.setAuthorization(req)
+	mt.setClientVersion(req)
 
 	resp, err := mt.httpClient.Do(req)
 	if err != nil {

@@ -478,7 +478,7 @@ func backfillAllowedProjectMutationChunks(ctx context.Context, cs *cloudstore.Cl
 }
 
 var runUpgradeBootstrap = func(s *store.Store, project string, cc *cloudConfig) (*engramsync.UpgradeBootstrapResult, error) {
-	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project)
+	transport, err := remote.NewRemoteTransport(cc.ServerURL, cc.Token, project, version)
 	if err != nil {
 		return nil, err
 	}

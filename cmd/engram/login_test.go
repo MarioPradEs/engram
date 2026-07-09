@@ -511,7 +511,7 @@ func makeHTTPStatusError401() error {
 	}))
 	defer srv.Close()
 
-	mt, err := remote.NewMutationTransport(srv.URL, "bad-token")
+	mt, err := remote.NewMutationTransport(srv.URL, "bad-token", "")
 	if err != nil {
 		panic(fmt.Sprintf("makeHTTPStatusError401: NewMutationTransport: %v", err))
 	}
@@ -625,7 +625,7 @@ func makeHTTPStatusError403() error {
 	}))
 	defer srv.Close()
 
-	mt, err := remote.NewMutationTransport(srv.URL, "bad-token")
+	mt, err := remote.NewMutationTransport(srv.URL, "bad-token", "")
 	if err != nil {
 		panic(fmt.Sprintf("makeHTTPStatusError403: NewMutationTransport: %v", err))
 	}
@@ -850,7 +850,7 @@ func TestPostLoginSyncSendsBearerToken(t *testing.T) {
 	oldPushFn := postLoginPushFn
 	postLoginPullFn = func(cfg store.Config) (int, error) {
 		pullCalled = true
-		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
+		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken, "")
 		if err != nil {
 			return 0, err
 		}
@@ -862,7 +862,7 @@ func TestPostLoginSyncSendsBearerToken(t *testing.T) {
 	}
 	postLoginPushFn = func(cfg store.Config) (int, error) {
 		pushCalled = true
-		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken)
+		mt, err := remote.NewMutationTransport(syncSrv.URL, storedToken, "")
 		if err != nil {
 			return 0, err
 		}

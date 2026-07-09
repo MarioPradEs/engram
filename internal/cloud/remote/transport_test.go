@@ -30,7 +30,7 @@ func TestReadManifestReturnsHTTPStatusErrorForAuthAndPolicyFailures(t *testing.T
 			}))
 			defer srv.Close()
 
-			rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+			rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", "")
 			if err != nil {
 				t.Fatalf("NewRemoteTransport: %v", err)
 			}
@@ -59,7 +59,7 @@ func TestReadManifestParsesMachineActionableErrorPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", "")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestWriteChunkCanonicalizesPayloadAndChunkID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", "")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestNewRemoteTransportRejectsBaseURLWithQueryOrFragment(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewRemoteTransport(tc.baseURL, "token", "proj-a")
+			_, err := NewRemoteTransport(tc.baseURL, "token", "proj-a", "")
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.baseURL)
 			}
@@ -167,6 +167,120 @@ func TestNewRemoteTransportRejectsBaseURLWithQueryOrFragment(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+// ─── T-07: X-Engram-Client-Version header on RemoteTransport ─────────────────
+
+// TestRemoteTransportStampsClientVersionHeader asserts that a transport built
+// with a non-empty, non-dev version stamps X-Engram-Client-Version on all requests.
+// Satisfies: REQ-CVR-01, REQ-CVR-02, Scenarios A-1, A-2.
+func TestRemoteTransportStampsClientVersionHeader(t *testing.T) {
+	const wantVersion = "1.17.0-viva.9"
+	var (
+		manifestHeader string
+		readChunkHeader string
+		writeChunkHeader string
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := r.Header.Get("X-Engram-Client-Version")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/sync/pull" && r.URL.Query().Get("project") != "":
+			manifestHeader = hdr
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/sync/pull/"):
+			readChunkHeader = hdr
+			_, _ = w.Write([]byte(`{"sessions":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/sync/push":
+			writeChunkHeader = hdr
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", wantVersion)
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if manifestHeader != wantVersion {
+		t.Errorf("ReadManifest: X-Engram-Client-Version = %q, want %q", manifestHeader, wantVersion)
+	}
+
+	if _, err := rt.ReadChunk("chunk-1"); err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if readChunkHeader != wantVersion {
+		t.Errorf("ReadChunk: X-Engram-Client-Version = %q, want %q", readChunkHeader, wantVersion)
+	}
+
+	if err := rt.WriteChunk("c1", []byte(`{"sessions":[]}`), engramsync.ChunkEntry{CreatedBy: "tester", CreatedAt: "2026-01-01T00:00:00Z"}); err != nil {
+		t.Fatalf("WriteChunk: %v", err)
+	}
+	if writeChunkHeader != wantVersion {
+		t.Errorf("WriteChunk: X-Engram-Client-Version = %q, want %q", writeChunkHeader, wantVersion)
+	}
+}
+
+// TestRemoteTransportOmitsHeaderWhenVersionEmpty asserts that when version == ""
+// the transport does NOT send X-Engram-Client-Version.
+// Satisfies: REQ-CVR-03, Scenario A-3.
+func TestRemoteTransportOmitsHeaderWhenVersionEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("X-Engram-Client-Version"); h != "" {
+			t.Errorf("unexpected X-Engram-Client-Version header: %q", h)
+		}
+		if r.URL.Path == "/sync/pull" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}
+	}))
+	defer srv.Close()
+
+	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", "")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+}
+
+// TestRemoteTransportOmitsHeaderWhenVersionDev asserts that when version == "dev"
+// the transport does NOT send X-Engram-Client-Version.
+// Satisfies: REQ-CVR-03 (dev builds are not useful version signals).
+func TestRemoteTransportOmitsHeaderWhenVersionDev(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("X-Engram-Client-Version"); h != "" {
+			t.Errorf("unexpected X-Engram-Client-Version header for dev version: %q", h)
+		}
+		if r.URL.Path == "/sync/pull" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":1,"chunks":[]}`))
+		} else {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}
+	}))
+	defer srv.Close()
+
+	rt, err := NewRemoteTransport(srv.URL, "token", "proj-a", "dev")
+	if err != nil {
+		t.Fatalf("NewRemoteTransport: %v", err)
+	}
+	if _, err := rt.ReadManifest(); err != nil {
+		t.Fatalf("ReadManifest: %v", err)
 	}
 }
 
@@ -196,7 +310,7 @@ func TestRemoteTransportBuildsRequestURLsFromBasePath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "token", "proj-a")
+	rt, err := NewRemoteTransport(srv.URL+"/api/v1", "token", "proj-a", "")
 	if err != nil {
 		t.Fatalf("NewRemoteTransport: %v", err)
 	}

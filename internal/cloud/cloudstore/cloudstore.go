@@ -672,6 +672,14 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 		    WHERE status = 'pending'`,
 		`CREATE INDEX IF NOT EXISTS idx_cdr_status ON cloud_deletion_requests(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_cdr_requester ON cloud_deletion_requests(requester_email)`,
+		// cloud_client_versions: stores the last-seen X-Engram-Client-Version per contributor.
+		// Additive, idempotent, no backfill required.
+		// last_client_version defaults to '' (sentinel "unknown"); rows only appear after header-sending clients connect.
+		`CREATE TABLE IF NOT EXISTS cloud_client_versions (
+			contributor          TEXT        PRIMARY KEY,
+			last_client_version  TEXT        NOT NULL DEFAULT '',
+			last_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

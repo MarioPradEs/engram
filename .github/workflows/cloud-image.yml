@@ -34,6 +34,10 @@ jobs:
             echo "is_default_branch_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # Version stamped into the binary (main.version convention: strip leading "v").
+          ref="${GITHUB_REF_NAME}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -72,5 +76,7 @@ jobs:
           file: docker/cloud/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            VERSION=${{ steps.refcheck.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

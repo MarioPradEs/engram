@@ -150,13 +150,10 @@ func (rt *RemoteTransport) setAuthorization(req *http.Request) {
 
 // setClientVersion stamps X-Engram-Client-Version on the request when the
 // transport was constructed with a non-empty, non-"dev" version string.
-// This allows the server to track the last-seen client version per contributor.
+// Delegates to the package-level setVersionHeader helper.
 // Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
 func (rt *RemoteTransport) setClientVersion(req *http.Request) {
-	if rt.version == "" || rt.version == "dev" {
-		return
-	}
-	req.Header.Set("X-Engram-Client-Version", rt.version)
+	setVersionHeader(req, rt.version)
 }
 
 func (rt *RemoteTransport) ReadManifest() (*engramsync.Manifest, error) {
@@ -343,12 +340,21 @@ func (mt *MutationTransport) setAuthorization(req *http.Request) {
 }
 
 // setClientVersion stamps X-Engram-Client-Version on mutation requests.
+// Delegates to the package-level setVersionHeader helper.
 // Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
 func (mt *MutationTransport) setClientVersion(req *http.Request) {
-	if mt.version == "" || mt.version == "dev" {
+	setVersionHeader(req, mt.version)
+}
+
+// setVersionHeader stamps X-Engram-Client-Version on req when version is
+// non-empty and not "dev". This suppression prevents sending a meaningless
+// header for development builds or when no version is configured.
+// Satisfies: REQ-CVR-01, REQ-CVR-02, REQ-CVR-03.
+func setVersionHeader(req *http.Request, version string) {
+	if version == "" || version == "dev" {
 		return
 	}
-	req.Header.Set("X-Engram-Client-Version", mt.version)
+	req.Header.Set("X-Engram-Client-Version", version)
 }
 
 // PushMutations POSTs a batch of mutations to the cloud server.

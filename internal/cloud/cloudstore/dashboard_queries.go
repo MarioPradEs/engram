@@ -834,9 +834,10 @@ func (m dashboardReadModel) scoped(allowed map[string]struct{}) dashboardReadMod
 	}
 
 	type contributorAgg struct {
-		chunks      int
-		projects    map[string]struct{}
-		lastChunkAt string
+		chunks            int
+		projects          map[string]struct{}
+		lastChunkAt       string
+		lastClientVersion string
 	}
 	agg := make(map[string]*contributorAgg)
 	for project, detail := range projectDetails {
@@ -853,16 +854,23 @@ func (m dashboardReadModel) scoped(allowed map[string]struct{}) dashboardReadMod
 			if parseRFC3339(contributor.LastChunkAt).After(parseRFC3339(agg[key].lastChunkAt)) {
 				agg[key].lastChunkAt = contributor.LastChunkAt
 			}
+			// Preserve the first non-empty LastClientVersion seen for this
+			// contributor. The value is per-contributor-global and consistent
+			// across projects, so the first one is authoritative.
+			if agg[key].lastClientVersion == "" && contributor.LastClientVersion != "" {
+				agg[key].lastClientVersion = contributor.LastClientVersion
+			}
 		}
 	}
 
 	contributors := make([]DashboardContributorRow, 0, len(agg))
 	for createdBy, row := range agg {
 		contributors = append(contributors, DashboardContributorRow{
-			CreatedBy:   createdBy,
-			Chunks:      row.chunks,
-			Projects:    len(row.projects),
-			LastChunkAt: row.lastChunkAt,
+			CreatedBy:         createdBy,
+			Chunks:            row.chunks,
+			Projects:          len(row.projects),
+			LastChunkAt:       row.lastChunkAt,
+			LastClientVersion: row.lastClientVersion,
 		})
 	}
 	sort.Slice(contributors, func(i, j int) bool {

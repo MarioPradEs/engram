@@ -12,6 +12,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/chunkcodec"
 	"github.com/Gentleman-Programming/engram/internal/store"
 	engramsync "github.com/Gentleman-Programming/engram/internal/sync"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var ErrDashboardProjectInvalid = errors.New("cloudstore: dashboard project is invalid")
@@ -1351,8 +1352,9 @@ func (cs *CloudStore) loadMutationRows(project string) ([]dashboardMutationRow, 
 
 // loadClientVersionRows returns all rows from cloud_client_versions for read-model stamping.
 // Returns an empty slice (no error) when the table exists but is empty, or when
-// the table does not yet exist (pre-migration instance). Callers must handle
-// an empty result as "no versions recorded".
+// the table does not yet exist (pre-migration, SQLSTATE 42P01). All other errors
+// are propagated so the caller's versionErr handling is live.
+// Satisfies: FIX #7 — stop swallowing non-table-missing DB errors.
 func (cs *CloudStore) loadClientVersionRows() ([]clientVersionRow, error) {
 	if cs == nil || cs.db == nil {
 		return nil, fmt.Errorf("cloudstore: not initialized")
@@ -1361,9 +1363,14 @@ func (cs *CloudStore) loadClientVersionRows() ([]clientVersionRow, error) {
 		SELECT contributor, last_client_version
 		FROM cloud_client_versions`)
 	if err != nil {
-		// Table may not exist on an old schema (before migration runs).
-		// Treat as empty rather than a fatal error so dashboard still loads.
-		return []clientVersionRow{}, nil
+		// Only ignore "undefined table" (42P01): table not yet created on a
+		// pre-migration instance. All other errors (permissions, network, syntax,
+		// etc.) are real failures and must propagate to the caller.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return []clientVersionRow{}, nil
+		}
+		return nil, fmt.Errorf("cloudstore: query client version rows: %w", err)
 	}
 	defer rows.Close()
 

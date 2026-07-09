@@ -52,6 +52,15 @@ func LatestCached() (string, error) {
 	return fetched, nil
 }
 
+// IsNewer reports whether latest is a newer version than current using 4-component
+// semver comparison that understands the "-viva.N" fork suffix. It is an exported
+// wrapper around the internal isNewer function so callers outside this package
+// (e.g. the dashboard handler) can compare versions without reimplementing the logic.
+// Satisfies: REQ-VID-09 (reuse internal/version logic, no duplicate parsing code).
+func IsNewer(latest, current string) bool {
+	return isNewer(latest, current)
+}
+
 // doFetchLatestVersion performs a bounded HTTP GET to the GitHub releases API
 // and returns the normalised tag name (e.g. "1.20.0"). Returns an error on any
 // network, HTTP, or decode failure. Reuses package-level vars (githubLatestReleaseURL,

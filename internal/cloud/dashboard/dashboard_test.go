@@ -3413,3 +3413,255 @@ func TestGraphHandlerRejectsBadSchemeInBrainURL(t *testing.T) {
 		})
 	}
 }
+
+// ─── Phase 7: Version Indicator (T-19 RED) ───────────────────────────────────
+
+// newVersionMux builds a test mux with ServerVersion, LatestVersion, GetUserEmail,
+// contributor store, and IsAdmin control — all needed for version indicator tests.
+func newVersionMux(serverVersion string, latestVersion func() (string, error), contributors []cloudstore.DashboardContributorRow, isAdmin bool, userEmail string) *http.ServeMux {
+	mux := http.NewServeMux()
+	store := parityStoreStub{contributors: contributors}
+	Mount(mux, MountConfig{
+		RequireSession: func(r *http.Request) error {
+			if r.URL.Query().Get("auth") == "ok" {
+				return nil
+			}
+			return errUnauthorized
+		},
+		IsAdmin:       func(_ *http.Request) bool { return isAdmin },
+		GetUserEmail:  func(_ *http.Request) string { return userEmail },
+		Store:         store,
+		ServerVersion: serverVersion,
+		LatestVersion: latestVersion,
+	})
+	return mux
+}
+
+// TestDashboardHomeVersionIndicator_UpToDate asserts that when the user's version
+// matches the latest, the version indicator renders both versions and NO /dl CTA.
+// Satisfies: REQ-VID-01, REQ-VID-02, Scenario A-7.
+func TestDashboardHomeVersionIndicator_UpToDate(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	const userVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: userVer},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, cloudVer) {
+		t.Errorf("expected cloud version %q in dashboard body", cloudVer)
+	}
+	if !strings.Contains(body, userVer) {
+		t.Errorf("expected user version %q in dashboard body", userVer)
+	}
+	if strings.Contains(body, `href="/dl"`) {
+		t.Errorf("expected NO /dl CTA when up-to-date, but found it in body")
+	}
+}
+
+// TestDashboardHomeVersionIndicator_UpdateAvailable asserts that when the latest
+// version is newer than the user's version, a /dl CTA link is rendered.
+// Satisfies: REQ-VID-02, Scenario A-8.
+func TestDashboardHomeVersionIndicator_UpdateAvailable(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	const userVer = "1.17.0-viva.7"
+	const latestVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: userVer},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) { return latestVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="/dl"`) {
+		t.Errorf("expected /dl CTA link when update is available, not found in body")
+	}
+}
+
+// TestDashboardHomeVersionIndicator_Unknown asserts that when the user has never
+// sent the version header (empty LastClientVersion), the literal text "unknown"
+// is rendered and no /dl CTA appears. HTTP 200 is required.
+// Satisfies: REQ-VID-01, Scenario A-9.
+func TestDashboardHomeVersionIndicator_Unknown(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: ""},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "unknown") {
+		t.Errorf("expected literal text 'unknown' for missing client version in dashboard body")
+	}
+	if strings.Contains(body, `href="/dl"`) {
+		t.Errorf("expected NO /dl CTA when version is unknown, but found it in body")
+	}
+}
+
+// TestDashboardHomeVersionIndicator_GitHubUnreachable asserts that when the
+// LatestVersion func returns an error (cold cache miss), the page returns HTTP 200
+// and renders with updateState unknown (no /dl CTA).
+// Satisfies: REQ-VID-07, Scenario A-10.
+func TestDashboardHomeVersionIndicator_GitHubUnreachable(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	const userVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: userVer},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) {
+		return "", fmt.Errorf("github unreachable")
+	}, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 even when GitHub unreachable, got %d", rec.Code)
+	}
+	// No /dl CTA when latest is unknown.
+	body := rec.Body.String()
+	if strings.Contains(body, `href="/dl"`) {
+		t.Errorf("expected NO /dl CTA when latest version is unknown, but found it in body")
+	}
+}
+
+// TestDashboardFleetTable_AdminSeesAllContributors asserts that an admin user sees
+// a fleet table listing all contributors with their last-seen version (or "unknown").
+// Satisfies: REQ-VID-05, Scenario A-12.
+func TestDashboardFleetTable_AdminSeesAllContributors(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: "1.17.0-viva.9"},
+		{CreatedBy: "bob@example.com", LastClientVersion: ""},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, true, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Fleet table must show all contributors.
+	if !strings.Contains(body, "alice@example.com") {
+		t.Errorf("expected alice@example.com in fleet table")
+	}
+	if !strings.Contains(body, "1.17.0-viva.9") {
+		t.Errorf("expected alice's version 1.17.0-viva.9 in fleet table")
+	}
+	if !strings.Contains(body, "bob@example.com") {
+		t.Errorf("expected bob@example.com in fleet table")
+	}
+	// Bob has no version — must render "unknown".
+	if !strings.Contains(body, "unknown") {
+		t.Errorf("expected 'unknown' for bob's missing version in fleet table")
+	}
+}
+
+// TestDashboardFleetTable_NonAdminDoesNotSeeFleet asserts that a non-admin user
+// does NOT see the fleet contributor table in the dashboard home.
+// Satisfies: REQ-VID-06, Scenario A-13.
+func TestDashboardFleetTable_NonAdminDoesNotSeeFleet(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: "1.17.0-viva.9"},
+		{CreatedBy: "bob@example.com", LastClientVersion: ""},
+	}
+	// Non-admin user is alice.
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Non-admin should NOT see bob's contributor entry in a fleet table.
+	if strings.Contains(body, "bob@example.com") {
+		t.Errorf("non-admin should NOT see bob@example.com in fleet table, but it appeared in body")
+	}
+}
+
+// TestHandleDashboardHomeWiresVersionData is an integration test verifying that
+// handleDashboardHome populates the version indicator from MountConfig and store.
+// Satisfies: REQ-VID-08, Scenario A-7.
+func TestHandleDashboardHomeWiresVersionData(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	const userVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: userVer},
+	}
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, cloudVer) {
+		t.Errorf("cloud version %q not rendered in dashboard home, body=%q", cloudVer, body)
+	}
+	if !strings.Contains(body, userVer) {
+		t.Errorf("user version %q not rendered in dashboard home, body=%q", userVer, body)
+	}
+}
+
+// ─── Phase 9: Non-admin 403 gate (T-25 RED → T-26 GREEN) ───────────────────
+
+// TestFleetEndpointNonAdminReturns403 verifies that a non-admin user cannot
+// access fleet-wide version data. Because fleet data is inlined in the dashboard
+// home (no dedicated HTTP endpoint), this test verifies that the dashboard home
+// for a non-admin user returns HTTP 200 but does NOT contain any other contributor's
+// email address (fleet isolation), confirming the admin gate in resolveVersionIndicator.
+// Satisfies: REQ-VID-06, Scenario A-14.
+func TestFleetEndpointNonAdminReturns403(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	contributors := []cloudstore.DashboardContributorRow{
+		{CreatedBy: "alice@example.com", LastClientVersion: "1.17.0-viva.9"},
+		{CreatedBy: "bob@example.com", LastClientVersion: "1.17.0-viva.7"},
+		{CreatedBy: "carol@example.com", LastClientVersion: ""},
+	}
+	// Non-admin user: alice.
+	mux := newVersionMux(cloudVer, func() (string, error) { return cloudVer, nil }, contributors, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	// Non-admin dashboard home returns 200 (not 403 — the page itself is accessible).
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for non-admin dashboard home, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// Non-admin must NOT see other contributors' email addresses (fleet isolation).
+	if strings.Contains(body, "bob@example.com") {
+		t.Errorf("non-admin should NOT see bob@example.com in response body")
+	}
+	if strings.Contains(body, "carol@example.com") {
+		t.Errorf("non-admin should NOT see carol@example.com in response body")
+	}
+}
+
+// TestHandleDashboardHomeGitHubUnreachableReturns200 verifies that a cold cache
+// miss (LatestVersion returns "" and error) results in HTTP 200 with no /dl CTA.
+// Satisfies: REQ-VID-07, Scenario A-10.
+func TestHandleDashboardHomeGitHubUnreachableReturns200(t *testing.T) {
+	const cloudVer = "1.17.0-viva.9"
+	mux := newVersionMux(cloudVer, func() (string, error) {
+		return "", fmt.Errorf("cold cache miss")
+	}, nil, false, "alice@example.com")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dashboard/?auth=ok", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on cold GitHub cache miss, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `href="/dl"`) {
+		t.Errorf("expected NO /dl CTA when latest version fetch fails, but found in body")
+	}
+}

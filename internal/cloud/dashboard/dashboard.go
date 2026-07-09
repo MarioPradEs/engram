@@ -18,6 +18,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/cloud/cloudstore"
 	"github.com/Gentleman-Programming/engram/internal/cloud/constants"
+	"github.com/Gentleman-Programming/engram/internal/version"
 	"github.com/a-h/templ"
 )
 
@@ -588,11 +589,64 @@ func humanizeAge(d time.Duration) string {
 
 func (h *handlers) handleDashboardHome(w http.ResponseWriter, r *http.Request) {
 	p := h.principalFromRequest(r)
+	indicator := h.resolveVersionIndicator(r, p)
+	var fleetRows []cloudstore.DashboardContributorRow
+	if p.IsAdmin() && h.cfg.Store != nil {
+		if rows, err := h.cfg.Store.ListContributors(""); err == nil {
+			fleetRows = rows
+		}
+	}
 	if isHTMXRequest(r) {
-		renderComponent(w, r, DashboardHome(p.DisplayName()))
+		renderComponent(w, r, DashboardHome(p.DisplayName(), indicator, p.IsAdmin(), fleetRows))
 		return
 	}
-	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName())))
+	renderComponent(w, r, Layout("Dashboard", p.DisplayName(), "dashboard", p.IsAdmin(), DashboardHome(p.DisplayName(), indicator, p.IsAdmin(), fleetRows)))
+}
+
+// resolveVersionIndicator computes the VersionIndicator for the authenticated user.
+// It reads the latest-version from the TTL cache (best-effort; never blocks on GitHub),
+// looks up the caller's LastClientVersion from the contributor store, and computes
+// the update state. Satisfies: REQ-VID-08, REQ-VID-04, REQ-VID-06, REQ-VID-09.
+func (h *handlers) resolveVersionIndicator(_ *http.Request, p Principal) VersionIndicator {
+	cloudVer := h.cfg.ServerVersion
+
+	// Fetch latest published version from TTL cache (non-blocking: returns "" on error).
+	latestVer := ""
+	if h.cfg.LatestVersion != nil {
+		// Best-effort: ignore error — "" triggers VersionUpdateUnknown gracefully.
+		latestVer, _ = h.cfg.LatestVersion()
+	}
+
+	// Look up the authenticated user's last-seen client version by email.
+	userVer := ""
+	if h.cfg.Store != nil && p.Email() != "" {
+		if contribs, err := h.cfg.Store.ListContributors(""); err == nil {
+			for _, c := range contribs {
+				if strings.EqualFold(c.CreatedBy, p.Email()) {
+					userVer = c.LastClientVersion
+					break
+				}
+			}
+		}
+	}
+
+	// Compute update state. Unknown when either comparison side is missing.
+	state := VersionUpdateUnknown
+	if userVer != "" && latestVer != "" {
+		if version.IsNewer(latestVer, userVer) {
+			state = VersionUpdateAvailable
+		} else {
+			state = VersionUpdateUpToDate
+		}
+	}
+
+	return VersionIndicator{
+		CloudVersion:  cloudVer,
+		YourVersion:   userVer,
+		LatestVersion: latestVer,
+		State:         state,
+		UpdateURL:     "/dl",
+	}
 }
 
 // handleBrain serves the Brain tab (S6, formerly handleGraph/D3).

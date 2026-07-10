@@ -1453,6 +1453,9 @@ func (s *fakeAuditableStoreForE2E) ListAuditEntriesPaginated(_ context.Context, 
 	}
 	return result, len(result), nil
 }
+func (s *fakeAuditableStoreForE2E) ListAuthAuditEntriesPaginated(_ context.Context, _, _ int) ([]cloudstore.AuthAuditEntry, int, error) {
+	return nil, 0, nil
+}
 
 // TestAuditLogE2E_MutationPushPausedThenListRendered verifies the full flow:
 // POST /sync/mutations/push (paused project) → 409 → store captures audit row →

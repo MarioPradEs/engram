@@ -201,6 +201,10 @@ type DashboardStore interface {
 	// Audit log (REQ-409).
 	ListAuditEntriesPaginated(ctx context.Context, filter cloudstore.AuditFilter, limit, offset int) ([]cloudstore.DashboardAuditRow, int, error)
 
+	// Auth audit log (PR3 — admin view for cloud_auth_audit_log).
+	// page is 1-indexed; pageSize is clamped to [1, 500] by the store.
+	ListAuthAuditEntriesPaginated(ctx context.Context, page, pageSize int) ([]cloudstore.AuthAuditEntry, int, error)
+
 	// D5: Per-observation deletion requests.
 	// Members submit requests; admins review, accept, or reject them.
 	// Accept hard-deletes exactly the targeted observation via the mutation journal.
@@ -299,6 +303,11 @@ func Mount(mux *http.ServeMux, cfg MountConfig) {
 	// Audit log routes — admin-gated (REQ-408, REQ-409).
 	mux.HandleFunc("GET /dashboard/admin/audit-log", h.requireSession(h.handleAdminAuditLog))
 	mux.HandleFunc("GET /dashboard/admin/audit-log/list", h.requireSession(h.handleAdminAuditLogList))
+
+	// Auth audit log routes — admin-gated (PR3: cloud_auth_audit_log view).
+	// Kept SEPARATE from sync-audit routes (distinct path prefix /audit-log/auth).
+	mux.HandleFunc("GET /dashboard/admin/audit-log/auth", h.requireSession(h.handleAdminAuthAuditLog))
+	mux.HandleFunc("GET /dashboard/admin/audit-log/auth/list", h.requireSession(h.handleAdminAuthAuditLogList))
 
 	// D4: Admin member-management routes — admin-gated.
 	// Source: users.yaml (ListProvisionedUsers), not cloud_chunks contributors.
@@ -1790,4 +1799,72 @@ func parseAuditFilter(r *http.Request) (cloudstore.AuditFilter, string) {
 		filter.OccurredAtTo = t
 	}
 	return filter, ""
+}
+
+// ─── Auth Audit Log Handlers (PR3) ───────────────────────────────────────────
+
+// handleAdminAuthAuditLog handles GET /dashboard/admin/audit-log/auth (shell, admin-gated).
+// Renders AdminAuthAuditLogPage — the shell page for the cloud_auth_audit_log admin view.
+// Separate from the sync-audit view; protected by the same IsAdmin gate.
+func (h *handlers) handleAdminAuthAuditLog(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	pendingCount := h.pendingDeletionCount(r.Context())
+	component := AdminAuthAuditLogPage(p.DisplayName(), pendingCount)
+	if isHTMXRequest(r) {
+		renderComponent(w, r, component)
+		return
+	}
+	renderComponent(w, r, Layout("Auth Audit Log", p.DisplayName(), "admin", p.IsAdmin(), component))
+}
+
+// handleAdminAuthAuditLogList handles GET /dashboard/admin/audit-log/auth/list (partial, admin-gated).
+// Partial-only endpoint (same N7 contract as handleAdminAuditLogList): always renders a fragment,
+// never a full Layout wrapper, even for non-HTMX requests.
+func (h *handlers) handleAdminAuthAuditLogList(w http.ResponseWriter, r *http.Request) {
+	p := h.principalFromRequest(r)
+	if !p.IsAdmin() {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	reqPage, pageSize := parsePaginationRaw(r)
+
+	var entries []cloudstore.AuthAuditEntry
+	var total int
+	if h.cfg.Store != nil {
+		var err error
+		entries, total, err = h.cfg.Store.ListAuthAuditEntriesPaginated(r.Context(), reqPage, pageSize)
+		if err != nil {
+			log.Printf("dashboard: auth audit log list store error: %v", err)
+			renderComponentStatus(w, r, http.StatusBadGateway, EmptyState("Service Unavailable", "Auth audit log data is temporarily unavailable."))
+			return
+		}
+	}
+
+	// Three-tier fallback pattern (same structure as handleAdminAuditLogList, but
+	// the auth-audit store accepts a 1-indexed page param — offset is computed
+	// inside the store — whereas the sync-audit store takes a raw offset computed here).
+	// Tier 1: initial fetch (above).
+	// Tier 2: clamped re-fetch when requested page is beyond the total.
+	// Tier 3: page-1 fallback when re-fetch fails and rows are empty.
+	pg, needsRefetch := reclampPagination(reqPage, pageSize, total)
+	if needsRefetch && h.cfg.Store != nil {
+		if refetched, _, err := h.cfg.Store.ListAuthAuditEntriesPaginated(r.Context(), pg.Page, pageSize); err == nil {
+			entries = refetched
+		} else {
+			log.Printf("dashboard: re-fetch auth audit log list page %d: %v (using first-page rows)", pg.Page, err)
+			if len(entries) == 0 {
+				if fallback, _, fallbackErr := h.cfg.Store.ListAuthAuditEntriesPaginated(r.Context(), 1, pageSize); fallbackErr == nil {
+					entries = fallback
+				} else {
+					log.Printf("dashboard: fallback auth audit log list page 1: %v", fallbackErr)
+				}
+			}
+		}
+	}
+
+	renderComponent(w, r, AdminAuthAuditLogListPartial(entries, pg))
 }

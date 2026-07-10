@@ -116,6 +116,9 @@ func (s *scopingStoreStub) ListDistinctTypes() ([]string, error) { return nil, n
 func (s *scopingStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudstore.AuditFilter, _, _ int) ([]cloudstore.DashboardAuditRow, int, error) {
 	return nil, 0, nil
 }
+func (s *scopingStoreStub) ListAuthAuditEntriesPaginated(_ context.Context, _, _ int) ([]cloudstore.AuthAuditEntry, int, error) {
+	return nil, 0, nil
+}
 
 // GetObservationBySyncID — faithful stub: searches allObservations by syncID and enforces scope.
 func (s *scopingStoreStub) GetObservationBySyncID(scope *cloudstore.ReadScope, syncID string) (cloudstore.DashboardObservationRow, error) {

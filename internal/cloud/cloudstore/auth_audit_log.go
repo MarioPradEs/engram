@@ -43,9 +43,6 @@ const ReasonRemovedUser = "removed_user"
 // ReasonAccountOffboarding is used when the user account is in offboarding state.
 const ReasonAccountOffboarding = "account_offboarding"
 
-// ReasonProjectDenied is used when a valid user is denied at the project gate.
-const ReasonProjectDenied = "project_denied"
-
 // ReasonMissingCredential is used when no credential was presented at all.
 const ReasonMissingCredential = "missing_credential"
 

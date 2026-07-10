@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
 
 // ─── Fake Recorder ───────────────────────────────────────────────────────────
@@ -319,9 +321,9 @@ func TestAudit_offboardingReadDeniedJWT_writesDeniedRow(t *testing.T) {
 	assertOneCall(t, rec, "offboarding@vivastudios.com", OutcomeDenied, SourceJWT, ReasonAccountOffboarding)
 }
 
-// TestAudit_nilRecorder_noopDoesPanic verifies that when no recorder is set,
+// TestAudit_nilRecorder_noopDoesNotPanic verifies that when no recorder is set,
 // Authorize succeeds without panicking (nil-safety guard).
-func TestAudit_nilRecorder_noopDoesPanic(t *testing.T) {
+func TestAudit_nilRecorder_noopDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	ha := newTestHA(t) // no recorder set — uses SetAuditRecorder(nil) implicitly
 
@@ -335,9 +337,9 @@ func TestAudit_nilRecorder_noopDoesPanic(t *testing.T) {
 	}
 }
 
-// TestAudit_nilRecorderDenied_noopDoesPanic verifies that a deny path with nil
+// TestAudit_nilRecorderDenied_noopDoesNotPanic verifies that a deny path with nil
 // recorder does not panic.
-func TestAudit_nilRecorderDenied_noopDoesPanic(t *testing.T) {
+func TestAudit_nilRecorderDenied_noopDoesNotPanic(t *testing.T) {
 	t.Parallel()
 	ha := newTestHA(t) // no recorder
 
@@ -442,6 +444,126 @@ func TestAudit_raceRecorder(t *testing.T) {
 	if len(calls) != goroutines {
 		t.Errorf("expected %d denied rows (ghost denials), got %d", goroutines, len(calls))
 	}
+}
+
+// ─── New tests added by PR2 review fixes ──────────────────────────────────────
+
+// TestAudit_jwtMissingEmailClaim_writesDeniedRow covers the branch at ~L273 of
+// header_auth.go: JWT validates (signature + expiry OK) but the email claim is
+// empty. The site emits outcome=denied, source=jwt, reason_code=invalid_jwt.
+//
+// This test would FAIL if the instrumentation at that branch were removed
+// (the recorder would capture zero calls, causing assertOneCall to fatal).
+func TestAudit_jwtMissingEmailClaim_writesDeniedRow(t *testing.T) {
+	t.Parallel()
+	rec := &fakeRecorder{}
+	ha := newTestHAJWTWithRecorder(t, rec)
+
+	// Mint a structurally valid, non-expired JWT with an empty email claim.
+	// MintJWT does not validate the email field, so this produces a token whose
+	// signature verifies cleanly but whose email claim is "".
+	token := mintTestJWT(t, "", "NoEmail", "dev", "member", 0)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for JWT with empty email claim")
+	}
+
+	assertOneCall(t, rec, "", OutcomeDenied, SourceJWT, ReasonInvalidJWT)
+}
+
+// mockAdminResolver satisfies both UserLoader and AdminResolver.
+// SoleAdmin() returns (admin, true) on the first call (so constructor validation
+// passes) and (zero, false) on every subsequent call (so Authorize hits the
+// bypass_admin_missing deny site).
+//
+// This is the only seam available without refactoring production code: the
+// constructor calls SoleAdmin() once for validation; Authorize calls it again
+// at request time. A stateful mock exploits that gap cleanly.
+type mockAdminResolver struct {
+	delegate    *users.YAMLLoader // handles Lookup
+	soleAdminOK bool              // toggled false after first call
+}
+
+func (m *mockAdminResolver) Lookup(email string) (users.Principal, bool) {
+	return m.delegate.Lookup(email)
+}
+
+func (m *mockAdminResolver) SoleAdmin() (users.Principal, bool) {
+	if m.soleAdminOK {
+		// First call: return the real sole admin so the constructor accepts us.
+		m.soleAdminOK = false
+		return m.delegate.SoleAdmin()
+	}
+	// Subsequent calls: simulate sole admin disappearing (e.g., after a reload
+	// that removed or added a second admin between construction and first request).
+	return users.Principal{}, false
+}
+
+// TestAudit_bypassAdminMissing_writesDeniedRow covers the bypass_admin_missing
+// deny site (~L247 of header_auth.go): the bypass token matches but SoleAdmin()
+// returns ok=false at request time.
+//
+// The seam used: mockAdminResolver.SoleAdmin() returns (admin, true) on the
+// first call (constructor validation) and (zero, false) on the second call
+// (Authorize time). This requires no production refactor and correctly exercises
+// the instrumented branch.
+//
+// This test would FAIL if the ha.recordAuth call at the bypass_admin_missing
+// branch were removed (the recorder would capture zero calls).
+func TestAudit_bypassAdminMissing_writesDeniedRow(t *testing.T) {
+	t.Parallel()
+	rec := &fakeRecorder{}
+
+	loader := buildTestLoader(t, testYAML) // real loader with alice as sole admin
+	mock := &mockAdminResolver{delegate: loader, soleAdminOK: true}
+
+	// Constructor calls SoleAdmin() once — mock returns true (passes validation).
+	ha, err := NewHeaderAuthenticator(mock, "super-secret-bypass")
+	if err != nil {
+		t.Fatalf("NewHeaderAuthenticator: %v", err)
+	}
+	ha.SetAuditRecorder(rec)
+
+	// Now mock.soleAdminOK == false, so the next SoleAdmin() call (inside
+	// Authorize) will return (zero, false) → bypass_admin_missing branch fires.
+	req := httptest.NewRequest(http.MethodGet, "/sync/pull", nil)
+	req.Header.Set("Authorization", "Bearer super-secret-bypass")
+
+	_, err = ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for bypass_admin_missing")
+	}
+
+	assertOneCall(t, rec, "", OutcomeDenied, SourceLegacy, ReasonBypassAdminMissing)
+}
+
+// TestAudit_invalidDomain_writesDeniedRow covers the invalid_domain deny site in
+// resolveByEmail (~L308 of header_auth.go): an email whose domain is not
+// @vivastudios.com presented via X-Forwarded-Email (source=oauth).
+//
+// Distinct from unknown_email: the domain check fires BEFORE the directory
+// lookup — ghost@gmail.com never reaches Lookup() at all.
+//
+// This test would FAIL if the ha.recordAuth call at the invalid-domain branch
+// were removed (the recorder would capture zero calls).
+func TestAudit_invalidDomain_writesDeniedRow(t *testing.T) {
+	t.Parallel()
+	rec := &fakeRecorder{}
+	ha := newTestHAWithRecorder(t, rec)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-Email", "ghost@gmail.com")
+
+	_, err := ha.Authorize(req)
+	if err == nil {
+		t.Fatal("expected error for non-vivastudios.com domain")
+	}
+
+	assertOneCall(t, rec, "ghost@gmail.com", OutcomeDenied, SourceOAuth, ReasonInvalidDomain)
 }
 
 // ─── Helper: split JWT on dots without importing strings ─────────────────────

@@ -680,6 +680,24 @@ func (cs *CloudStore) migrate(ctx context.Context) error {
 			last_client_version  TEXT        NOT NULL DEFAULT '',
 			last_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+
+		// cloud_auth_audit_log: persistent audit trail for authentication allow/deny events (PR1).
+		// SEPARATE from cloud_sync_audit_log — different domain, different schema, different semantics.
+		// Fixed-field schema only (no metadata JSON) to eliminate credential-leak surface.
+		// outcome CHECK: 'allowed' | 'denied'
+		// source  CHECK: 'oauth' | 'jwt' | 'legacy'
+		// reason_code: NULL for outcome=allowed; taxonomy code for denied rows.
+		`CREATE TABLE IF NOT EXISTS cloud_auth_audit_log (
+			id          BIGSERIAL PRIMARY KEY,
+			occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			email       TEXT NOT NULL,
+			outcome     TEXT NOT NULL CHECK(outcome IN ('allowed','denied')),
+			source      TEXT NOT NULL CHECK(source IN ('oauth','jwt','legacy')),
+			reason_code TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_caal_occurred_at ON cloud_auth_audit_log (occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_caal_email ON cloud_auth_audit_log (email)`,
+		`CREATE INDEX IF NOT EXISTS idx_caal_outcome ON cloud_auth_audit_log (outcome)`,
 	}
 	for _, q := range queries {
 		if _, err := cs.db.ExecContext(ctx, q); err != nil {

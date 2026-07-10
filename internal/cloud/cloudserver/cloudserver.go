@@ -72,6 +72,10 @@ type CloudServer struct {
 	authLoader    AuthUserLoader // user directory for /auth principal resolution
 	authJWTSecret string         // ENGRAM_JWT_SECRET for minting JWTs in /auth
 	jwtTTL        time.Duration  // configurable JWT lifetime; 0 means auth.DefaultJWTTTL
+	// auditRecorder is the optional auth audit recorder (PR2). When set, the OAuth
+	// mint success site in autoLoginFromHeader emits an outcome=allowed/source=oauth row.
+	// Nil means audit is disabled (safe default — no existing call sites are affected).
+	auditRecorder auth.AuthAuditRecorder
 	// userReloadFn is called by admin member-management write handlers to reload
 	// the in-memory user directory after a successful users.yaml write. (D4)
 	userReloadFn func() error
@@ -167,6 +171,15 @@ func WithMaxPushBodyBytes(limit int64) Option {
 		if limit > 0 {
 			s.maxPushBodyBytes = limit
 		}
+	}
+}
+
+// WithAuditRecorder wires an auth.AuthAuditRecorder into the CloudServer so
+// the autoLoginFromHeader OAuth mint success site can emit an audit row.
+// When not set (nil), audit is disabled — existing call sites are unaffected.
+func WithAuditRecorder(rec auth.AuthAuditRecorder) Option {
+	return func(s *CloudServer) {
+		s.auditRecorder = rec
 	}
 }
 
@@ -423,13 +436,22 @@ func (s *CloudServer) routes() {
 			}
 			// Reuse the /auth endpoint's JWT minting path (auth_endpoint.go:100-106)
 			// so there is exactly one identity-minting code path in the server.
-			return auth.MintJWT(s.authJWTSecret, auth.JWTClaims{
+			token, err := auth.MintJWT(s.authJWTSecret, auth.JWTClaims{
 				Sub:        p.Email,
 				Email:      p.Email,
 				Name:       p.Name,
 				Department: p.Department,
 				Role:       p.Role,
 			}, time.Now().UTC(), s.jwtTTL)
+			if err != nil {
+				return "", err
+			}
+			// Audit: OAuth mint success — one of the two discrete success sites (PR2).
+			// Fire-and-forget; failure-safe (recorder's RecordAuthEvent swallows errors).
+			if s.auditRecorder != nil {
+				s.auditRecorder.RecordAuthEvent(r.Context(), p.Email, auth.OutcomeAllowed, auth.SourceOAuth, "")
+			}
+			return token, nil
 		}
 	}
 	if s.auth == nil {

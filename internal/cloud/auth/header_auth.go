@@ -12,6 +12,58 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/users"
 )
 
+// ─── Audit Constants (mirrored from cloudstore for callers that only import auth) ───
+
+// OutcomeAllowed is the audit outcome for an accepted auth event.
+const OutcomeAllowed = cloudstore.OutcomeAllowed
+
+// OutcomeDenied is the audit outcome for a rejected auth event.
+const OutcomeDenied = cloudstore.OutcomeDenied
+
+// SourceOAuth is the audit source for OAuth2-proxy dashboard flow events.
+const SourceOAuth = cloudstore.SourceOAuth
+
+// SourceJWT is the audit source for JWT-bearer events (sync/API path).
+const SourceJWT = cloudstore.SourceJWT
+
+// SourceLegacy is the audit source for ENGRAM_CLOUD_TOKEN emergency bypass events.
+const SourceLegacy = cloudstore.SourceLegacy
+
+// ReasonUnknownEmail is the reason code when an email is not found in the directory.
+const ReasonUnknownEmail = cloudstore.ReasonUnknownEmail
+
+// ReasonInvalidJWT is the reason code when a JWT fails validation.
+const ReasonInvalidJWT = cloudstore.ReasonInvalidJWT
+
+// ReasonRemovedUser is the reason code when the user account has been removed.
+const ReasonRemovedUser = cloudstore.ReasonRemovedUser
+
+// ReasonAccountOffboarding is the reason code when the user account is in offboarding state.
+const ReasonAccountOffboarding = cloudstore.ReasonAccountOffboarding
+
+// ReasonMissingCredential is the reason code when no credential was presented.
+const ReasonMissingCredential = cloudstore.ReasonMissingCredential
+
+// ReasonBypassAdminMissing is the reason code when the bypass token is presented
+// but no sole-admin account exists.
+const ReasonBypassAdminMissing = cloudstore.ReasonBypassAdminMissing
+
+// ReasonInvalidDomain is the reason code when the email domain is not allowed.
+const ReasonInvalidDomain = cloudstore.ReasonInvalidDomain
+
+// ─── AuthAuditRecorder interface ─────────────────────────────────────────────
+
+// AuthAuditRecorder is the narrow write-side interface used by HeaderAuthenticator
+// to record auth events. *cloudstore.CloudStore satisfies it via RecordAuthEvent.
+// Inject via SetAuditRecorder (optional setter — nil recorder = no-op).
+//
+// All implementations MUST be failure-safe: a write error MUST NOT propagate to
+// the auth path. *cloudstore.CloudStore.RecordAuthEvent already enforces this
+// (fire-and-forget goroutine, DB error → log WARN and swallow).
+type AuthAuditRecorder interface {
+	RecordAuthEvent(ctx context.Context, email, outcome, source, reasonCode string)
+}
+
 // principalContextKey is the unexported key used to store the resolved
 // Principal in a request's context.
 type principalContextKey struct{}
@@ -82,10 +134,32 @@ type AdminResolver interface {
 //     offboarding+write → allowed; removed → 403 account_removed.
 //   - "general" is always injected into EnrolledProjects (design Q5).
 type HeaderAuthenticator struct {
-	loader      UserLoader
-	bypassToken string           // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
-	jwtSecret   string           // when non-empty, Bearer JWT tokens are accepted on /sync/*
-	now         func() time.Time // injectable time seam for testing; nil means time.Now
+	loader         UserLoader
+	bypassToken    string           // ENGRAM_CLOUD_TOKEN value; empty means bypass disabled
+	jwtSecret      string           // when non-empty, Bearer JWT tokens are accepted on /sync/*
+	now            func() time.Time // injectable time seam for testing; nil means time.Now
+	auditRecorder  AuthAuditRecorder // optional; nil means audit is disabled
+}
+
+// SetAuditRecorder wires an AuthAuditRecorder into the authenticator.
+// Using a setter (not the constructor) preserves all existing NewHeaderAuthenticatorWithJWT
+// call sites unchanged (~15 across the codebase). Calling SetAuditRecorder(nil) is a no-op
+// that disables auditing — safe for all existing tests that omit the recorder.
+func (ha *HeaderAuthenticator) SetAuditRecorder(r AuthAuditRecorder) {
+	ha.auditRecorder = r
+}
+
+// recordAuth is the internal fire-and-forget helper. It checks the nil guard so
+// every instrumentation site is a single-line call without boilerplate.
+// The call is NOT wrapped in a goroutine here because RecordAuthEvent itself is
+// required to be failure-safe and fire-and-forget (*cloudstore.CloudStore.RecordAuthEvent
+// already spawns a goroutine and swallows errors). Fake recorders in tests are
+// synchronous so assertions are immediate and deterministic.
+func (ha *HeaderAuthenticator) recordAuth(ctx context.Context, email, outcome, source, reasonCode string) {
+	if ha.auditRecorder == nil {
+		return
+	}
+	ha.auditRecorder.RecordAuthEvent(ctx, email, outcome, source, reasonCode)
 }
 
 // NewHeaderAuthenticator returns a HeaderAuthenticator backed by loader.
@@ -159,6 +233,8 @@ func NewHeaderAuthenticatorWithJWT(loader UserLoader, bypassToken, jwtSecret str
 // The principal is stored in r.Context() so downstream methods
 // (AuthorizeProject, Attribution, EnrolledProjects) are concurrency-safe.
 func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error) {
+	ctx := r.Context()
+
 	// Emergency bypass takes precedence over all other auth paths.
 	// Works in both JWT mode and header mode.
 	if ha.bypassToken != "" {
@@ -168,10 +244,14 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 			ar := ha.loader.(AdminResolver) // safe: constructor validates this
 			admin, ok := ar.SoleAdmin()
 			if !ok {
+				// Audit: bypass token presented but no sole admin found.
+				ha.recordAuth(ctx, "", OutcomeDenied, SourceLegacy, ReasonBypassAdminMissing)
 				return r, &AuthError{Status: http.StatusInternalServerError, Code: "bypass_admin_missing",
 					Msg: "bypass token configured but sole admin not found in directory"}
 			}
-			return r.WithContext(context.WithValue(r.Context(), principalContextKey{}, &admin)), nil
+			// Audit: legacy bypass ACCEPTED — one of the two discrete success sites.
+			ha.recordAuth(ctx, admin.Email, OutcomeAllowed, SourceLegacy, "")
+			return r.WithContext(context.WithValue(ctx, principalContextKey{}, &admin)), nil
 		}
 	}
 
@@ -185,15 +265,21 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
 			claims, err := VerifyJWT(ha.jwtSecret, parts[1], time.Now().UTC())
 			if err != nil {
+				// Audit: JWT present but invalid (signature, expiry, etc.).
+				ha.recordAuth(ctx, "", OutcomeDenied, SourceJWT, ReasonInvalidJWT)
 				return r, fmt.Errorf("auth: invalid bearer jwt: %w", err)
 			}
 			jwtEmail := strings.ToLower(strings.TrimSpace(claims.Email))
 			if jwtEmail == "" {
+				// Audit: JWT valid but missing email claim — treat as invalid JWT.
+				ha.recordAuth(ctx, "", OutcomeDenied, SourceJWT, ReasonInvalidJWT)
 				return r, fmt.Errorf("auth: bearer jwt missing email claim")
 			}
-			return ha.resolveByEmail(r, jwtEmail)
+			return ha.resolveByEmail(r, jwtEmail, SourceJWT)
 		}
 		// No valid Bearer JWT — reject.  Do NOT fall through to X-Forwarded-Email.
+		// Audit: JWT mode with no credential at all.
+		ha.recordAuth(ctx, "", OutcomeDenied, SourceJWT, ReasonMissingCredential)
 		return r, fmt.Errorf("auth: bearer jwt required on direct sync routes")
 	}
 
@@ -201,22 +287,32 @@ func (ha *HeaderAuthenticator) Authorize(r *http.Request) (*http.Request, error)
 	// the request has passed through oauth2-proxy which injected it.
 	email := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Email")))
 	if email != "" {
-		return ha.resolveByEmail(r, email)
+		return ha.resolveByEmail(r, email, SourceOAuth)
 	}
 
-	// No credentials present.
+	// No credentials present in header mode.
+	// Audit: missing X-Forwarded-Email — source is oauth (header mode path).
+	ha.recordAuth(ctx, "", OutcomeDenied, SourceOAuth, ReasonMissingCredential)
 	return r, fmt.Errorf("auth: X-Forwarded-Email is required")
 }
 
 // resolveByEmail looks up the principal for email, enforces the lifecycle matrix,
 // and returns an enriched request with the principal in context on success.
-func (ha *HeaderAuthenticator) resolveByEmail(r *http.Request, email string) (*http.Request, error) {
+// source (SourceJWT or SourceOAuth) is threaded from the caller so audit rows
+// carry the correct source without re-inferring it inside this function.
+func (ha *HeaderAuthenticator) resolveByEmail(r *http.Request, email, source string) (*http.Request, error) {
+	ctx := r.Context()
+
 	if !strings.HasSuffix(email, "@vivastudios.com") {
+		// Audit: wrong domain — not a @vivastudios.com address.
+		ha.recordAuth(ctx, email, OutcomeDenied, source, ReasonInvalidDomain)
 		return r, fmt.Errorf("auth: email %q is not a @vivastudios.com address", email)
 	}
 
 	p, ok := ha.loader.Lookup(email)
 	if !ok {
+		// Audit: email not found in provisioned users.
+		ha.recordAuth(ctx, email, OutcomeDenied, source, ReasonUnknownEmail)
 		return r, &AuthError{
 			Status: http.StatusForbidden,
 			Code:   "user_not_provisioned",
@@ -226,6 +322,8 @@ func (ha *HeaderAuthenticator) resolveByEmail(r *http.Request, email string) (*h
 
 	switch strings.ToLower(p.Status) {
 	case "removed":
+		// Audit: user account has been removed.
+		ha.recordAuth(ctx, email, OutcomeDenied, source, ReasonRemovedUser)
 		return r, &AuthError{
 			Status: http.StatusForbidden,
 			Code:   "account_removed",
@@ -234,16 +332,18 @@ func (ha *HeaderAuthenticator) resolveByEmail(r *http.Request, email string) (*h
 	case "offboarding":
 		// Offboarding: push (POST) allowed; all other methods (GET etc.) blocked.
 		if r.Method != http.MethodPost {
+			// Audit: offboarding user attempting read access.
+			ha.recordAuth(ctx, email, OutcomeDenied, source, ReasonAccountOffboarding)
 			return r, &AuthError{
 				Status: http.StatusForbidden,
 				Code:   "account_offboarding",
 				Msg:    fmt.Sprintf("user %q account is offboarding; read access is disabled", email),
 			}
 		}
-		// Write path: allowed — fall through to store principal.
+		// Write path: allowed — fall through to store principal (no audit row for allowed sync requests).
 	}
 
-	return r.WithContext(context.WithValue(r.Context(), principalContextKey{}, &p)), nil
+	return r.WithContext(context.WithValue(ctx, principalContextKey{}, &p)), nil
 }
 
 // principalFromContext retrieves the *users.Principal stored by Authorize.

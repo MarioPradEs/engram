@@ -194,6 +194,10 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			_ = cs.Close()
 			return nil, fmt.Errorf("newCloudRuntime: configure header authenticator: %w", err)
 		}
+		// PR2: wire *CloudStore as the auth audit recorder into HeaderAuthenticator.
+		// This instruments deny sites and bypass-acceptance in header_auth.go.
+		// Uses the setter so no existing NewHeaderAuthenticatorWithJWT call site is changed.
+		headerAuth.SetAuditRecorder(cs)
 		// SIGHUP → reload user directory so operator changes take effect without restart.
 		// D6: also reload classrules when configured (fan-out, each reload is independent).
 		classrulesFile := strings.TrimSpace(cfg.ClassrulesFile)
@@ -247,6 +251,9 @@ var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
 			// Register GET /auth endpoint for CLI OAuth loopback flow (Opción A).
 			// Requires ENGRAM_JWT_SECRET to be set (validated below via validateCloudServeAuthConfig).
 			cloudserver.WithAuthEndpoint(loader, jwtSecret),
+			// PR2: wire *CloudStore as audit recorder for the autoLoginFromHeader OAuth mint
+			// success site. The recorder also fires for deny sites via headerAuth (set above).
+			cloudserver.WithAuditRecorder(cs),
 			// Wire configurable JWT TTL: parse ENGRAM_JWT_TTL once at startup; both
 			// handleAuth and autoLoginFromHeader use s.jwtTTL via MintJWT.
 			cloudserver.WithJWTTTL(resolveJWTTTL()),

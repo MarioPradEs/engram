@@ -213,6 +213,11 @@ func (s parityStoreStub) ListAuditEntriesPaginated(_ context.Context, _ cloudsto
 	return s.auditRows, len(s.auditRows), nil
 }
 
+// ListAuthAuditEntriesPaginated — no-op stub for interface parity (PR3).
+func (s parityStoreStub) ListAuthAuditEntriesPaginated(_ context.Context, _, _ int) ([]cloudstore.AuthAuditEntry, int, error) {
+	return nil, 0, nil
+}
+
 // GetObservationBySyncID — looks up by syncID alone. Stub scans s.observations.
 func (s parityStoreStub) GetObservationBySyncID(scope *cloudstore.ReadScope, syncID string) (cloudstore.DashboardObservationRow, error) {
 	for _, obs := range s.observations {

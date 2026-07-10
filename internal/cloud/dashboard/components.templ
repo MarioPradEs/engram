@@ -823,7 +823,7 @@ templ ContributorDetailPage(contributor *cloudstore.DashboardContributorRow, ses
 
 // adminNav renders the shared admin sub-navigation bar.
 // active should be one of: "overview", "projects", "users", "games", "departments",
-// "rules", "health", "audit-log", "deletion-requests".
+// "rules", "health", "audit-log", "auth-audit-log", "deletion-requests".
 // pendingCount drives the badge on the Deletion Requests link; 0 suppresses it.
 templ adminNav(active string, pendingCount int) {
 	<div class="admin-nav">
@@ -866,6 +866,11 @@ templ adminNav(active string, pendingCount int) {
 			<a href="/dashboard/admin/audit-log" class="active">Audit Log</a>
 		} else {
 			<a href="/dashboard/admin/audit-log">Audit Log</a>
+		}
+		if active == "auth-audit-log" {
+			<a href="/dashboard/admin/audit-log/auth" class="active">Auth Audit Log</a>
+		} else {
+			<a href="/dashboard/admin/audit-log/auth">Auth Audit Log</a>
 		}
 		if active == "deletion-requests" {
 			<a href="/dashboard/admin/deletion-requests" class="active">Deletion Requests
@@ -1381,6 +1386,65 @@ templ AdminAuditLogListPartial(entries []cloudstore.DashboardAuditRow, pg Pagina
 				</tbody>
 			</table>
 			@HtmxPaginationBar(pg, "/dashboard/admin/audit-log/list", "#audit-log-content", "#audit-contributor, #audit-project, #audit-outcome, #audit-from, #audit-to")
+		}
+	</div>
+}
+
+// ─── Phase 10: Auth Audit Log Admin Views (PR3) ──────────────────────────────
+
+// AdminAuthAuditLogPage renders the admin auth audit log shell page.
+// The HTMX container triggers loading the list partial on page load.
+// Route: GET /dashboard/admin/audit-log/auth (separate from sync-audit at /audit-log).
+// displayName is accepted for signature parity with AdminAuditLogPage; the page chrome supplies the name via Layout.
+templ AdminAuthAuditLogPage(displayName string, pendingCount int) {
+	<section class="frame-section">
+		<div class="section-header">
+			<div>
+				<p class="section-kicker">ADMIN SURFACE</p>
+				<h2>Auth Audit Log</h2>
+			</div>
+		</div>
+		@adminNav("auth-audit-log", pendingCount)
+		<div id="auth-audit-log-content"
+			hx-get="/dashboard/admin/audit-log/auth/list"
+			hx-trigger="load"
+			hx-swap="innerHTML">
+			<p class="muted">Loading auth audit log...</p>
+		</div>
+	</section>
+}
+
+// AdminAuthAuditLogListPartial renders the auth audit log table with pagination.
+// Columns: occurred_at, email, outcome, source, reason_code.
+// Partial-only (no Layout wrapper) — mirrors N7 contract of sync-audit list partial.
+templ AdminAuthAuditLogListPartial(entries []cloudstore.AuthAuditEntry, pg Pagination) {
+	<div>
+		if len(entries) == 0 {
+			@EmptyState("No Auth Events", "No authentication audit log entries are available.")
+		} else {
+			<table class="data-table">
+				<thead>
+					<tr>
+						<th>Time</th>
+						<th>Email</th>
+						<th>Outcome</th>
+						<th>Source</th>
+						<th>Reason Code</th>
+					</tr>
+				</thead>
+				<tbody>
+					for _, entry := range entries {
+						<tr>
+							<td>{ formatTimestampStr(entry.OccurredAt) }</td>
+							<td>{ entry.Email }</td>
+							<td>{ entry.Outcome }</td>
+							<td>{ entry.Source }</td>
+							<td>{ entry.ReasonCode }</td>
+						</tr>
+					}
+				</tbody>
+			</table>
+			@HtmxPaginationBar(pg, "/dashboard/admin/audit-log/auth/list", "#auth-audit-log-content", "")
 		}
 	</div>
 }

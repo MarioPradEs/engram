@@ -106,6 +106,13 @@ type cloudServerRuntime interface {
 	Start() error
 }
 
+// authAuditPruner is the minimal interface required by pruneAuthAuditLog90Days.
+// *cloudstore.CloudStore satisfies it via PruneAuthAuditBefore.
+// Extracted as an interface so the prune helper can be tested without a real DB.
+type authAuditPruner interface {
+	PruneAuthAuditBefore(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
 type defaultCloudRuntime struct {
 	server   *cloudserver.CloudServer
 	store    *cloudstore.CloudStore
@@ -145,7 +152,40 @@ func (r *defaultCloudRuntime) Start() error {
 			}
 		}()
 	}
+	// PR3 (H1): auth audit log 90-day retention prune ticker.
+	// Runs an initial prune at startup then fires every 24h.
+	// Uses r.ctx for cancellation on shutdown — goroutine exits cleanly when the
+	// server stops. Prune errors are logged at WARN and swallowed (failure-safe).
+	go func() {
+		pruneAuthAuditLog90Days(r.ctx, r.store)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pruneAuthAuditLog90Days(r.ctx, r.store)
+			case <-r.ctx.Done():
+				return
+			}
+		}
+	}()
 	return r.server.Start()
+}
+
+// pruneAuthAuditLog90Days deletes auth audit log entries older than 90 days.
+// It is extracted as a named function so it can be called from the ticker goroutine
+// AND tested independently with a mock pruner. Errors are logged at WARN and swallowed —
+// they must NEVER crash the server or surface to the auth path.
+func pruneAuthAuditLog90Days(ctx context.Context, pruner authAuditPruner) {
+	cutoff := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	n, err := pruner.PruneAuthAuditBefore(ctx, cutoff)
+	if err != nil {
+		log.Printf("WARN [engram-cloud] pruneAuthAuditLog90Days: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[engram-cloud] pruned %d auth audit log entries older than 90 days", n)
+	}
 }
 
 var newCloudRuntime = func(cfg cloud.Config) (cloudServerRuntime, error) {
